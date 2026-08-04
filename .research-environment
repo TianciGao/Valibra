@@ -1,0 +1,4 @@
+BIRD-Interact ADK isolated agent-research environment
+
+Production evaluation scripts are intentionally blocked in this working tree.
+Use scripts/research_preflight.sh and scripts/start_research_services.sh.

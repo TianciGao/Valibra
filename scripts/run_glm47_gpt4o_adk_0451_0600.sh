@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/research_production_guard.sh"
+research_block_production_script "${BASH_SOURCE[0]}"
+
 PROJECT_DIR="/home/user/code/BIRD-Interact/BIRD-Interact-ADK"
 cd "$PROJECT_DIR"
 export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"

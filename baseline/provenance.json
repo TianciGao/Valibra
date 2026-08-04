@@ -1,0 +1,27 @@
+{
+  "created_at": "2026-08-04T15:01:25Z",
+  "source_directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK",
+  "research_directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research",
+  "baseline_commit": "ff6226a7a082ee1f8f49c1abc3328a42b0da2d69",
+  "baseline_tree": "47977b22f9a1d2dd5a7af8efe83f74fe973a1228",
+  "copy_validation": "rsync archive checksum comparison returned no differences",
+  "full_dataset_isolation": {
+    "mode": "independent local copy replacing the baseline symlink",
+    "source": "/home/user/code/BIRD-Interact/Dataset/bird-interact-full",
+    "destination": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/bird-interact-full",
+    "file_count": 98,
+    "checksum_validation": "rsync archive checksum comparison returned no differences"
+  },
+  "excluded_dynamic_or_sensitive_paths": [
+    ".venv-adk/",
+    "results/",
+    ".env",
+    ".git/",
+    "__pycache__/",
+    ".pytest_cache/",
+    "*.pyc"
+  ],
+  "full_input_sha256": "a051f7a78462d6c17e840c048ea15c4be65b9f8eed61aad3d2df1370561b10c0",
+  "dependency_freeze_sha256": "9547676da779f6033170ba88e92d19e401abe6bd87d59e385b8f93a5b332f948",
+  "requirements_sha256": "4715c026ba4176ebcaec6328898e1e43a38178f7d2e3ef1c4347604829e9e0e4"
+}

@@ -1,0 +1,29 @@
+name: bird-interact-adk-agent-research
+
+services:
+  postgresql_full_research:
+    image: docker.io/shawnxxh/bird-interact-postgresql-full:latest
+    container_name: bird_interact_postgresql_full_research
+    profiles: ["full"]
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: "123123"
+      TZ: "Asia/Hong_Kong"
+    volumes:
+      - postgresql_data_full_research:/var/lib/postgresql/data
+    command:
+      - "-c"
+      - "max_connections=300"
+      - "-c"
+      - "shared_buffers=256MB"
+    ports:
+      - "127.0.0.1:6433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  postgresql_data_full_research:
+    name: bird_interact_adk_agent_research_postgresql_data_full

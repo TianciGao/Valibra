@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/research_production_guard.sh"
+research_block_production_script "${BASH_SOURCE[0]}"
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$PROJECT_ROOT/.venv-adk/bin/python"
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

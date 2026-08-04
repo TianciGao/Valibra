@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/research_production_guard.sh"
+research_block_production_script "${BASH_SOURCE[0]}"
+
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 export PYTHONPATH="$PROJECT_DIR"

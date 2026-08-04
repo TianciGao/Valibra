@@ -1,0 +1,29 @@
+{
+  "validated_at": "2026-08-04T15:08:45Z",
+  "python_version": "3.12.3",
+  "venv_mode": "fresh venv created with --copies",
+  "dependency_freeze_exact": true,
+  "pip_check": "passed",
+  "shell_syntax": "passed",
+  "python_syntax": "passed",
+  "unit_tests": {
+    "passed": 23,
+    "failed": 0
+  },
+  "offline_agent_construction": {
+    "c-interact_tools": 2,
+    "a-interact_tools": 9
+  },
+  "credential_shaped_matches_outside_excluded_data": 0,
+  "full_dataset_independent_copy": true,
+  "research_ports": {
+    "system_agent": 6100,
+    "user_simulator": 6101,
+    "db_environment": 6102,
+    "postgresql_full": 6433
+  },
+  "production_ports": [6000, 6001, 6002, 5433],
+  "production_runner_guard_exit_code": 86,
+  "research_database_started_during_validation": false,
+  "research_services_started_during_validation": false
+}

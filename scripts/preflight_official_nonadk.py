@@ -96,7 +96,7 @@ def inspect_container_log() -> dict[str, Any]:
         [
             "docker",
             "inspect",
-            "bird_interact_postgresql_full",
+            "bird_interact_postgresql_full_research",
             "--format",
             "{{json .}}",
         ],
@@ -106,7 +106,7 @@ def inspect_container_log() -> dict[str, Any]:
     )
     container = json.loads(inspect.stdout)
     logs = subprocess.run(
-        ["docker", "logs", "bird_interact_postgresql_full"],
+        ["docker", "logs", "bird_interact_postgresql_full_research"],
         text=True,
         capture_output=True,
         check=True,
@@ -132,7 +132,7 @@ def main() -> None:
     )
     parser.add_argument("--official-root", default=str(DEFAULT_OFFICIAL_ROOT))
     parser.add_argument("--db-host", default="127.0.0.1")
-    parser.add_argument("--db-port", type=int, default=5433)
+    parser.add_argument("--db-port", type=int, default=6433)
     parser.add_argument("--output")
     parser.add_argument("--skip-db", action="store_true")
     args = parser.parse_args()

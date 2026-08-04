@@ -855,8 +855,8 @@ def main() -> None:
             "--user_num_threads", "1",
             "--start_index", str(global_index - 1),
             "--limit", "1",
-            "--db_host", "127.0.0.1",
-            "--db_port", "5433",
+            "--db_host", settings.pg_host,
+            "--db_port", str(settings.pg_port),
             "--log_level", "DEBUG",
             "--log_file", str(log_path),
             "--verbose",
@@ -896,7 +896,9 @@ def main() -> None:
         if len(statuses) != 1:
             raise RuntimeError(f"Expected one status for task {global_index}, got {len(statuses)}")
         try:
-            cleanup = reset_database(record["selected_database"], "127.0.0.1", 5433)
+            cleanup = reset_database(
+                record["selected_database"], settings.pg_host, settings.pg_port
+            )
             envelope = task_envelope(
                 global_index,
                 record,

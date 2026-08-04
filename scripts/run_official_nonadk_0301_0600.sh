@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/research_production_guard.sh"
+research_block_production_script "${BASH_SOURCE[0]}"
+
 ADK_ROOT="/home/user/code/BIRD-Interact/BIRD-Interact-ADK"
 OFFICIAL_ROOT="/home/user/code/BIRD-Interact/bird_interact_agent"
 PYTHON_BIN="$ADK_ROOT/.venv-adk/bin/python"

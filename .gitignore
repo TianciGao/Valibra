@@ -10,6 +10,7 @@ build/
 .env
 .venv/
 .venv-adk/
+.venv-research/
 .conda-py310/
 .conda-pkgs/
 .pip-cache/
@@ -20,6 +21,7 @@ build/
 
 # Results & logs
 results/
+research-runtime/
 *.log
 batch_evaluation.log
 

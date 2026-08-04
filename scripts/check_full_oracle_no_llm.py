@@ -71,7 +71,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--db-env", default="http://127.0.0.1:6002")
+    parser.add_argument("--db-env", default="http://127.0.0.1:6102")
     parser.add_argument("--concurrency", type=int, default=5)
     args = parser.parse_args()
 
