@@ -1,0 +1,20 @@
+{
+  "model": "openai/glm-5.2",
+  "thinking": {
+    "type": "enabled",
+    "clear_thinking": false
+  },
+  "reasoning_effort": "max",
+  "max_tokens": 65536,
+  "temperature": 0.0,
+  "tool_choice": "auto",
+  "history": {
+    "configuration_sha256": "230c8ff86210bca2d5844d820ea58be000b34a03eb32bb7664fcad60e569cedf",
+    "prediction_sha256": "a9cc153256e536b1da5048a460519e47138851389865b82057a131628c7b6aaa",
+    "result_directory": "results/official_full_glm52_max65536_s0501_0600_merged_20260730T125230Z",
+    "global_index_range": [
+      501,
+      600
+    ]
+  }
+}

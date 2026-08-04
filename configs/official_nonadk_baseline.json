@@ -1,0 +1,33 @@
+{
+  "repository": "https://github.com/bird-bench/BIRD-Interact",
+  "commit": "451fe2c3518ee1cf908d8139e2913483bd519381",
+  "verified_on": "2026-08-01",
+  "official_environment": {
+    "sqlglot": "26.16.4",
+    "sqlglotrs": "0.4.0"
+  },
+  "bird_interact_agent_sha256": {
+    "experiments/utils/prompts.py": "c6181d0a25f5cdb05356fdc86ca72fdebd316f2ea623014cb7a8fb571099403e",
+    "src/envs/user_simulator/prompts.py": "5af403999dbfb83417659ac3f13f16598d4123503de1958e22304652aa863a2f",
+    "src/envs/__init__.py": "597811ee48487cd898740b6754170c77414e46ff1f3275b638ef432e9f83adab",
+    "batch_run_bird_interact/main.py": "3763e48f36475ae89e4c48667714dd3c856a1a12bf0da1c16aa67bbd7579bf8b",
+    "batch_run_bird_interact/prompt_utils.py": "4293650a00fb964a0c01da7556ca4fda867298546f7f79d50eb9db43c17e5213",
+    "batch_run_bird_interact/action_handler.py": "aedeb5acf6a0eec2d14d33a30d0fdac43d2be31b693f67cd65b7a8dd1f765832",
+    "batch_run_bird_interact/sample_status.py": "62d594d74d661dd5a3488f78f2bfbe30f8d15d09213425a33a543ecd662f467f",
+    "src/envs/bird_interact_env/test_case_utils/db_utils.py": "c3e8577443fce62fdb77f3f6c12ac6010b36f64c52ca7649331cb0e812da299e",
+    "src/envs/bird_interact_env/test_case_utils/test_utils.py": "7f18aace3ead3e340c54ef2369a1b11b81e3bbe4bd5ab7156c7d2962cb21c4fa",
+    "src/llm_utils/call_api_batch.py": "d86bb84404c7afced3fff1a173b71776e75d4260889406236dab3fb345a26fab"
+  },
+  "locally_patched_files": [
+    "batch_run_bird_interact/main.py",
+    "src/envs/__init__.py",
+    "src/llm_utils/call_api_batch.py",
+    "src/llm_utils/frozen_provider.py"
+  ],
+  "patch_scope": [
+    "provider transport and raw response audit",
+    "lazy optional environment imports for the frozen batch path",
+    "strict empty-content GLM reasoning action recovery",
+    "terminal model-failure classification"
+  ]
+}

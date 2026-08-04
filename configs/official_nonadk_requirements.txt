@@ -1,0 +1,5 @@
+# BIRD-Interact upstream explicitly pins these versions for User Simulator SQL
+# parsing. Install after the base ADK requirements when recreating the frozen
+# non-ADK comparison environment.
+sqlglot==26.16.4
+sqlglotrs==0.4.0

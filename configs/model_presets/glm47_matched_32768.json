@@ -1,0 +1,11 @@
+{
+  "model": "openai/glm-4.7",
+  "thinking": {
+    "type": "enabled",
+    "clear_thinking": false
+  },
+  "max_tokens": 32768,
+  "temperature": 0.0,
+  "top_p": 0.95,
+  "tool_choice": "auto"
+}
