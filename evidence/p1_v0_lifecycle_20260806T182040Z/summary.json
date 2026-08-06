@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "p1_status": "PASS",
+  "variant": "V0",
+  "grounding_enabled": false,
+  "started_at_utc": "2026-08-06T18:30:41Z",
+  "finished_at_utc": "2026-08-06T18:33:26Z",
+  "repository": {
+    "directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research",
+    "branch": "research/main",
+    "baseline_head": "3afdf0ff04caa7890e88e6d72bc60a1902cf2da6",
+    "remote": "https://github.com/TianciGao/Valibra.git"
+  },
+  "offline_verification": {
+    "pip_check": "PASS",
+    "unittest": "PASS (38/38)",
+    "python_compile": "PASS",
+    "bash_syntax": "PASS",
+    "python": "3.12.3",
+    "fastapi": "0.139.2",
+    "pydantic": "2.13.4",
+    "uvicorn": "0.51.0",
+    "google_adk": "2.5.0"
+  },
+  "contract_checks": {
+    "nine_tool_names_order_signatures_functions_equal_b0": true,
+    "prompt_equal_b0": true,
+    "four_callbacks_delegate_exactly_once": true,
+    "budget_rejection_equal_b0": true,
+    "tool_override_equal_b0": true,
+    "submit_phase_behavior_shared_with_b0": true,
+    "http_contract_equal_b0": true,
+    "session_reset_reuse_cleanup": true,
+    "two_function_calls_same_turn": true,
+    "grounding_function_tool_absent": true,
+    "p2_types_and_logic_absent": true
+  },
+  "lifecycle": {
+    "persistent_pty_session": 65376,
+    "database_ready_attempt": 3,
+    "docker_health": "healthy",
+    "host_pg_isready": "accepting connections",
+    "round_10_seconds": "PASS",
+    "round_plus_30_seconds": "PASS",
+    "services": {
+      "user_simulator": {"port": 6101, "pid": 101691, "http": 200},
+      "db_environment": {"port": 6102, "pid": 101690, "http": 200},
+      "valibra_agent": {"port": 6110, "pid": 101692, "http": 200}
+    },
+    "valibra_health_configuration_sha256": "6849541fa7cdf8bd84a9698c887d30d6f073c61682dae4919fb7e1540833a0d7",
+    "normalized_model_sha256": "072c8a774f2680a204eb503e8bf63c11ff80a53562e72fc6b1062b76b246665f",
+    "exact_pid_stop": "PASS",
+    "service_pids_gone": true,
+    "research_ports_released": [6100, 6101, 6102, 6110, 6433],
+    "research_container_absent": true,
+    "research_network_absent": true,
+    "research_volume_preserved": "bird_interact_adk_agent_research_postgresql_data_full",
+    "runtime_directory_absent": true
+  },
+  "isolation": {
+    "run_session_called_during_lifecycle": false,
+    "provider_or_model_called": false,
+    "lite_or_full_evaluation_run": false,
+    "broad_kill_used": false,
+    "formal_ports_before_after_equal": true,
+    "formal_postgresql_id": "3d491a0ed13fa069fdd2ebfd13e3eb1a79fc3d64ba140c96a3c2be42225e89ff",
+    "formal_postgresql_started_at": "2026-08-03T17:48:30.680024131Z",
+    "formal_results_metadata_sha256_before": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "formal_results_metadata_sha256_after": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "formal_results_file_count_before": 6196,
+    "formal_results_file_count_after": 6196,
+    "formal_results_directory_stat_before_after": "4096|1785872593"
+  },
+  "retained_runtime_logs": false
+}
