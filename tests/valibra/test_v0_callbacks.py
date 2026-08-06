@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from system_agent import callbacks as baseline_callbacks
 from system_agent.tools import get_ainteract_tools
 from valibra_agent import grounding_callbacks
+from valibra_agent.requirement_grounding.models import RequirementGroundingRuntime
 
 
 class CallbackDelegationTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +34,8 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
             state={"budget_remaining": 1.0, "current_phase": 1}
         )
         valibra_context = SimpleNamespace(
-            state={"budget_remaining": 1.0, "current_phase": 1}
+            state={"budget_remaining": 1.0, "current_phase": 1},
+            function_call_id="call-rejected",
         )
         expected = await baseline_callbacks.before_tool_callback(
             tool, {"question": "q"}, baseline_context
@@ -44,11 +46,15 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(valibra_context.state, baseline_context.state)
         self.assertIn("MUST call submit_sql", actual["error"])
+        self.assertNotIn(
+            grounding_callbacks.GROUNDING_RUNTIME_KEY,
+            valibra_context.state,
+        )
 
     async def test_tool_response_override_matches_baseline(self):
         initial_state = {
-            "_budget_before": 5.0,
-            "budget_remaining": 4.0,
+            "task_id": "task-parity",
+            "budget_remaining": 5.0,
             "initial_budget": 5.0,
             "current_phase": 1,
             "tool_trajectory": [],
@@ -56,8 +62,20 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
             "_active_llm_call_index": 0,
         }
         baseline_context = SimpleNamespace(state=_copy_state(initial_state))
-        valibra_context = SimpleNamespace(state=_copy_state(initial_state))
+        valibra_context = SimpleNamespace(
+            state=_copy_state(initial_state),
+            function_call_id="call-parity",
+            invocation_id="invocation-parity",
+        )
         tool = SimpleNamespace(name="execute_sql")
+        expected_rejection = await baseline_callbacks.before_tool_callback(
+            tool, {"sql": "SELECT 1"}, baseline_context
+        )
+        actual_rejection = await grounding_callbacks.before_tool_callback(
+            tool, {"sql": "SELECT 1"}, valibra_context
+        )
+        self.assertIsNone(expected_rejection)
+        self.assertIsNone(actual_rejection)
         with patch.object(baseline_callbacks, "utc_now", return_value="fixed"):
             expected = await baseline_callbacks.after_tool_callback(
                 tool, {"sql": "SELECT 1"}, baseline_context, "ok"
@@ -66,20 +84,35 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
                 tool, {"sql": "SELECT 1"}, valibra_context, "ok"
             )
         self.assertEqual(actual, expected)
-        self.assertEqual(valibra_context.state, baseline_context.state)
         self.assertEqual(actual, "ok\n\n[SYSTEM NOTE: Remaining budget: 4.0/5.0]")
+        self.assertEqual(
+            valibra_context.state["budget_remaining"],
+            baseline_context.state["budget_remaining"],
+        )
+        valibra_event = dict(valibra_context.state["tool_trajectory"][0])
+        shadow = valibra_event.pop(grounding_callbacks.SHADOW_AUDIT_KEY)
+        self.assertEqual(valibra_event, baseline_context.state["tool_trajectory"][0])
+        self.assertEqual(shadow["function_call_id"], "call-parity")
+        runtime = RequirementGroundingRuntime.model_validate(
+            valibra_context.state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        self.assertEqual(runtime.pending_tool_calls, {})
+        self.assertEqual(runtime.grounding_revision, 0)
 
     async def test_two_function_calls_in_one_turn_share_baseline_state_machine(self):
         tools = {tool.name: tool for tool in get_ainteract_tools()}
         context = SimpleNamespace(
             state={
+                "task_id": "task-two-calls",
                 "budget_remaining": 5.0,
                 "initial_budget": 5.0,
                 "current_phase": 1,
                 "tool_trajectory": [],
                 "system_agent_llm_calls": [{"actions": []}],
                 "_active_llm_call_index": 0,
-            }
+            },
+            function_call_id="",
+            invocation_id="invocation-two-calls",
         )
         calls = [
             (tools["execute_sql"], {"sql": "SELECT 1"}, "row"),
@@ -90,7 +123,8 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         with patch.object(baseline_callbacks, "utc_now", return_value="fixed"):
-            for tool, args, response in calls:
+            for index, (tool, args, response) in enumerate(calls, start=1):
+                context.function_call_id = f"call-{index}"
                 rejection = await grounding_callbacks.before_tool_callback(
                     tool, args, context
                 )
@@ -104,6 +138,11 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
             [event["tool"] for event in context.state["tool_trajectory"]],
             ["execute_sql", "get_column_meaning"],
         )
+        runtime = RequirementGroundingRuntime.model_validate(
+            context.state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        self.assertEqual(runtime.pending_tool_calls, {})
+        self.assertEqual(len(runtime.processed_observation_ids), 2)
         self.assertEqual(
             [event["tool"] for event in context.state["system_agent_llm_calls"][0]["actions"]],
             ["execute_sql", "get_column_meaning"],

@@ -1,0 +1,26 @@
+{
+  "baseline_commit": "4f6185a7e77a810e13a898e6738a6f5badc00c2a",
+  "branch": "research/main",
+  "generated_at_utc": "2026-08-06T20:59:37Z",
+  "phase": "P3",
+  "result": "PASS",
+  "variant": "P3-NoOp-Shadow",
+  "updater": "noop",
+  "prompt_view_injected": false,
+  "semantic_frame_or_ambiguity_generated": false,
+  "provider_called": false,
+  "database_called": false,
+  "user_simulator_called": false,
+  "evaluation_run": false,
+  "adk_contract": {
+    "google_adk_version": "2.5.0",
+    "exact_function_call_id": true,
+    "official_on_tool_error_callback": true,
+    "fallback_or_guessed_call_id": false
+  },
+  "dependencies": {
+    "python": "3.12.3",
+    "pydantic": "2.13.4",
+    "sqlglot": "26.16.4"
+  }
+}

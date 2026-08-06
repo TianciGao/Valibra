@@ -1,4 +1,4 @@
-"""Valibra V0 runtime using the complete Baseline session implementation."""
+"""Valibra Shadow runtime using the complete Baseline session implementation."""
 
 from system_agent.adk_runtime import AdkRuntime as BaselineAdkRuntime
 from valibra_agent.agent import build_agent

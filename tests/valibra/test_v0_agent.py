@@ -72,6 +72,11 @@ class ValibraAgentParityTests(unittest.TestCase):
             self.valibra.after_tool_callback,
             grounding_callbacks.after_tool_callback,
         )
+        self.assertIs(
+            self.valibra.on_tool_error_callback,
+            grounding_callbacks.on_tool_error_callback,
+        )
+        self.assertIsNone(self.baseline.on_tool_error_callback)
 
     def test_non_ainteract_mode_delegates_to_baseline(self):
         baseline = build_baseline("c-interact")

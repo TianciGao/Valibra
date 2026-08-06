@@ -1,4 +1,4 @@
-"""Valibra V0 Agent: a behavior-preserving shell around the Baseline."""
+"""Valibra Shadow Agent: Baseline behavior plus NoOp grounding lifecycle."""
 
 from shared.config import settings
 from system_agent.agent import (
@@ -15,13 +15,14 @@ from valibra_agent.grounding_callbacks import (
     after_tool_callback,
     before_model_callback,
     before_tool_callback,
+    on_tool_error_callback,
 )
 
 
 def build_agent(mode: str = "a-interact") -> Agent:
-    """Build V0 while keeping the Baseline prompt, tools, and behavior.
+    """Build Shadow while keeping the Baseline prompt, tools, and behavior.
 
-    V0 is an a-interact shell.  Other modes delegate to the Baseline builder
+    Shadow is an a-interact shell. Other modes delegate to the Baseline builder
     so the shared HTTP mode field remains backward compatible.
     """
     if mode != "a-interact":
@@ -43,6 +44,7 @@ def build_agent(mode: str = "a-interact") -> Agent:
         after_model_callback=after_model_callback,
         before_tool_callback=before_tool_callback,
         after_tool_callback=after_tool_callback,
+        on_tool_error_callback=on_tool_error_callback,
         generate_content_config=types.GenerateContentConfig(
             temperature=settings.system_agent_temperature
         ),

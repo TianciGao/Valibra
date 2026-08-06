@@ -41,8 +41,12 @@ from valibra_agent.requirement_grounding.reducer import (
     validate_runtime,
 )
 from valibra_agent.requirement_grounding.service import (
+    GroundingControlError,
     GroundingServiceResult,
+    add_pending_tool_call,
     process_observation,
+    process_phase_transition,
+    remove_pending_tool_call,
 )
 from valibra_agent.requirement_grounding.telemetry import (
     increment_metrics,
@@ -61,6 +65,7 @@ __all__ = [
     "Evidence",
     "GroundedAmbiguityHypothesis",
     "GroundingEvidence",
+    "GroundingControlError",
     "GroundingServiceResult",
     "GroundingSlot",
     "InterpretationCandidate",
@@ -86,13 +91,16 @@ __all__ = [
     "ValibraError",
     "ValueSlot",
     "apply_patch",
+    "add_pending_tool_call",
     "build_noop_patch",
     "build_observation",
     "canonical_json",
     "increment_metrics",
     "process_observation",
+    "process_phase_transition",
     "record_failure",
     "render_prompt_view",
+    "remove_pending_tool_call",
     "set_last_error",
     "stable_digest",
     "validate_runtime",

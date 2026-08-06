@@ -1,0 +1,24 @@
+{
+  "pip_check": {
+    "command": "pip check",
+    "result": "PASS",
+    "summary": "No broken requirements found."
+  },
+  "unittest": {
+    "command": "python -m unittest discover -s tests -v",
+    "result": "PASS",
+    "tests_run": 101,
+    "tests_failed": 0,
+    "tests_errored": 0,
+    "pre_p3_tests_retained": 81,
+    "p3_tests_added": 20,
+    "suite_elapsed_seconds": 0.336
+  },
+  "compileall": {
+    "command": "python -m compileall valibra_agent tests/valibra",
+    "result": "PASS"
+  },
+  "warnings": [
+    "Existing StarletteDeprecationWarning for fastapi.testclient/httpx; no test failure."
+  ]
+}
