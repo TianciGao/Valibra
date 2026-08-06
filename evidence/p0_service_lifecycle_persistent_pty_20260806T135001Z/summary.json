@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "p0_status": "PASS",
+  "run_kind": "persistent_pty_lifecycle_review",
+  "started_at_utc": "20260806T135001Z",
+  "finished_at_utc": "2026-08-06T13:58:06Z",
+  "evidence_directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_persistent_pty_20260806T135001Z",
+  "pty": {
+    "session_id": 1715,
+    "opened": true,
+    "all_start_check_stop_steps_same_session": true,
+    "exit_code": 0
+  },
+  "constraints": {
+    "p1_started": false,
+    "valibra_agent_created": false,
+    "business_code_modified": false,
+    "scripts_or_config_modified": false,
+    "dependencies_installed": false,
+    "git_commit_created": false,
+    "named_postgresql_volume_deleted": false,
+    "provider_or_model_called": false,
+    "run_session_called": false,
+    "lite_or_full_evaluation_run": false,
+    "broad_kill_used": false
+  },
+  "baseline": {
+    "directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research",
+    "branch": "research/main",
+    "head": "aaf9dd73b79b254afb0d9f7c0893db8a30533ed1",
+    "tracked_changes_at_start": false,
+    "staged_changes_at_start": false,
+    "allowed_untracked_prefix": "evidence/"
+  },
+  "checks": [
+    {
+      "name": "start_gate_and_previous_evidence",
+      "status": "PASS"
+    },
+    {
+      "name": "before_state_snapshot",
+      "status": "PASS"
+    },
+    {
+      "name": "persistent_pty_open",
+      "status": "PASS",
+      "detail": "session_id=1715"
+    },
+    {
+      "name": "research_env_source_in_pty",
+      "status": "PASS"
+    },
+    {
+      "name": "research_db_start_in_pty",
+      "status": "PASS"
+    },
+    {
+      "name": "docker_health_healthy_within_300_seconds",
+      "status": "PASS"
+    },
+    {
+      "name": "host_pg_isready_accepting_in_same_observation",
+      "status": "PASS"
+    },
+    {
+      "name": "services_start_in_same_pty",
+      "status": "PASS"
+    },
+    {
+      "name": "round_10s_three_pids_exist_non_defunct",
+      "status": "PASS"
+    },
+    {
+      "name": "round_10s_cmdline_and_cwd",
+      "status": "PASS"
+    },
+    {
+      "name": "round_10s_ports_and_health",
+      "status": "PASS"
+    },
+    {
+      "name": "round_plus_30s_three_pids_exist_non_defunct",
+      "status": "PASS"
+    },
+    {
+      "name": "round_plus_30s_cmdline_and_cwd",
+      "status": "PASS"
+    },
+    {
+      "name": "round_plus_30s_ports_and_health",
+      "status": "PASS"
+    },
+    {
+      "name": "database_still_ready_during_both_rounds",
+      "status": "PASS"
+    },
+    {
+      "name": "no_run_session_or_provider_activity",
+      "status": "PASS"
+    },
+    {
+      "name": "exact_service_stop_script",
+      "status": "PASS"
+    },
+    {
+      "name": "service_pids_and_ports_gone_after_5s",
+      "status": "PASS"
+    },
+    {
+      "name": "exact_database_stop_script",
+      "status": "PASS"
+    },
+    {
+      "name": "research_ports_6100_6101_6102_6433_released",
+      "status": "PASS"
+    },
+    {
+      "name": "research_uvicorn_pid_container_network_absent",
+      "status": "PASS"
+    },
+    {
+      "name": "research_named_volume_preserved",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_port_state_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_postgresql_identity_and_start_time_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_fingerprint_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_file_count_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_dir_stat_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "tracked_or_staged_changes_after",
+      "status": "PASS"
+    }
+  ],
+  "diagnostic_note": {
+    "initial_cleanup_scan": "false positive because scanner matched its own Python command containing the word uvicorn",
+    "corrected_cleanup_scan": "excluded scanner PID and returned no matches; independent post-PTY scan also returned no matches"
+  },
+  "formal_results_before_after": {
+    "metadata_sha256_before": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "metadata_sha256_after": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "file_count_before": 6196,
+    "file_count_after": 6196
+  }
+}

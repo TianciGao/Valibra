@@ -1,0 +1,196 @@
+P0 BOUNDED RETRY START GATE
+reference=evidence/p0_service_lifecycle_20260806T131902Z
+retry_started_at=20260806T133342Z
+
+## pwd
+$ pwd -P
+exit_code=0
+/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+
+## branch
+$ git branch --show-current
+exit_code=0
+research/main
+
+## head
+$ git rev-parse HEAD
+exit_code=0
+aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+
+## status_porcelain
+$ git status --porcelain=v1 --untracked-files=all
+exit_code=0
+?? evidence/p0_service_lifecycle_20260806T131902Z.zip
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/07_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/08_final_git_status.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_20260806T131902Z/README.md
+?? evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+
+## tracked_diff
+$ git diff --exit-code
+exit_code=0
+
+## staged_diff
+$ git diff --cached --exit-code
+exit_code=0
+
+## previous_summary
+$ sed -n '1,260p' evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+exit_code=0
+{
+  "schema_version": 1,
+  "p0_status": "FAIL",
+  "started_at_utc": "20260806T131902Z",
+  "finished_at_utc": "2026-08-06T13:24:44Z",
+  "evidence_directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_20260806T131902Z",
+  "scope": {
+    "valibra_implemented": false,
+    "business_code_modified": false,
+    "dependencies_installed": false,
+    "real_model_called": false,
+    "evaluation_run": false,
+    "git_commit_created": false
+  },
+  "baseline": {
+    "directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research",
+    "branch": "research/main",
+    "head": "aaf9dd73b79b254afb0d9f7c0893db8a30533ed1",
+    "git_archive_sha256": "2ebb507a50863b3888fef02618ea59fb505731f9ec6d8cfe5ee5e2ce2c74a0ab",
+    "tracked_manifest_sha256": "074a8a0183a22e6f4f5460ee0fd322ec9678708deed75024020c8b3d5e2621fd"
+  },
+  "checks": [
+    {
+      "name": "start_worktree_clean",
+      "status": "PASS"
+    },
+    {
+      "name": "branch_research_main",
+      "status": "PASS"
+    },
+    {
+      "name": "research_environment_isolation",
+      "status": "PASS"
+    },
+    {
+      "name": "research_preflight",
+      "status": "PASS"
+    },
+    {
+      "name": "pip_check",
+      "status": "PASS"
+    },
+    {
+      "name": "unittest_23_of_23",
+      "status": "PASS"
+    },
+    {
+      "name": "research_db_start_command",
+      "status": "PASS"
+    },
+    {
+      "name": "postgres_6433_ready_within_readiness_window",
+      "status": "FAIL"
+    },
+    {
+      "name": "http_services_start",
+      "status": "SKIPPED",
+      "reason": "hard readiness failure"
+    },
+    {
+      "name": "http_health_6100_6101_6102",
+      "status": "SKIPPED",
+      "reason": "services were not started"
+    },
+    {
+      "name": "cleanup_script",
+      "status": "PASS"
+    },
+    {
+      "name": "research_ports_released",
+      "status": "PASS"
+    },
+    {
+      "name": "research_container_removed",
+      "status": "PASS"
+    },
+    {
+      "name": "research_network_removed",
+      "status": "PASS"
+    },
+    {
+      "name": "research_pid_or_uvicorn_residual",
+      "status": "PASS",
+      "detail": "none"
+    },
+    {
+      "name": "formal_ports_same_as_before",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_postgres_container_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_metadata_sha_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_file_count_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_dir_stat_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "tracked_or_staged_git_changes",
+      "status": "PASS",
+      "detail": "none; evidence directory is untracked by design"
+    }
+  ],
+  "failure": {
+    "step": "PostgreSQL 6433 readiness",
+    "observation": "External pg_isready returned no response throughout the 60-second evidence window.",
+    "diagnosis": "A new named volume triggered first-time Full database initialization. Logs were still emitting INSERT 0 1. The container later reported healthy internally and exposed 6433, but only after the readiness window had failed.",
+    "minimal_recommendation": "Do not change business code. On an approved retry, use a documented longer bounded readiness window (for example 300 seconds) and require both Docker health=healthy and host pg_isready=accepting before starting HTTP services."
+  },
+  "cleanup": {
+    "research_container_remaining": false,
+    "research_network_remaining": false,
+    "research_uvicorn_remaining": false,
+    "research_pid_file_remaining": false,
+    "research_named_volume_remaining": "bird_interact_adk_agent_research_postgresql_data_full",
+    "volume_note": "Expected behavior of the existing stop_research_db.sh: named database volume is preserved."
+  },
+  "formal_results_before_after": {
+    "metadata_sha256_before": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "metadata_sha256_after": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "file_count_before": 6196,
+    "file_count_after": 6196
+  }
+}
+
+## previous_manifest_check
+$ cd evidence/p0_service_lifecycle_20260806T131902Z && sha256sum -c MANIFEST.sha256
+exit_code=0
+00_start_gate.txt: OK
+01_before_state.txt: OK
+02_script_review.txt: OK
+03_pre_artifact_state.txt: OK
+04_offline_checks.txt: OK
+05_versions_and_fingerprints.txt: OK
+06_database_start_and_failure.txt: OK
+07_cleanup_and_after_state.txt: OK
+08_final_git_status.txt: OK
+README.md: OK
+summary.json: OK
+
+

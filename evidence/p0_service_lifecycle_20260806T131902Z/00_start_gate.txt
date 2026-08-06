@@ -1,0 +1,28 @@
+P0 START GATE
+UTC=20260806T131902Z
+
+## resolved_workdir
+$ pwd -P
+exit_code=0
+/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+
+## branch
+$ git branch --show-current
+exit_code=0
+research/main
+
+## head
+$ git rev-parse HEAD
+exit_code=0
+aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+
+## porcelain
+$ git status --porcelain=v1 --untracked-files=all
+exit_code=0
+
+## status
+$ git status --short --branch
+exit_code=0
+## research/main
+
+

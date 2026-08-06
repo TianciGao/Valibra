@@ -1,0 +1,34 @@
+P0 FINAL GIT STATUS
+Only the new evidence directory is untracked. There are no tracked or staged changes.
+
+$ git status --short --branch --untracked-files=all
+## research/main
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/07_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/08_final_git_status.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_20260806T131902Z/README.md
+?? evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+
+$ find evidence directory -maxdepth 1 -type f
+00_start_gate.txt	436
+01_before_state.txt	3037
+02_script_review.txt	7946
+03_pre_artifact_state.txt	368
+04_offline_checks.txt	6082
+05_versions_and_fingerprints.txt	6029
+06_database_start_and_failure.txt	7982
+07_cleanup_and_after_state.txt	6511
+08_final_git_status.txt	21
+MANIFEST.sha256	889
+README.md	1242
+summary.json	4106
+
+allowed_untracked_prefix=evidence/p0_service_lifecycle_20260806T131902Z/
+unexpected_paths=0

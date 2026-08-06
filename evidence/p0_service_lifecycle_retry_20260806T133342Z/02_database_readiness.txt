@@ -1,0 +1,75 @@
+P0 RETRY DATABASE START AND DUAL READINESS
+max_wait_seconds=300
+
+## research_env
+$ source scripts/research_env.sh; print safe isolation fields
+exit_code=0
+PWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+VIRTUAL_ENV=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research
+SYSTEM_AGENT_PORT=6100
+USER_SIM_PORT=6101
+DB_ENV_PORT=6102
+PG_PORT=6433
+SYSTEM_AGENT_API_BASE=http://127.0.0.1:9
+USER_SIM_API_BASE=http://127.0.0.1:9
+
+## start_research_db
+$ source scripts/research_env.sh; bash scripts/start_research_db.sh
+exit_code=0
+ Network bird_interact_adk_agent_research_default Creating 
+ Network bird_interact_adk_agent_research_default Created 
+ Container bird_interact_postgresql_full_research Creating 
+ Container bird_interact_postgresql_full_research Created 
+ Container bird_interact_postgresql_full_research Starting 
+ Container bird_interact_postgresql_full_research Started 
+Research PostgreSQL: 127.0.0.1:6433
+
+## bounded_dual_readiness
+$ docker health + host pg_isready loop
+exit_code=0
+attempt=1 time=2026-08-06T13:34:54Z docker_health=healthy pg_rc=0 pg=127.0.0.1:6433 - accepting connections
+
+## inspect_health
+$ docker inspect bird_interact_postgresql_full_research --format '{{json .State}}'
+exit_code=0
+{"Status":"running","Running":true,"Paused":false,"Restarting":false,"OOMKilled":false,"Dead":false,"Pid":123129,"ExitCode":0,"Error":"","StartedAt":"2026-08-06T13:34:43.543598883Z","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy","FailingStreak":0,"Log":[{"Start":"2026-08-06T13:34:48.723015069Z","End":"2026-08-06T13:34:48.802042545Z","ExitCode":1,"Output":"/var/run/postgresql:5432 - rejecting connections\n"},{"Start":"2026-08-06T13:34:53.802932648Z","End":"2026-08-06T13:34:53.874795447Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"},{"Start":"2026-08-06T13:34:58.876381308Z","End":"2026-08-06T13:34:58.941665223Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"},{"Start":"2026-08-06T13:35:03.942207609Z","End":"2026-08-06T13:35:04.003062399Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"}]}}
+
+## pg_isready
+$ pg_isready -h 127.0.0.1 -p 6433 -U root
+exit_code=0
+127.0.0.1:6433 - accepting connections
+
+## compose_ps
+$ docker compose -p bird_interact_adk_agent_research -f docker-compose.research.yml --profile full ps --all
+exit_code=0
+NAME                                     IMAGE                                                     COMMAND                  SERVICE                    CREATED          STATUS                    PORTS
+bird_interact_postgresql_full_research   docker.io/shawnxxh/bird-interact-postgresql-full:latest   "docker-entrypoint.s…"   postgresql_full_research   21 seconds ago   Up 20 seconds (healthy)   127.0.0.1:6433->5432/tcp
+
+## ss
+$ ss -ltnp
+exit_code=0
+State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096        127.0.0.1:55980      0.0.0.0:*          
+LISTEN 0      4096        127.0.0.1:6433       0.0.0.0:*          
+LISTEN 0      1000   10.255.255.254:53         0.0.0.0:*          
+LISTEN 0      4096                *:5433             *:*          
+
+## db_logs_tail
+$ docker logs --tail 120 bird_interact_postgresql_full_research
+exit_code=0
+2026-08-06 21:34:43.812 HKT [1] LOG:  starting PostgreSQL 14.12 (Debian 14.12-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit
+2026-08-06 21:34:43.812 HKT [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-08-06 21:34:43.812 HKT [1] LOG:  listening on IPv6 address "::", port 5432
+2026-08-06 21:34:43.822 HKT [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-06 21:34:43.835 HKT [27] LOG:  database system was interrupted; last known up at 2026-08-06 21:21:37 HKT
+2026-08-06 21:34:48.800 HKT [36] FATAL:  the database system is starting up
+2026-08-06 21:34:51.437 HKT [27] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-08-06 21:34:51.447 HKT [27] LOG:  redo starts at 0/18036C8
+2026-08-06 21:34:51.511 HKT [27] LOG:  invalid record length at 0/2AC3890: wanted 24, got 0
+2026-08-06 21:34:51.511 HKT [27] LOG:  redo done at 0/2AC3868 system usage: CPU: user: 0.01 s, system: 0.03 s, elapsed: 0.06 s
+2026-08-06 21:34:52.178 HKT [1] LOG:  database system is ready to accept connections
+
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+
+
+

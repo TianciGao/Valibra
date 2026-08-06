@@ -1,0 +1,67 @@
+P0 PERSISTENT PTY: OPEN, SOURCE, DATABASE
+pty_session_id=1715
+
+## open
+session_id=1715
+exit_code=
+bash-5.2$ 
+## source_env
+session_id=1715
+exit_code=
+source scripts/research_env.sh
+(.venv-research) bash-5.2$ source_rc=$?
+(.venv-research) bash-5.2$ <PORT" "$SYSTEM_AGENT_API_BASE" "$USER_SIM_API_BASE"
+__P0_SOURCE__ rc=0 pwd=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research venv=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research ports=6100,6101,6102,6433 agent_base=http://127.0.0.1:9 user_base=http://127.0.0.1:9
+(.venv-research) bash-5.2$ 
+## start_database
+session_id=1715
+exit_code=
+bash scripts/start_research_db.sh
+[+] up 1/2
+ ✔ Network bird_interact_adk_agent_research_default Created                 0.0s
+ ⠋ Container bird_interact_postgresql_full_research Creating                0.0s
+[+] up 2/2
+ ✔ Network bird_interact_adk_agent_research_default Created                 0.0s
+ ✔ Container bird_interact_postgresql_full_research Created                 0.1s
+[+] up 1/2
+ ✔ Network bird_interact_adk_agent_research_default Created                 0.0s
+ ⠙ Container bird_interact_postgresql_full_research Starting                0.2s
+[+] up 2/2
+ ✔ Network bird_interact_adk_agent_research_default Created                 0.0s
+ ✔ Container bird_interact_postgresql_full_research Started                 0.3s
+Research PostgreSQL: 127.0.0.1:6433
+(.venv-research) bash-5.2$ printf '__P0_DB_START__ rc=%s\n' "$?"
+__P0_DB_START__ rc=0
+(.venv-research) bash-5.2$ 
+## dual_readiness
+session_id=1715
+exit_code=
+p0_deadline=$((SECONDS+300))
+(.venv-research) bash-5.2$ p0_attempt=0
+(.venv-research) bash-5.2$ p0_db_ready=1
+(.venv-research) bash-5.2$ while (( SECONDS <= p0_deadline )); do
+>   p0_attempt=$((p0_attempt+1))
+>   p0_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+> <{{else}}none{{end}}' 2>/dev/null || printf missing)
+>   p0_pg=$(pg_isready -h 127.0.0.1 -p 6433 -U root 2>&1)
+>   p0_pg_rc=$?
+> <ttempt" "$p0_now" "$p0_health" "$p0_pg_rc" "$p0_pg"
+> <ing connections"* ]]; then p0_db_ready=0; break; fi
+>   sleep 5
+> done
+__P0_DB_WAIT__ attempt=1 time=2026-08-06T13:51:21Z health=healthy pg_rc=0 pg=127.0.0.1:6433 - accepting connections
+(.venv-research) bash-5.2$ <_ rc=%s attempts=%s\n' "$p0_db_ready" "$p0_attempt"
+__P0_DB_READY__ rc=0 attempts=1
+(.venv-research) bash-5.2$ 
+## start_services
+session_id=1715
+exit_code=
+bash scripts/start_research_services.sh
+curl: (7) Failed to connect to 127.0.0.1 port 6102 after 0 ms: Couldn't connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 6100 after 0 ms: Couldn't connect to server
+Research services ready: System Agent 6100, User Simulator 6101, DB Environment 6102
+(.venv-research) bash-5.2$ p0_services_start_rc=$?
+(.venv-research) bash-5.2$ <0_SERVICES_START__ rc=%s\n' "$p0_services_start_rc"
+__P0_SERVICES_START__ rc=0
+(.venv-research) bash-5.2$ 
+

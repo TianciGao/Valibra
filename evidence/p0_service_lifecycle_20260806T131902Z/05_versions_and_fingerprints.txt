@@ -1,0 +1,217 @@
+P0 VERSIONS AND SOURCE FINGERPRINTS
+UTC=20260806T131902Z
+
+## python_version
+$ bash -lc 'source scripts/research_env.sh; python --version; pip --version'
+exit_code=0
+Python 3.12.3
+pip 24.0 from /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/lib/python3.12/site-packages/pip (python 3.12)
+
+## key_dependencies
+$ bash -lc 'source scripts/research_env.sh; python -c "from importlib.metadata import version; [print(f\"{p}=={version(p)}\") for p in [\"google-adk\",\"litellm\",\"pydantic\",\"sqlglot\",\"fastapi\",\"uvicorn\",\"psycopg2-binary\"]]"'
+exit_code=0
+google-adk==2.5.0
+litellm==1.93.0
+pydantic==2.13.4
+sqlglot==26.16.4
+fastapi==0.139.2
+uvicorn==0.51.0
+psycopg2-binary==2.9.12
+
+## pip_freeze
+$ bash -lc 'source scripts/research_env.sh; python -m pip freeze --all'
+exit_code=0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+aiosqlite==0.22.1
+annotated-doc==0.0.4
+annotated-types==0.8.0
+anyio==4.14.2
+attrs==26.1.0
+Authlib==1.7.2
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+click==8.4.2
+cloudpickle==3.1.2
+cryptography==49.0.0
+distro==1.9.0
+Farama-Notifications==0.0.6
+fastapi==0.139.2
+fastuuid==0.14.0
+filelock==3.32.0
+frozenlist==1.8.0
+fsspec==2026.6.0
+google-adk==2.5.0
+google-auth==2.56.2
+google-genai==2.14.0
+graphviz==0.21
+gymnasium==1.1.1
+h11==0.16.0
+hf-xet==1.5.2
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+huggingface_hub==1.24.0
+idna==3.18
+importlib_metadata==8.9.0
+Jinja2==3.1.6
+jiter==0.16.0
+joserfc==1.7.4
+jsonlines==4.0.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+litellm==1.93.0
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+multidict==6.7.1
+numpy==2.5.1
+openai==2.48.0
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1
+opentelemetry-semantic-conventions==0.63b1
+packaging==26.2
+pip==24.0
+propcache==0.5.2
+psycopg2-binary==2.9.12
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pydantic_core==2.46.4
+Pygments==2.20.0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+PyYAML==6.0.3
+referencing==0.37.0
+regex==2026.7.19
+requests==2.34.2
+rich==15.0.0
+rpds-py==2026.6.3
+sniffio==1.3.1
+sqlglot==26.16.4
+sqlglotrs==0.4.0
+sqlparse==0.5.2
+starlette==1.3.1
+tenacity==9.1.4
+tiktoken==0.13.0
+tokenizers==0.23.1
+tqdm==4.69.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+tzlocal==5.4.4
+urllib3==2.7.0
+uvicorn==0.51.0
+uvloop==0.22.1
+watchdog==6.0.0
+watchfiles==1.2.0
+websockets==15.0.1
+yarl==1.24.5
+zipp==4.1.0
+
+## git_show
+$ git show -s --format=fuller HEAD
+exit_code=0
+commit aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+Author:     BIRD Interact Research <bird-interact-research@local>
+AuthorDate: Tue Aug 4 18:09:09 2026 +0300
+Commit:     BIRD Interact Research <bird-interact-research@local>
+CommitDate: Tue Aug 4 18:11:26 2026 +0300
+
+    chore: isolate agent research runtime from production
+
+## git_archive_sha
+$ git archive --format=tar HEAD | sha256sum
+exit_code=0
+2ebb507a50863b3888fef02618ea59fb505731f9ec6d8cfe5ee5e2ce2c74a0ab  -
+
+## tracked_manifest_sha
+$ git ls-files -z | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
+exit_code=0
+074a8a0183a22e6f4f5460ee0fd322ec9678708deed75024020c8b3d5e2621fd  -
+
+## research_scripts_sha
+$ sha256sum scripts/research_env.sh scripts/research_preflight.sh scripts/start_research_db.sh scripts/start_research_services.sh scripts/stop_research_services.sh scripts/stop_research_db.sh docker-compose.research.yml
+exit_code=0
+6d576440f3ee65713fd6fd5a681fda261c3a963352fbb9d88d096b1fc1faf903  scripts/research_env.sh
+1751ae70016e21856231778a665c0bff9f5b8c1acd868421f3038c7148cf4adc  scripts/research_preflight.sh
+0b4d0d4c88dbf62d33c40bf09d74c574290915c02970f151f433ab5da5691483  scripts/start_research_db.sh
+3e4455bd8c14853225874b3a153f82fdb463369e692bcc84dbc0df4028966c34  scripts/start_research_services.sh
+a58ceed099cc54c092bd5f989482addf3c73ecb40d95adb5942cb6f27d04ece0  scripts/stop_research_services.sh
+5f7e17ee610ef424bddea6fd68490b3d35b344efaf9df643a35e8e2b6f8d9c78  scripts/stop_research_db.sh
+54add4e1597c9ae598c6a813647ca516818cec142d4315eae3e0f2dfdce20f16  docker-compose.research.yml
+
+## baseline_validation
+$ sed -n '1,260p' baseline/validation.json
+exit_code=0
+{
+  "validated_at": "2026-08-04T15:08:45Z",
+  "python_version": "3.12.3",
+  "venv_mode": "fresh venv created with --copies",
+  "dependency_freeze_exact": true,
+  "pip_check": "passed",
+  "shell_syntax": "passed",
+  "python_syntax": "passed",
+  "unit_tests": {
+    "passed": 23,
+    "failed": 0
+  },
+  "offline_agent_construction": {
+    "c-interact_tools": 2,
+    "a-interact_tools": 9
+  },
+  "credential_shaped_matches_outside_excluded_data": 0,
+  "full_dataset_independent_copy": true,
+  "research_ports": {
+    "system_agent": 6100,
+    "user_simulator": 6101,
+    "db_environment": 6102,
+    "postgresql_full": 6433
+  },
+  "production_ports": [6000, 6001, 6002, 5433],
+  "production_runner_guard_exit_code": 86,
+  "research_database_started_during_validation": false,
+  "research_services_started_during_validation": false
+}
+
+## docker_versions
+$ docker version && docker compose version
+exit_code=0
+Client: Docker Engine - Community
+ Version:           29.5.2
+ API version:       1.54
+ Go version:        go1.26.3
+ Git commit:        79eb04c
+ Built:             Wed May 20 14:42:18 2026
+ OS/Arch:           linux/amd64
+ Context:           default
+
+Server: Docker Desktop 4.83.0 (234302)
+ Engine:
+  Version:          29.6.2
+  API version:      1.55 (minimum version 1.40)
+  Go version:       go1.26.5
+  Git commit:       3d80467
+  Built:            Thu Jul 16 16:12:20 2026
+  OS/Arch:          linux/amd64
+  Experimental:     false
+ containerd:
+  Version:          v2.2.5
+  GitCommit:        e53c7c1516c3b2bff98eb76f1f4117477e6f4e66
+ runc:
+  Version:          1.3.6
+  GitCommit:        v1.3.6-0-g491b69ba
+ docker-init:
+  Version:          0.19.0
+  GitCommit:        de40ad0
+Docker Compose version v5.3.1
+
+## os
+$ uname -a
+exit_code=0
+Linux WIN-NA47PFKP4OS 6.6.114.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Mon Dec  1 20:46:23 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+

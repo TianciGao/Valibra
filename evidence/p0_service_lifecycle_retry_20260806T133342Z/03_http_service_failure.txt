@@ -1,0 +1,124 @@
+P0 RETRY HTTP SERVICE START AND HARD FAILURE
+
+## start_research_services
+$ source scripts/research_env.sh; bash scripts/start_research_services.sh
+exit_code=0
+curl: (7) Failed to connect to 127.0.0.1 port 6102 after 0 ms: Couldn't connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 6100 after 0 ms: Couldn't connect to server
+Research services ready: System Agent 6100, User Simulator 6101, DB Environment 6102
+
+## health_6100
+$ curl --noproxy '*' --silent --show-error --fail-with-body --max-time 5 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6100/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6100 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## health_6101
+$ curl --noproxy '*' --silent --show-error --fail-with-body --max-time 5 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6101/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6101 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## health_6102
+$ curl --noproxy '*' --silent --show-error --fail-with-body --max-time 5 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6102/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6102 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## ss
+$ ss -ltnp
+exit_code=0
+State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096        127.0.0.1:55980      0.0.0.0:*          
+LISTEN 0      4096        127.0.0.1:6433       0.0.0.0:*          
+LISTEN 0      1000   10.255.255.254:53         0.0.0.0:*          
+LISTEN 0      4096                *:5433             *:*          
+
+## pid_validation
+$ bash -lc 'test -f research-runtime/service_pids || exit 1
+while IFS= read -r pid; do
+  printf "PID=%s\n" "$pid"
+  ps -o pid=,ppid=,lstart=,args= -p "$pid"
+  printf "CWD="; readlink "/proc/$pid/cwd"
+  printf "EXE="; readlink "/proc/$pid/exe"
+done < research-runtime/service_pids'
+exit_code=1
+PID=79790
+  79790      20 Thu Aug  6 16:35:32 2026 [python] <defunct>
+CWD=EXE=PID=79791
+  79791      20 Thu Aug  6 16:35:32 2026 [python] <defunct>
+CWD=EXE=PID=79792
+  79792      20 Thu Aug  6 16:35:32 2026 [python] <defunct>
+CWD=EXE=
+## pid_file
+$ stat -c '%n\t%s\t%Y' research-runtime/service_pids && sed -n '1,20p' research-runtime/service_pids
+exit_code=0
+research-runtime/service_pids\t18\t1786023333
+79790
+79791
+79792
+
+## db_dual_ready
+$ bash -lc 'docker inspect bird_interact_postgresql_full_research --format "health={{.State.Health.Status}} status={{.State.Status}}"; pg_isready -h 127.0.0.1 -p 6433 -U root'
+exit_code=0
+health=healthy status=running
+127.0.0.1:6433 - accepting connections
+
+## compose_ps
+$ docker compose -p bird_interact_adk_agent_research -f docker-compose.research.yml --profile full ps --all
+exit_code=0
+NAME                                     IMAGE                                                     COMMAND                  SERVICE                    CREATED              STATUS                        PORTS
+bird_interact_postgresql_full_research   docker.io/shawnxxh/bird-interact-postgresql-full:latest   "docker-entrypoint.s…"   postgresql_full_research   About a minute ago   Up About a minute (healthy)   127.0.0.1:6433->5432/tcp
+
+## service_logs
+$ bash -lc 'for f in research-runtime/logs/db_environment.log research-runtime/logs/user_simulator.log research-runtime/logs/system_agent.log; do printf "FILE=%s\n" "$f"; sed -n "1,240p" "$f"; done'
+exit_code=0
+FILE=research-runtime/logs/db_environment.log
+INFO:     Started server process [79790]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:6102 (Press CTRL+C to quit)
+INFO:     127.0.0.1:34902 - "GET /health HTTP/1.1" 200 OK
+FILE=research-runtime/logs/user_simulator.log
+INFO:     Started server process [79791]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:6101 (Press CTRL+C to quit)
+INFO:     127.0.0.1:37714 - "GET /health HTTP/1.1" 200 OK
+FILE=research-runtime/logs/system_agent.log
+INFO:     Started server process [79792]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:6100 (Press CTRL+C to quit)
+INFO:     127.0.0.1:40104 - "GET /health HTTP/1.1" 200 OK
+
+## provider_activity_scan
+$ if grep -RniE 'POST .*127\.0\.0\.1:9|api\.gptsapi|anthropic\.com|openai\.com|provider.*request' research-runtime/logs; then exit 1; else echo no_provider_request_markers; fi
+exit_code=0
+no_provider_request_markers
+
+## formal_http_6000
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6000/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6000 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## formal_http_6001
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6001/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6001 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## formal_http_6002
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6002/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6002 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+

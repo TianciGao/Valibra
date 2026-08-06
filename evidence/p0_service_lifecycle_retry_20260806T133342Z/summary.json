@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "p0_status": "FAIL",
+  "run_kind": "bounded_retry_after_20260806T131902Z",
+  "started_at_utc": "20260806T133342Z",
+  "finished_at_utc": "2026-08-06T13:37:38Z",
+  "evidence_directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_retry_20260806T133342Z",
+  "constraints": {
+    "business_code_modified": false,
+    "scripts_or_config_modified": false,
+    "dependencies_installed": false,
+    "git_commit_created": false,
+    "named_postgresql_volume_deleted": false,
+    "run_session_called": false,
+    "provider_or_model_called": false,
+    "lite_or_full_evaluation_run": false,
+    "broad_kill_used": false
+  },
+  "baseline": {
+    "directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research",
+    "branch": "research/main",
+    "head": "aaf9dd73b79b254afb0d9f7c0893db8a30533ed1",
+    "tracked_changes_at_start": false,
+    "staged_changes_at_start": false,
+    "allowed_existing_untracked_prefix": "evidence/"
+  },
+  "checks": [
+    {
+      "name": "start_gate",
+      "status": "PASS"
+    },
+    {
+      "name": "before_port_and_formal_result_snapshot",
+      "status": "PASS"
+    },
+    {
+      "name": "research_db_start_script",
+      "status": "PASS"
+    },
+    {
+      "name": "docker_health_healthy_within_300_seconds",
+      "status": "PASS"
+    },
+    {
+      "name": "host_pg_isready_accepting_within_300_seconds",
+      "status": "PASS"
+    },
+    {
+      "name": "dual_readiness_same_observation",
+      "status": "PASS",
+      "detail": "attempt 1 at 2026-08-06T13:34:54Z"
+    },
+    {
+      "name": "start_research_services_script",
+      "status": "PASS",
+      "detail": "script-internal health checks logged HTTP 200"
+    },
+    {
+      "name": "persistent_health_6100",
+      "status": "FAIL",
+      "detail": "explicit post-script curl returned connection refused"
+    },
+    {
+      "name": "persistent_health_6101",
+      "status": "FAIL",
+      "detail": "explicit post-script curl returned connection refused"
+    },
+    {
+      "name": "persistent_health_6102",
+      "status": "FAIL",
+      "detail": "explicit post-script curl returned connection refused"
+    },
+    {
+      "name": "provider_activity",
+      "status": "PASS",
+      "detail": "no request markers; /run_session not called"
+    },
+    {
+      "name": "stop_research_services_script",
+      "status": "PASS"
+    },
+    {
+      "name": "stop_research_db_script",
+      "status": "PASS"
+    },
+    {
+      "name": "research_ports_released",
+      "status": "PASS"
+    },
+    {
+      "name": "research_uvicorn_or_pid_remaining",
+      "status": "PASS",
+      "detail": "none"
+    },
+    {
+      "name": "research_container_remaining",
+      "status": "PASS",
+      "detail": "none"
+    },
+    {
+      "name": "research_network_remaining",
+      "status": "PASS",
+      "detail": "none"
+    },
+    {
+      "name": "research_named_volume_preserved",
+      "status": "PASS",
+      "detail": "bird_interact_adk_agent_research_postgresql_data_full"
+    },
+    {
+      "name": "formal_port_state_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_postgresql_container_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_fingerprint_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_count_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_dir_stat_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "tracked_or_staged_changes_after",
+      "status": "PASS",
+      "detail": "none"
+    }
+  ],
+  "failure": {
+    "step": "Explicit health verification after scripts/start_research_services.sh returned",
+    "evidence": "All three service logs show successful startup and one HTTP 200 health request from the script. Immediately after the script returned, PIDs 79790/79791/79792 were defunct and explicit curls to 6100/6101/6102 returned connection refused.",
+    "likely_cause": "The existing script backgrounds uvicorn processes inside a transient exec shell. The command execution supervisor appears to terminate or reap descendant processes when that shell exits. This is an execution-lifecycle issue, not an observed application startup or Provider failure.",
+    "minimal_next_step": "On a separately authorized retry, keep one persistent shell/PTY alive for start → external health → PID validation → stop while still invoking the same existing scripts. Do not change business code. If unattended service persistence outside a supervising shell is required, treat that as a separate script/supervisor design change."
+  },
+  "cleanup": {
+    "research_ports_6100_6101_6102_6433_released": true,
+    "research_uvicorn_remaining": false,
+    "pid_file_remaining": false,
+    "research_container_remaining": false,
+    "research_network_remaining": false,
+    "named_volume_preserved": "bird_interact_adk_agent_research_postgresql_data_full",
+    "runtime_logs_moved_into_evidence": true
+  },
+  "formal_results_before_after": {
+    "metadata_sha256_before": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "metadata_sha256_after": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "file_count_before": 6196,
+    "file_count_after": 6196
+  }
+}

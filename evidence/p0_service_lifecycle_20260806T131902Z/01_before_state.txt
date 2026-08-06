@@ -1,0 +1,95 @@
+P0 BEFORE STATE
+UTC=20260806T131902Z
+
+## ss
+$ ss -ltnp
+exit_code=0
+State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096        127.0.0.1:55980      0.0.0.0:*          
+LISTEN 0      1000   10.255.255.254:53         0.0.0.0:*          
+LISTEN 0      4096                *:5433             *:*          
+
+## docker_ps
+$ docker ps --no-trunc --format ...
+exit_code=0
+3d491a0ed13fa069fdd2ebfd13e3eb1a79fc3d64ba140c96a3c2be42225e89ff	bird_interact_postgresql_full	docker.io/shawnxxh/bird-interact-postgresql-full:latest	0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp	Up 2 days
+3d0a8a2a879e640728c2798cfe9a68c953485eb5a40bb8ea7a4003c15e08fdd6	kind-worker	jacksonarthurclark/aiopslab-kind-x86@sha256:d631857278d3f8ce5c36364c75ec25695ceb22e311ec6621a4ebf5506b86774d		Up 2 days
+3398f775bccf1cf3f6646da021b1f971eae9fd2ca409fd3e38bc687da0cc8628	kind-control-plane	jacksonarthurclark/aiopslab-kind-x86@sha256:d631857278d3f8ce5c36364c75ec25695ceb22e311ec6621a4ebf5506b86774d	127.0.0.1:55980->6443/tcp	Up 2 days
+
+## docker_compose_ps
+$ docker compose -p bird-interact-adk-agent-research ps --all
+exit_code=0
+NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
+
+## pg_5433
+$ pg_isready -h 127.0.0.1 -p 5433 -U root
+exit_code=0
+127.0.0.1:5433 - accepting connections
+
+## pg_6433
+$ pg_isready -h 127.0.0.1 -p 6433 -U root
+exit_code=2
+127.0.0.1:6433 - no response
+
+## pid_files
+$ find . -maxdepth 4 -type f -name '*.pid' ...
+exit_code=0
+
+## formal_results_sha
+$ find formal/results -type f -printf metadata | sort | sha256sum
+exit_code=0
+365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288  -
+
+## formal_results_count
+$ find formal/results -type f | wc -l
+exit_code=0
+6196
+
+## formal_results_dir_stat
+$ stat formal/results
+exit_code=0
+/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results\tdirectory\t4096\t1785872593
+
+## http_6000
+$ curl --noproxy '*' --max-time 2 http://127.0.0.1:6000/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6000 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6001
+$ curl --noproxy '*' --max-time 2 http://127.0.0.1:6001/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6001 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6002
+$ curl --noproxy '*' --max-time 2 http://127.0.0.1:6002/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6002 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6100
+$ curl --noproxy '*' --max-time 2 http://127.0.0.1:6100/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6100 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6101
+$ curl --noproxy '*' --max-time 2 http://127.0.0.1:6101/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6101 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6102
+$ curl --noproxy '*' --max-time 2 http://127.0.0.1:6102/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6102 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+

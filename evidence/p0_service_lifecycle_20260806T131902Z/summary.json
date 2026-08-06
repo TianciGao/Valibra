@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "p0_status": "FAIL",
+  "started_at_utc": "20260806T131902Z",
+  "finished_at_utc": "2026-08-06T13:24:44Z",
+  "evidence_directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_20260806T131902Z",
+  "scope": {
+    "valibra_implemented": false,
+    "business_code_modified": false,
+    "dependencies_installed": false,
+    "real_model_called": false,
+    "evaluation_run": false,
+    "git_commit_created": false
+  },
+  "baseline": {
+    "directory": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research",
+    "branch": "research/main",
+    "head": "aaf9dd73b79b254afb0d9f7c0893db8a30533ed1",
+    "git_archive_sha256": "2ebb507a50863b3888fef02618ea59fb505731f9ec6d8cfe5ee5e2ce2c74a0ab",
+    "tracked_manifest_sha256": "074a8a0183a22e6f4f5460ee0fd322ec9678708deed75024020c8b3d5e2621fd"
+  },
+  "checks": [
+    {
+      "name": "start_worktree_clean",
+      "status": "PASS"
+    },
+    {
+      "name": "branch_research_main",
+      "status": "PASS"
+    },
+    {
+      "name": "research_environment_isolation",
+      "status": "PASS"
+    },
+    {
+      "name": "research_preflight",
+      "status": "PASS"
+    },
+    {
+      "name": "pip_check",
+      "status": "PASS"
+    },
+    {
+      "name": "unittest_23_of_23",
+      "status": "PASS"
+    },
+    {
+      "name": "research_db_start_command",
+      "status": "PASS"
+    },
+    {
+      "name": "postgres_6433_ready_within_readiness_window",
+      "status": "FAIL"
+    },
+    {
+      "name": "http_services_start",
+      "status": "SKIPPED",
+      "reason": "hard readiness failure"
+    },
+    {
+      "name": "http_health_6100_6101_6102",
+      "status": "SKIPPED",
+      "reason": "services were not started"
+    },
+    {
+      "name": "cleanup_script",
+      "status": "PASS"
+    },
+    {
+      "name": "research_ports_released",
+      "status": "PASS"
+    },
+    {
+      "name": "research_container_removed",
+      "status": "PASS"
+    },
+    {
+      "name": "research_network_removed",
+      "status": "PASS"
+    },
+    {
+      "name": "research_pid_or_uvicorn_residual",
+      "status": "PASS",
+      "detail": "none"
+    },
+    {
+      "name": "formal_ports_same_as_before",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_postgres_container_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_metadata_sha_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_file_count_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "formal_results_dir_stat_unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "tracked_or_staged_git_changes",
+      "status": "PASS",
+      "detail": "none; evidence directory is untracked by design"
+    }
+  ],
+  "failure": {
+    "step": "PostgreSQL 6433 readiness",
+    "observation": "External pg_isready returned no response throughout the 60-second evidence window.",
+    "diagnosis": "A new named volume triggered first-time Full database initialization. Logs were still emitting INSERT 0 1. The container later reported healthy internally and exposed 6433, but only after the readiness window had failed.",
+    "minimal_recommendation": "Do not change business code. On an approved retry, use a documented longer bounded readiness window (for example 300 seconds) and require both Docker health=healthy and host pg_isready=accepting before starting HTTP services."
+  },
+  "cleanup": {
+    "research_container_remaining": false,
+    "research_network_remaining": false,
+    "research_uvicorn_remaining": false,
+    "research_pid_file_remaining": false,
+    "research_named_volume_remaining": "bird_interact_adk_agent_research_postgresql_data_full",
+    "volume_note": "Expected behavior of the existing stop_research_db.sh: named database volume is preserved."
+  },
+  "formal_results_before_after": {
+    "metadata_sha256_before": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "metadata_sha256_after": "365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288",
+    "file_count_before": 6196,
+    "file_count_after": 6196
+  }
+}

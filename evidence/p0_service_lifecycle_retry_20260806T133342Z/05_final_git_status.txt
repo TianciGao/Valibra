@@ -1,0 +1,42 @@
+P0 BOUNDED RETRY FINAL GIT STATUS
+There are no tracked or staged changes. All untracked paths are under evidence/.
+
+$ git status --short --branch --untracked-files=all
+## research/main
+?? evidence/p0_service_lifecycle_20260806T131902Z.zip
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/07_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/08_final_git_status.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_20260806T131902Z/README.md
+?? evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/02_database_readiness.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/03_http_service_failure.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/04_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/05_final_git_status.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/README.md
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/summary.json
+
+$ find current evidence directory -maxdepth 4 -type f
+00_start_gate.txt	6115
+01_before_state.txt	6554
+02_database_readiness.txt	4471
+03_http_service_failure.txt	5393
+04_cleanup_and_after_state.txt	9283
+05_final_git_status.txt	21
+README.md	1405
+research-runtime/logs/db_environment.log	256
+research-runtime/logs/system_agent.log	256
+research-runtime/logs/user_simulator.log	256
+summary.json	5285
+
+unexpected_non_evidence_untracked=0
+tracked_or_staged_lines=0

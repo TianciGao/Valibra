@@ -1,0 +1,178 @@
+P0 CLEANUP AND AFTER STATE
+finished_at=2026-08-06T13:24:44Z
+
+## stop_research_db
+$ source scripts/research_env.sh; bash scripts/stop_research_db.sh
+exit_code=0
+ Container bird_interact_postgresql_full_research Stopping 
+ Container bird_interact_postgresql_full_research Stopped 
+ Container bird_interact_postgresql_full_research Removing 
+ Container bird_interact_postgresql_full_research Removed 
+ Network bird_interact_adk_agent_research_default Removing 
+ Network bird_interact_adk_agent_research_default Removed 
+Research PostgreSQL stopped; its named volume was preserved.
+
+## ss
+$ ss -ltnp
+exit_code=0
+State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096        127.0.0.1:55980      0.0.0.0:*          
+LISTEN 0      1000   10.255.255.254:53         0.0.0.0:*          
+LISTEN 0      4096                *:5433             *:*          
+
+## docker_ps
+$ docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
+exit_code=0
+3d491a0ed13fa069fdd2ebfd13e3eb1a79fc3d64ba140c96a3c2be42225e89ff	bird_interact_postgresql_full	docker.io/shawnxxh/bird-interact-postgresql-full:latest	0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp	Up 2 days
+3d0a8a2a879e640728c2798cfe9a68c953485eb5a40bb8ea7a4003c15e08fdd6	kind-worker	jacksonarthurclark/aiopslab-kind-x86@sha256:d631857278d3f8ce5c36364c75ec25695ceb22e311ec6621a4ebf5506b86774d		Up 2 days
+3398f775bccf1cf3f6646da021b1f971eae9fd2ca409fd3e38bc687da0cc8628	kind-control-plane	jacksonarthurclark/aiopslab-kind-x86@sha256:d631857278d3f8ce5c36364c75ec25695ceb22e311ec6621a4ebf5506b86774d	127.0.0.1:55980->6443/tcp	Up 2 days
+
+## docker_compose_ps
+$ docker compose -p bird_interact_adk_agent_research -f docker-compose.research.yml --profile full ps --all
+exit_code=0
+NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
+
+## research_container_all
+$ docker ps -a --no-trunc --filter name=bird_interact_postgresql_full_research --format '{{.ID}}\t{{.Names}}\t{{.Status}}'
+exit_code=0
+
+## research_volumes
+$ docker volume ls --format '{{.Name}}' --filter name=bird_interact_adk_agent_research
+exit_code=0
+bird_interact_adk_agent_research_postgresql_data_full
+
+## research_networks
+$ docker network ls --format '{{.Name}}' --filter name=bird_interact_adk_agent_research
+exit_code=0
+
+## pg_5433
+$ pg_isready -h 127.0.0.1 -p 5433 -U root
+exit_code=0
+127.0.0.1:5433 - accepting connections
+
+## pg_6433
+$ pg_isready -h 127.0.0.1 -p 6433 -U root
+exit_code=2
+127.0.0.1:6433 - no response
+
+## runtime_after
+$ find research-runtime -maxdepth 3 -printf '%y\t%p\t%s\t%T@\n'
+exit_code=1
+find: ‘research-runtime’: No such file or directory
+
+## research_processes
+$ python3 -c 'import os
+for name in os.listdir("/proc"):
+    if not name.isdigit(): continue
+    try: cmd=open(f"/proc/{name}/cmdline","rb").read().replace(b"\0",b" ").decode("utf-8","replace")
+    except OSError: continue
+    if ".venv-research/bin/python" in cmd and "uvicorn" in cmd: print(name,cmd)'
+exit_code=0
+77335 python3 -c import os
+for name in os.listdir("/proc"):
+    if not name.isdigit(): continue
+    try: cmd=open(f"/proc/{name}/cmdline","rb").read().replace(b"\0",b" ").decode("utf-8","replace")
+    except OSError: continue
+    if ".venv-research/bin/python" in cmd and "uvicorn" in cmd: print(name,cmd) 
+
+## formal_results_sha
+$ find /home/user/code/BIRD-Interact/BIRD-Interact-ADK/results -type f -printf '%P\t%s\t%T@\n' | LC_ALL=C sort | sha256sum
+exit_code=0
+365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288  -
+
+## formal_results_count
+$ find /home/user/code/BIRD-Interact/BIRD-Interact-ADK/results -type f | wc -l
+exit_code=0
+6196
+
+## formal_results_dir_stat
+$ stat -c '%n\t%F\t%s\t%Y' /home/user/code/BIRD-Interact/BIRD-Interact-ADK/results
+exit_code=0
+/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results\tdirectory\t4096\t1785872593
+
+## git_branch
+$ git branch --show-current
+exit_code=0
+research/main
+
+## git_head
+$ git rev-parse HEAD
+exit_code=0
+aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+
+## git_status
+$ git status --porcelain=v1 --untracked-files=all
+exit_code=0
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+
+## git_archive_sha
+$ git archive --format=tar HEAD | sha256sum
+exit_code=0
+2ebb507a50863b3888fef02618ea59fb505731f9ec6d8cfe5ee5e2ce2c74a0ab  -
+
+## http_6000
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6000/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6000 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6001
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6001/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6001 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6002
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6002/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6002 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6100
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6100/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6100 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6101
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6101/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6101 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6102
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6102/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6102 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## research_uvicorn
+$ research_uvicorn
+exit_code=0
+
+## tracked_diff
+$ tracked_diff
+exit_code=0
+
+## cached_diff
+$ cached_diff
+exit_code=0
+
+## finished_at
+$ finished_at
+exit_code=0
+2026-08-06T13:24:44Z
+
+

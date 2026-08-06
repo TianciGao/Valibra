@@ -1,0 +1,99 @@
+P0 PERSISTENT PTY: TWO SERVICE CHECK ROUNDS
+pty_session_id=1715
+
+## round_10_seconds
+session_id=1715
+exit_code=
+p0_check_services() {
+>   local round="$1"
+>   local failed=0
+>   local pid_file="$PWD/research-runtime/service_pids"
+> <er_simulator.server:app" "system_agent.server:app")
+>   local expected_ports=(6102 6101 6100)
+> <ime=%s\n' "$round" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+> <'PID_FILE_MISSING=%s\n' "$pid_file"; failed=1; else
+>     mapfile -t p0_pids < "$pid_file"
+>     printf 'PID_COUNT=%s PID_FILE=%s\n' "${#p0_pids[@]}" "$pid_file"
+>     [[ "${#p0_pids[@]}" -eq 3 ]] || failed=1
+>     local idx=0
+>     for pid in "${p0_pids[@]}"; do
+> < exe="" expected_module="${expected_modules[$idx]}"
+>       stat=$(ps -o stat= -p "$pid" 2>/dev/null | xargs)
+>       cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+>       cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+>       exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+> <s CMD=%s\n' "$pid" "$stat" "$cwd" "$exe" "$cmdline"
+>       kill -0 "$pid" 2>/dev/null || failed=1
+>       [[ -n "$stat" && "$stat" != *Z* ]] || failed=1
+>       [[ "$cwd" == "$PWD" ]] || failed=1
+> <on"*"-m uvicorn"*"$expected_module"* ]] || failed=1
+>       idx=$((idx+1))
+>     done
+>   fi
+>   for port in 6100 6101 6102; do
+>     local listener
+>     listener=$(ss -ltnp 2>/dev/null | grep -E ":$port[[:space:]]" || true)
+>     printf 'LISTENER_%s=%s\n' "$port" "$listener"
+>     [[ -n "$listener" ]] || failed=1
+>     local response curl_rc
+> <%{http_code}' "http://127.0.0.1:$port/health" 2>&1)
+>     curl_rc=$?
+>     printf 'HEALTH_%s_RC=%s RESPONSE=%s\n' "$port" "$curl_rc" "$response"
+> <& "$response" == *"HTTP_STATUS=200"* ]] || failed=1
+>   done
+>   local db_health db_pg db_pg_rc
+> <mat '{{.State.Health.Status}}' 2>/dev/null || true)
+>   db_pg=$(pg_isready -h 127.0.0.1 -p 6433 -U root 2>&1); db_pg_rc=$?
+> <RC=%s DB_PG=%s\n' "$db_health" "$db_pg_rc" "$db_pg"
+> <$db_pg" == *"accepting connections"* ]] || failed=1
+>   printf '__P0_CHECK_END__ round=%s rc=%s\n' "$round" "$failed"
+>   return "$failed"
+> }
+(.venv-research) bash-5.2$ sleep 10
+(.venv-research) bash-5.2$ p0_check_services round_10s
+__P0_CHECK_BEGIN__ round=round_10s time=2026-08-06T13:52:57Z
+PID_COUNT=3 PID_FILE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/research-runtime/service_pids
+PID=85032 STAT=Sl CWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research EXE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python CMD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python -m uvicorn db_environment.server:app --host 127.0.0.1 --port 6102 --log-level info 
+PID=85033 STAT=Sl CWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research EXE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python CMD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python -m uvicorn user_simulator.server:app --host 127.0.0.1 --port 6101 --log-level info 
+PID=85034 STAT=Sl CWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research EXE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python CMD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python -m uvicorn system_agent.server:app --host 127.0.0.1 --port 6100 --log-level info 
+LISTENER_6100=LISTEN 0      2048        127.0.0.1:6100       0.0.0.0:*    users:(("python",pid=85034,fd=13))
+HEALTH_6100_RC=0 RESPONSE={"status":"healthy","service":"system_agent","model":"openai/glm-5.2","generation_parameters":{"thinking":{"type":"enabled","clear_thinking":false},"reasoning_effort":"high","max_tokens":32768,"temperature":0.0,"tool_choice":"auto"},"model_preset":{"name":"glm52_high_32768","normalized_sha256":"072c8a774f2680a204eb503e8bf63c11ff80a53562e72fc6b1062b76b246665f","file_sha256":"eff6f2b9be2c36233ebb39fbbaab160963404c67d7f3c83c31f2574010ccc83f"},"adk_available":true,"adk_error":""}
+HTTP_STATUS=200
+LISTENER_6101=LISTEN 0      2048        127.0.0.1:6101       0.0.0.0:*    users:(("python",pid=85033,fd=13))
+HEALTH_6101_RC=0 RESPONSE={"status":"healthy","service":"user_simulator"}
+HTTP_STATUS=200
+LISTENER_6102=LISTEN 0      2048        127.0.0.1:6102       0.0.0.0:*    users:(("python",pid=85032,fd=13))
+HEALTH_6102_RC=0 RESPONSE={"status":"healthy","service":"db_environment"}
+HTTP_STATUS=200
+DB_HEALTH=healthy DB_PG_RC=0 DB_PG=127.0.0.1:6433 - accepting connections
+__P0_CHECK_END__ round=round_10s rc=0
+(.venv-research) bash-5.2$ p0_round1_rc=$?
+(.venv-research) bash-5.2$ printf '__P0_ROUND1__ rc=%s\n' "$p0_round1_rc"
+__P0_ROUND1__ rc=0
+(.venv-research) bash-5.2$ 
+## round_plus_30_seconds
+session_id=1715
+exit_code=
+sleep 30
+(.venv-research) bash-5.2$ p0_check_services round_plus_30s
+__P0_CHECK_BEGIN__ round=round_plus_30s time=2026-08-06T13:53:58Z
+PID_COUNT=3 PID_FILE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/research-runtime/service_pids
+PID=85032 STAT=Sl CWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research EXE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python CMD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python -m uvicorn db_environment.server:app --host 127.0.0.1 --port 6102 --log-level info 
+PID=85033 STAT=Sl CWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research EXE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python CMD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python -m uvicorn user_simulator.server:app --host 127.0.0.1 --port 6101 --log-level info 
+PID=85034 STAT=Sl CWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research EXE=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python CMD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python -m uvicorn system_agent.server:app --host 127.0.0.1 --port 6100 --log-level info 
+LISTENER_6100=LISTEN 0      2048        127.0.0.1:6100       0.0.0.0:*    users:(("python",pid=85034,fd=13))
+HEALTH_6100_RC=0 RESPONSE={"status":"healthy","service":"system_agent","model":"openai/glm-5.2","generation_parameters":{"thinking":{"type":"enabled","clear_thinking":false},"reasoning_effort":"high","max_tokens":32768,"temperature":0.0,"tool_choice":"auto"},"model_preset":{"name":"glm52_high_32768","normalized_sha256":"072c8a774f2680a204eb503e8bf63c11ff80a53562e72fc6b1062b76b246665f","file_sha256":"eff6f2b9be2c36233ebb39fbbaab160963404c67d7f3c83c31f2574010ccc83f"},"adk_available":true,"adk_error":""}
+HTTP_STATUS=200
+LISTENER_6101=LISTEN 0      2048        127.0.0.1:6101       0.0.0.0:*    users:(("python",pid=85033,fd=13))
+HEALTH_6101_RC=0 RESPONSE={"status":"healthy","service":"user_simulator"}
+HTTP_STATUS=200
+LISTENER_6102=LISTEN 0      2048        127.0.0.1:6102       0.0.0.0:*    users:(("python",pid=85032,fd=13))
+HEALTH_6102_RC=0 RESPONSE={"status":"healthy","service":"db_environment"}
+HTTP_STATUS=200
+DB_HEALTH=healthy DB_PG_RC=0 DB_PG=127.0.0.1:6433 - accepting connections
+__P0_CHECK_END__ round=round_plus_30s rc=0
+(.venv-research) bash-5.2$ p0_round2_rc=$?
+(.venv-research) bash-5.2$ printf '__P0_ROUND2__ rc=%s\n' "$p0_round2_rc"
+__P0_ROUND2__ rc=0
+(.venv-research) bash-5.2$ 
+

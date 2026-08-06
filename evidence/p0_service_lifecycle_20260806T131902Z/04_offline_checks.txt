@@ -1,0 +1,85 @@
+P0 OFFLINE CHECKS
+UTC=20260806T131902Z
+
+## research_env
+$ source scripts/research_env.sh; print safe isolation fields
+exit_code=0
+PWD=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+VIRTUAL_ENV=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research
+PYTHONPATH=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+DATASET=full
+SYSTEM_AGENT_PORT=6100
+USER_SIM_PORT=6101
+DB_ENV_PORT=6102
+PG_PORT=6433
+SYSTEM_AGENT_API_BASE=http://127.0.0.1:9
+USER_SIM_API_BASE=http://127.0.0.1:9
+
+## research_preflight
+$ source scripts/research_env.sh; bash scripts/research_preflight.sh
+exit_code=0
+python_config_isolation=passed
+project_root=/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+model_preset=glm52_high_32768
+ports=6100,6101,6102
+postgres=127.0.0.1:6433
+docker_isolation=passed
+production_port_ownership=passed
+research_preflight=passed
+
+## pip_check
+$ source scripts/research_env.sh; pip check
+exit_code=0
+No broken requirements found.
+
+## unittest
+$ source scripts/research_env.sh; python -m unittest discover -s tests -v
+exit_code=0
+test_empty_preprocess_reuses_official_base_template (test_db_environment_state.DatabaseStateFlowTests.test_empty_preprocess_reuses_official_base_template) ... ok
+test_failed_reinitialization_does_not_keep_stale_state (test_db_environment_state.DatabaseStateFlowTests.test_failed_reinitialization_does_not_keep_stale_state) ... ok
+test_phase1_snapshot_uses_preprocess_state_then_cleanup (test_db_environment_state.DatabaseStateFlowTests.test_phase1_snapshot_uses_preprocess_state_then_cleanup) ... ok
+test_phase_maintenance_replays_only_analyze (test_db_environment_state.DatabaseStateFlowTests.test_phase_maintenance_replays_only_analyze) ... ok
+test_preprocess_creates_canonical_initial_snapshot (test_db_environment_state.DatabaseStateFlowTests.test_preprocess_creates_canonical_initial_snapshot) ... ok
+test_analyze_target_parsing (test_db_environment_state.EvaluatorCompatibilityTests.test_analyze_target_parsing) ... ok
+test_remove_distinct_preserves_postgresql_distinct_on (test_db_environment_state.EvaluatorCompatibilityTests.test_remove_distinct_preserves_postgresql_distinct_on) ... ok
+test_split_sql_preserves_dollar_quoted_function_body (test_db_environment_state.EvaluatorCompatibilityTests.test_split_sql_preserves_dollar_quoted_function_body) ... ok
+test_writable_cte_without_returning_is_not_fetched (test_db_environment_state.EvaluatorCompatibilityTests.test_writable_cte_without_returning_is_not_fetched) ... ok
+test_ask_user_503_is_not_returned_as_model_feedback (test_db_environment_state.InfrastructureFailureTests.test_ask_user_503_is_not_returned_as_model_feedback) ... ok
+test_submit_database_503_is_not_returned_as_model_feedback (test_db_environment_state.InfrastructureFailureTests.test_submit_database_503_is_not_returned_as_model_feedback) ... ok
+test_user_simulator_protocol_exhaustion_fails_task_uncheckpointed (test_db_environment_state.InfrastructureFailureTests.test_user_simulator_protocol_exhaustion_fails_task_uncheckpointed) ... User Simulator protocol violation during response_generator attempt 1/3: missing_protocol_tags
+User Simulator protocol violation during response_generator attempt 2/3: missing_protocol_tags
+User Simulator protocol violation during response_generator attempt 3/3: missing_protocol_tags
+ok
+test_user_simulator_protocol_extractor_never_invents_fallback (test_db_environment_state.InfrastructureFailureTests.test_user_simulator_protocol_extractor_never_invents_fallback) ... ok
+test_user_simulator_protocol_violation_is_retried_and_audited (test_db_environment_state.InfrastructureFailureTests.test_user_simulator_protocol_violation_is_retried_and_audited) ... User Simulator protocol violation during response_generator attempt 1/3: missing_protocol_tags
+ok
+test_user_simulator_provider_failure_is_not_replaced_by_fallback (test_db_environment_state.InfrastructureFailureTests.test_user_simulator_provider_failure_is_not_replaced_by_fallback) ... User Simulator LLM call failed
+Traceback (most recent call last):
+  File "/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/user_simulator/server.py", line 114, in _call_llm
+    details = call_llm_with_details(
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1193, in _execute_mock_call
+    raise effect
+RuntimeError: synthetic provider outage
+ok
+test_all_full_task_database_names_are_bounded_and_unique (test_db_environment_state.TaskDatabaseNameTests.test_all_full_task_database_names_are_bounded_and_unique) ... ok
+test_clone_refuses_to_drop_its_own_template (test_db_environment_state.TaskDatabaseNameTests.test_clone_refuses_to_drop_its_own_template) ... ok
+test_long_logical_names_no_longer_collide (test_db_environment_state.TaskDatabaseNameTests.test_long_logical_names_no_longer_collide) ... ok
+test_prompt_flow_uses_raw_prompt_and_budget_delta (test_nonadk_submission.NonAdkSubmissionTests.test_prompt_flow_uses_raw_prompt_and_budget_delta) ... ok
+test_rejected_post_budget_action_has_zero_cost (test_nonadk_submission.NonAdkSubmissionTests.test_rejected_post_budget_action_has_zero_cost) ... ok
+test_submission_validator_accepts_sanitized_record (test_nonadk_submission.NonAdkSubmissionTests.test_submission_validator_accepts_sanitized_record) ... ok
+test_submission_validator_rejects_ground_truth_keys (test_nonadk_submission.NonAdkSubmissionTests.test_submission_validator_rejects_ground_truth_keys) ... ok
+test_successful_phase1_submit_is_not_mislabeled_as_phase2 (test_nonadk_submission.NonAdkSubmissionTests.test_successful_phase1_submit_is_not_mislabeled_as_phase2) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 0.185s
+
+OK
+
+

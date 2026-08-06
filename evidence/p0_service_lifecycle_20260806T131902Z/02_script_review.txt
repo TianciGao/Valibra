@@ -1,0 +1,232 @@
+## scripts/research_env.sh
+exit_code=0
+#!/usr/bin/env bash
+
+# Source this file from a shell before running research commands.
+RESEARCH_PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ ! -f "$RESEARCH_PROJECT_DIR/.research-environment" ]]; then
+    echo "Research marker missing: $RESEARCH_PROJECT_DIR" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+export PYTHONPATH="$RESEARCH_PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
+export MODEL_PRESET="${MODEL_PRESET:-glm52_high_32768}"
+export DATASET=full
+export PROMPT_VERSION=v2
+export PATIENCE=3
+
+export PG_HOST=127.0.0.1
+export PG_PORT=6433
+export PG_USER=root
+export PG_PASSWORD=123123
+export SYSTEM_AGENT_PORT=6100
+export USER_SIM_PORT=6101
+export DB_ENV_PORT=6102
+
+# Never inherit production credentials into the research shell.
+unset OPENAI_API_KEY ANTHROPIC_API_KEY ZHIPUAI_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
+unset AZURE_API_KEY AZURE_OPENAI_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+unset SYSTEM_AGENT_API_KEY_FILE USER_SIM_API_KEY_FILE
+# Frozen preset fields must come only from MODEL_PRESET, never from the shell
+# that may also be supervising the production evaluation.
+unset SYSTEM_AGENT_MODEL SYSTEM_AGENT_THINKING SYSTEM_AGENT_CLEAR_THINKING
+unset SYSTEM_AGENT_REASONING_EFFORT SYSTEM_AGENT_MAX_TOKENS
+unset SYSTEM_AGENT_TEMPERATURE SYSTEM_AGENT_TOP_P SYSTEM_AGENT_TOOL_CHOICE
+export SYSTEM_AGENT_API_BASE=http://127.0.0.1:9
+export SYSTEM_AGENT_API_KEY=research-offline
+export USER_SIM_MODEL=anthropic/claude-haiku-4-5-20251001
+export USER_SIM_API_BASE=http://127.0.0.1:9
+export USER_SIM_API_KEY=research-offline
+export USER_SIM_USE_BEARER_FOR_CUSTOM_BASE=false
+export USER_SIM_DISABLE_THINKING=true
+export USER_SIM_PROTOCOL_POLICY=official
+export USER_SIM_PROTOCOL_MAX_ATTEMPTS=1
+export LITELLM_API_BASE=http://127.0.0.1:9
+export LITELLM_API_KEY=research-offline
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
+
+if [[ -f "$RESEARCH_PROJECT_DIR/.venv-research/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$RESEARCH_PROJECT_DIR/.venv-research/bin/activate"
+fi
+
+cd "$RESEARCH_PROJECT_DIR"
+
+## scripts/research_preflight.sh
+exit_code=0
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/research_env.sh"
+PYTHON_BIN="$PROJECT_DIR/.venv-research/bin/python"
+
+[[ -x "$PYTHON_BIN" ]] || { echo "Research venv missing" >&2; exit 1; }
+[[ "$(git -C "$PROJECT_DIR" rev-parse --show-toplevel)" == "$PROJECT_DIR" ]] || {
+    echo "Research Git root mismatch" >&2; exit 1;
+}
+
+"$PYTHON_BIN" - <<'PY'
+from shared.config import PROJECT_ROOT, active_model_preset_report, settings
+
+assert PROJECT_ROOT.name == "BIRD-Interact-ADK-agent-research", PROJECT_ROOT
+assert settings.pg_port == 6433
+assert settings.system_agent_port == 6100
+assert settings.user_sim_port == 6101
+assert settings.db_env_port == 6102
+assert settings.system_agent_api_base == "http://127.0.0.1:9"
+assert settings.user_sim_api_base == "http://127.0.0.1:9"
+assert settings.system_agent_api_key == "research-offline"
+assert settings.user_sim_api_key == "research-offline"
+report = active_model_preset_report()
+assert report and report["name"] == "glm52_high_32768"
+print("python_config_isolation=passed")
+print(f"project_root={PROJECT_ROOT}")
+print(f"model_preset={report['name']}")
+print(f"ports={settings.system_agent_port},{settings.user_sim_port},{settings.db_env_port}")
+print(f"postgres={settings.pg_host}:{settings.pg_port}")
+PY
+
+compose_config="$(docker compose -f "$PROJECT_DIR/docker-compose.research.yml" --profile full config)"
+grep -q 'bird_interact_postgresql_full_research' <<<"$compose_config"
+grep -q 'published: "6433"' <<<"$compose_config"
+if grep -q 'published: "5433"' <<<"$compose_config"; then
+    echo "Research compose unexpectedly publishes production DB port" >&2
+    exit 1
+fi
+
+for port in 6000 6001 6002; do
+    owner="$(ss -ltnp 2>/dev/null | grep ":${port} " || true)"
+    if [[ "$owner" == *"BIRD-Interact-ADK-agent-research"* ]]; then
+        echo "Research process found on production port $port" >&2
+        exit 1
+    fi
+done
+
+echo "docker_isolation=passed"
+echo "production_port_ownership=passed"
+echo "research_preflight=passed"
+
+## scripts/start_research_db.sh
+exit_code=0
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR"
+docker compose \
+    -p bird_interact_adk_agent_research \
+    -f docker-compose.research.yml \
+    --profile full up -d postgresql_full_research
+echo "Research PostgreSQL: 127.0.0.1:6433"
+
+## scripts/start_research_services.sh
+exit_code=0
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$PROJECT_DIR/scripts/research_env.sh"
+
+PYTHON_BIN="$PROJECT_DIR/.venv-research/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Research virtual environment missing: $PYTHON_BIN" >&2
+    exit 1
+fi
+if ! pg_isready -h 127.0.0.1 -p 6433 -U root >/dev/null; then
+    echo "Research PostgreSQL is not ready. Run scripts/start_research_db.sh first." >&2
+    exit 1
+fi
+for port in 6100 6101 6102; do
+    if ss -ltn | grep -q ":${port} "; then
+        echo "Research port already occupied: $port" >&2
+        exit 1
+    fi
+done
+
+RUNTIME_DIR="$PROJECT_DIR/research-runtime"
+mkdir -p "$RUNTIME_DIR/logs"
+PID_FILE="$RUNTIME_DIR/service_pids"
+if [[ -f "$PID_FILE" ]]; then
+    echo "Existing research PID file found; run scripts/stop_research_services.sh first." >&2
+    exit 1
+fi
+
+"$PYTHON_BIN" -m uvicorn db_environment.server:app \
+    --host 127.0.0.1 --port 6102 --log-level info \
+    >"$RUNTIME_DIR/logs/db_environment.log" 2>&1 &
+db_pid=$!
+"$PYTHON_BIN" -m uvicorn user_simulator.server:app \
+    --host 127.0.0.1 --port 6101 --log-level info \
+    >"$RUNTIME_DIR/logs/user_simulator.log" 2>&1 &
+user_pid=$!
+"$PYTHON_BIN" -m uvicorn system_agent.server:app \
+    --host 127.0.0.1 --port 6100 --log-level info \
+    >"$RUNTIME_DIR/logs/system_agent.log" 2>&1 &
+agent_pid=$!
+printf '%s\n' "$db_pid" "$user_pid" "$agent_pid" >"$PID_FILE"
+
+for port in 6102 6101 6100; do
+    ready=false
+    for _ in $(seq 1 60); do
+        if curl --noproxy '*' -fsS --max-time 2 \
+            "http://127.0.0.1:${port}/health" >/dev/null; then
+            ready=true
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$ready" != true ]]; then
+        echo "Research service failed health check on port $port" >&2
+        "$PROJECT_DIR/scripts/stop_research_services.sh" || true
+        exit 1
+    fi
+done
+
+echo "Research services ready: System Agent 6100, User Simulator 6101, DB Environment 6102"
+
+## scripts/stop_research_services.sh
+exit_code=0
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PID_FILE="$PROJECT_DIR/research-runtime/service_pids"
+if [[ ! -f "$PID_FILE" ]]; then
+    echo "No research service PID file; nothing to stop."
+    exit 0
+fi
+
+mapfile -t pids <"$PID_FILE"
+for pid in "${pids[@]}"; do
+    cmdline="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+    if [[ "$cmdline" == *"$PROJECT_DIR/.venv-research/bin/python"*uvicorn* ]]; then
+        kill "$pid" 2>/dev/null || true
+    elif [[ -n "$cmdline" ]]; then
+        echo "Refusing to stop unrelated PID $pid: $cmdline" >&2
+    fi
+done
+for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+done
+rm -f "$PID_FILE"
+echo "Research services stopped; production services were not touched."
+
+## scripts/stop_research_db.sh
+exit_code=0
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR"
+docker compose \
+    -p bird_interact_adk_agent_research \
+    -f docker-compose.research.yml \
+    --profile full down
+echo "Research PostgreSQL stopped; its named volume was preserved."
+
+

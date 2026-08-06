@@ -1,0 +1,372 @@
+P0 DATABASE START AND READINESS FAILURE
+UTC=20260806T131902Z
+
+## start_db
+$ source scripts/research_env.sh; bash scripts/start_research_db.sh
+exit_code=0
+session_id=
+ Network bird_interact_adk_agent_research_default Creating 
+ Network bird_interact_adk_agent_research_default Created 
+ Volume bird_interact_adk_agent_research_postgresql_data_full Creating 
+ Volume bird_interact_adk_agent_research_postgresql_data_full Created 
+ Container bird_interact_postgresql_full_research Creating 
+ Container bird_interact_postgresql_full_research Created 
+ Container bird_interact_postgresql_full_research Starting 
+ Container bird_interact_postgresql_full_research Started 
+Research PostgreSQL: 127.0.0.1:6433
+
+## readiness_first_30s
+$ pg_isready loop (first exec chunk)
+exit_code=undefined
+session_id=14353
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+
+## readiness_remaining_window
+$ pg_isready loop (remaining exec chunk)
+exit_code=1
+session_id=
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+127.0.0.1:6433 - no response
+
+## container_inspect
+$ docker inspect bird_interact_postgresql_full_research --format '{{json .State}}'
+exit_code=0
+session_id=
+{"Status":"running","Running":true,"Paused":false,"Restarting":false,"OOMKilled":false,"Dead":false,"Pid":121818,"ExitCode":0,"Error":"","StartedAt":"2026-08-06T13:21:26.479428906Z","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy","FailingStreak":0,"Log":[{"Start":"2026-08-06T13:22:42.654390685Z","End":"2026-08-06T13:22:42.727272002Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"},{"Start":"2026-08-06T13:22:47.7284414Z","End":"2026-08-06T13:22:47.806257735Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"},{"Start":"2026-08-06T13:22:52.806742365Z","End":"2026-08-06T13:22:52.86609332Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"},{"Start":"2026-08-06T13:22:57.867133464Z","End":"2026-08-06T13:22:57.94847104Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"},{"Start":"2026-08-06T13:23:02.94897308Z","End":"2026-08-06T13:23:03.011354659Z","ExitCode":0,"Output":"/var/run/postgresql:5432 - accepting connections\n"}]}}
+
+## container_ps
+$ docker ps -a --no-trunc --filter name=bird_interact_postgresql_full_research --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}'
+exit_code=0
+session_id=
+1a5fa64f4e2b1f7afa4a1b2f2b0973e9cf96e0f660e403a6e71573976c6a4207	bird_interact_postgresql_full_research	Up About a minute (healthy)	127.0.0.1:6433->5432/tcp
+
+## container_logs
+$ docker logs --tail 250 bird_interact_postgresql_full_research
+exit_code=0
+session_id=
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+
+## research_ss
+$ ss -ltnp
+exit_code=0
+session_id=
+State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096        127.0.0.1:55980      0.0.0.0:*          
+LISTEN 0      4096        127.0.0.1:6433       0.0.0.0:*          
+LISTEN 0      1000   10.255.255.254:53         0.0.0.0:*          
+LISTEN 0      4096                *:5433             *:*          
+
+## compose_ps
+$ docker compose -p bird_interact_adk_agent_research -f docker-compose.research.yml --profile full ps --all
+exit_code=0
+session_id=
+NAME                                     IMAGE                                                     COMMAND                  SERVICE                    CREATED              STATUS                        PORTS
+bird_interact_postgresql_full_research   docker.io/shawnxxh/bird-interact-postgresql-full:latest   "docker-entrypoint.s…"   postgresql_full_research   About a minute ago   Up About a minute (healthy)   127.0.0.1:6433->5432/tcp
+
+

@@ -1,0 +1,84 @@
+P0 PERSISTENT PTY START GATE
+started_at=20260806T135001Z
+references=evidence/p0_service_lifecycle_20260806T131902Z,evidence/p0_service_lifecycle_retry_20260806T133342Z
+
+## pwd
+$ pwd -P
+exit_code=0
+/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research
+
+## branch
+$ git branch --show-current
+exit_code=0
+research/main
+
+## head
+$ git rev-parse HEAD
+exit_code=0
+aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+
+## tracked_diff
+$ git diff --exit-code
+exit_code=0
+
+## staged_diff
+$ git diff --cached --exit-code
+exit_code=0
+
+## status
+$ git status --porcelain=v1 --untracked-files=all
+exit_code=0
+?? evidence/p0_service_lifecycle_20260806T131902Z.zip
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/07_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/08_final_git_status.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_20260806T131902Z/README.md
+?? evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/02_database_readiness.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/03_http_service_failure.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/04_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/05_final_git_status.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/README.md
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/summary.json
+
+## manifest_1
+$ cd evidence/p0_service_lifecycle_20260806T131902Z && sha256sum -c MANIFEST.sha256
+exit_code=0
+00_start_gate.txt: OK
+01_before_state.txt: OK
+02_script_review.txt: OK
+03_pre_artifact_state.txt: OK
+04_offline_checks.txt: OK
+05_versions_and_fingerprints.txt: OK
+06_database_start_and_failure.txt: OK
+07_cleanup_and_after_state.txt: OK
+08_final_git_status.txt: OK
+README.md: OK
+summary.json: OK
+
+## manifest_2
+$ cd evidence/p0_service_lifecycle_retry_20260806T133342Z && sha256sum -c MANIFEST.sha256
+exit_code=0
+00_start_gate.txt: OK
+01_before_state.txt: OK
+02_database_readiness.txt: OK
+03_http_service_failure.txt: OK
+04_cleanup_and_after_state.txt: OK
+05_final_git_status.txt: OK
+README.md: OK
+research-runtime/logs/db_environment.log: OK
+research-runtime/logs/system_agent.log: OK
+research-runtime/logs/user_simulator.log: OK
+summary.json: OK
+
+

@@ -1,0 +1,223 @@
+P0 RETRY CLEANUP AND AFTER STATE
+
+## stop_research_services
+$ source scripts/research_env.sh; bash scripts/stop_research_services.sh
+exit_code=0
+Research services stopped; production services were not touched.
+
+## stop_research_db
+$ source scripts/research_env.sh; bash scripts/stop_research_db.sh
+exit_code=0
+ Container bird_interact_postgresql_full_research Stopping 
+ Container bird_interact_postgresql_full_research Stopped 
+ Container bird_interact_postgresql_full_research Removing 
+ Container bird_interact_postgresql_full_research Removed 
+ Network bird_interact_adk_agent_research_default Removing 
+ Network bird_interact_adk_agent_research_default Removed 
+Research PostgreSQL stopped; its named volume was preserved.
+
+## runtime_artifacts_before_move
+$ find research-runtime ...
+exit_code=0
+d	research-runtime	4096	1786023386.1242240180
+d	research-runtime/logs	4096	1786023333.5391081430
+f	research-runtime/logs/system_agent.log	256	1786023335.5672263910
+f	research-runtime/logs/user_simulator.log	256	1786023334.5551702690
+f	research-runtime/logs/db_environment.log	256	1786023334.5511700240
+
+## move_runtime_logs_to_evidence
+$ mv -- research-runtime /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_retry_20260806T133342Z/research-runtime
+exit_code=0
+
+## utc
+$ date -u +%Y-%m-%dT%H:%M:%SZ
+exit_code=0
+2026-08-06T13:37:38Z
+
+## ss
+$ ss -ltnp
+exit_code=0
+State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096        127.0.0.1:55980      0.0.0.0:*          
+LISTEN 0      1000   10.255.255.254:53         0.0.0.0:*          
+LISTEN 0      4096                *:5433             *:*          
+
+## docker_ps
+$ docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
+exit_code=0
+3d491a0ed13fa069fdd2ebfd13e3eb1a79fc3d64ba140c96a3c2be42225e89ff	bird_interact_postgresql_full	docker.io/shawnxxh/bird-interact-postgresql-full:latest	0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp	Up 2 days
+3d0a8a2a879e640728c2798cfe9a68c953485eb5a40bb8ea7a4003c15e08fdd6	kind-worker	jacksonarthurclark/aiopslab-kind-x86@sha256:d631857278d3f8ce5c36364c75ec25695ceb22e311ec6621a4ebf5506b86774d		Up 2 days
+3398f775bccf1cf3f6646da021b1f971eae9fd2ca409fd3e38bc687da0cc8628	kind-control-plane	jacksonarthurclark/aiopslab-kind-x86@sha256:d631857278d3f8ce5c36364c75ec25695ceb22e311ec6621a4ebf5506b86774d	127.0.0.1:55980->6443/tcp	Up 2 days
+
+## formal_db_inspect
+$ docker inspect bird_interact_postgresql_full --format '{{.Id}}\t{{.State.Status}}\t{{.State.StartedAt}}\t{{json .NetworkSettings.Ports}}'
+exit_code=0
+3d491a0ed13fa069fdd2ebfd13e3eb1a79fc3d64ba140c96a3c2be42225e89ff\trunning\t2026-08-03T17:48:30.680024131Z\t{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5433"},{"HostIp":"::","HostPort":"5433"}]}
+
+## research_compose_ps
+$ docker compose -p bird_interact_adk_agent_research -f docker-compose.research.yml --profile full ps --all
+exit_code=0
+NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
+
+## research_container
+$ docker ps -a --no-trunc --filter name=bird_interact_postgresql_full_research --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}'
+exit_code=0
+
+## research_network
+$ docker network ls --format '{{.Name}}' --filter name=bird_interact_adk_agent_research
+exit_code=0
+
+## research_volume
+$ docker volume ls --format '{{.Name}}' --filter name=bird_interact_adk_agent_research
+exit_code=0
+bird_interact_adk_agent_research_postgresql_data_full
+
+## pg_5433
+$ pg_isready -h 127.0.0.1 -p 5433 -U root
+exit_code=0
+127.0.0.1:5433 - accepting connections
+
+## pg_6433
+$ pg_isready -h 127.0.0.1 -p 6433 -U root
+exit_code=2
+127.0.0.1:6433 - no response
+
+## pid_file_absent
+$ test ! -e research-runtime/service_pids
+exit_code=0
+
+## runtime_absent
+$ test ! -e research-runtime
+exit_code=0
+
+## research_uvicorn
+$ python3 -c 'import os
+root="/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/"
+me=os.getpid()
+for name in os.listdir("/proc"):
+    if not name.isdigit() or int(name)==me: continue
+    try:
+        exe=os.readlink(f"/proc/{name}/exe"); args=open(f"/proc/{name}/cmdline","rb").read().split(b"\0")
+    except OSError: continue
+    if exe.startswith(root) and any(b"uvicorn" in arg for arg in args): print(name,exe,b" ".join(args).decode("utf-8","replace"))'
+exit_code=0
+
+## zombie_pids
+$ for p in 79790 79791 79792; do if test -e /proc/$p; then ps -o pid=,ppid=,stat=,args= -p $p; else echo "$p absent"; fi; done
+exit_code=0
+79790 absent
+79791 absent
+79792 absent
+
+## formal_results_sha
+$ find /home/user/code/BIRD-Interact/BIRD-Interact-ADK/results -type f -printf '%P\t%s\t%T@\n' | LC_ALL=C sort | sha256sum
+exit_code=0
+365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288  -
+
+## formal_results_count
+$ find /home/user/code/BIRD-Interact/BIRD-Interact-ADK/results -type f | wc -l
+exit_code=0
+6196
+
+## formal_results_dir_stat
+$ stat -c '%n\t%F\t%s\t%Y' /home/user/code/BIRD-Interact/BIRD-Interact-ADK/results
+exit_code=0
+/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results\tdirectory\t4096\t1785872593
+
+## tracked_diff
+$ git diff --exit-code
+exit_code=0
+
+## staged_diff
+$ git diff --cached --exit-code
+exit_code=0
+
+## git_status
+$ git status --short --branch --untracked-files=all
+exit_code=0
+## research/main
+?? evidence/p0_service_lifecycle_20260806T131902Z.zip
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/07_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/08_final_git_status.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_20260806T131902Z/README.md
+?? evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/02_database_readiness.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/03_http_service_failure.txt
+
+## git_head
+$ git rev-parse HEAD
+exit_code=0
+aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+
+## evidence_tree
+$ find /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_retry_20260806T133342Z -maxdepth 4 -printf '%y\t%P\t%s\t%T@\n' | LC_ALL=C sort
+exit_code=0
+d		4096	1786023423.4417578090
+d	research-runtime	4096	1786023386.1242240180
+d	research-runtime/logs	4096	1786023333.5391081430
+f	00_start_gate.txt	6115	1786023262.4083440500
+f	01_before_state.txt	6554	1786023262.4083440500
+f	02_database_readiness.txt	4471	1786023316.0380361750
+f	03_http_service_failure.txt	5393	1786023380.3438755040
+f	research-runtime/logs/db_environment.log	256	1786023334.5511700240
+f	research-runtime/logs/system_agent.log	256	1786023335.5672263910
+f	research-runtime/logs/user_simulator.log	256	1786023334.5551702690
+
+## provider_activity_scan
+$ if grep -RniE 'POST .*127\.0\.0\.1:9|api\.gptsapi|anthropic\.com|openai\.com|provider.*request' /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/evidence/p0_service_lifecycle_retry_20260806T133342Z/research-runtime/logs; then exit 1; else echo no_provider_request_markers; fi
+exit_code=0
+no_provider_request_markers
+
+## http_6000
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6000/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6000 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6001
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6001/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6001 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6002
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6002/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6002 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6100
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6100/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6100 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6101
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6101/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6101 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+## http_6102
+$ curl --noproxy '*' --silent --show-error --max-time 2 --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:6102/health
+exit_code=7
+curl: (7) Failed to connect to 127.0.0.1 port 6102 after 0 ms: Couldn't connect to server
+
+HTTP_STATUS=000
+
+

@@ -1,0 +1,19 @@
+P0 PRE-ARTIFACT STATE
+UTC=20260806T131902Z
+
+## runtime_before
+exit_code=1
+find: ‘research-runtime’: No such file or directory
+
+## volumes_before
+exit_code=0
+
+## networks_before
+exit_code=0
+
+## git_after_evidence
+exit_code=0
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+
+

@@ -1,0 +1,254 @@
+P0 PERSISTENT PTY: EXACT STOP AND CLEANUP
+pty_session_id=1715
+
+## stop_services
+session_id=1715
+exit_code=
+<_STOP__ time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+__P0_PRE_STOP__ time=2026-08-06T13:54:43Z
+(.venv-research) bash-5.2$ <r_scan_rc=0; echo 'NO_PROVIDER_REQUEST_MARKERS'; fi
+NO_PROVIDER_REQUEST_MARKERS
+(.venv-research) bash-5.2$ <_P0_PROVIDER_SCAN__ rc=%s\n' "$p0_provider_scan_rc"
+__P0_PROVIDER_SCAN__ rc=0
+(.venv-research) bash-5.2$ <OP\n'; sed -n '1,20p' research-runtime/service_pids
+PID_FILE_BEFORE_STOP
+85032
+85033
+85034
+(.venv-research) bash-5.2$ bash scripts/stop_research_services.sh
+Research services stopped; production services were not touched.
+(.venv-research) bash-5.2$ p0_stop_services_rc=$?
+(.venv-research) bash-5.2$ <_P0_STOP_SERVICES__ rc=%s\n' "$p0_stop_services_rc"
+__P0_STOP_SERVICES__ rc=0
+(.venv-research) bash-5.2$ < echo 'PID_FILE_ABSENT'; p0_pidfile_absent_rc=0; fi
+PID_FILE_ABSENT
+(.venv-research) bash-5.2$ < -p "$pid"; else echo "PID_${pid}=absent"; fi; done
+  85032      20 Sl   /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-resea
+  85033      20 Sl   /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-resea
+  85034      20 Sl   /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-resea
+(.venv-research) bash-5.2$ <OST_SERVICE_STOP__ rc=%s\n' "$p0_pidfile_absent_rc"
+__P0_POST_SERVICE_STOP__ rc=0
+(.venv-research) bash-5.2$ 
+## service_exit_after_5_seconds
+session_id=1715
+exit_code=
+sleep 5
+(.venv-research) bash-5.2$ p0_service_pids_gone=0
+(.venv-research) bash-5.2$ for pid in 85032 85033 85034; do
+>   if [[ -e "/proc/$pid" ]]; then
+>     p0_stat=$(ps -o stat= -p "$pid" 2>/dev/null | xargs)
+>     p0_cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+>     printf 'POST_STOP_PID=%s STAT=%s CMD=%s\n' "$pid" "$p0_stat" "$p0_cmd"
+>     p0_service_pids_gone=1
+>   else
+>     echo "POST_STOP_PID_${pid}=absent"
+>   fi
+> done
+POST_STOP_PID_85032=absent
+POST_STOP_PID_85033=absent
+POST_STOP_PID_85034=absent
+(.venv-research) bash-5.2$ <[[ -z "$p0_line" ]] || p0_service_pids_gone=1; done
+POST_STOP_LISTENER_6100=
+POST_STOP_LISTENER_6101=
+POST_STOP_LISTENER_6102=
+(.venv-research) bash-5.2$ <E_PROCESSES_GONE__ rc=%s\n' "$p0_service_pids_gone"
+__P0_SERVICE_PROCESSES_GONE__ rc=0
+(.venv-research) bash-5.2$ 
+## stop_database
+session_id=1715
+exit_code=
+bash scripts/stop_research_db.sh
+[+] down 0/1
+ ⠋ Container bird_interact_postgresql_full_research Stopping                0.1s
+[+] down 0/1
+ ⠙ Container bird_interact_postgresql_full_research Stopping                0.2s
+[+] down 0/1
+ ⠹ Container bird_interact_postgresql_full_research Stopping                0.3s
+[+] down 0/1
+ ⠸ Container bird_interact_postgresql_full_research Stopping                0.4s
+[+] down 1/2
+ ✔ Container bird_interact_postgresql_full_research Removed                 0.4s
+ ⠋ Network bird_interact_adk_agent_research_default Removing                0.0s
+[+] down 1/2
+ ✔ Container bird_interact_postgresql_full_research Removed                 0.4s
+ ⠙ Network bird_interact_adk_agent_research_default Removing                0.1s
+[+] down 1/2
+ ✔ Container bird_interact_postgresql_full_research Removed                 0.4s
+ ⠹ Network bird_interact_adk_agent_research_default Removing                0.2s
+[+] down 2/2
+ ✔ Container bird_interact_postgresql_full_research Removed                 0.4s
+ ✔ Network bird_interact_adk_agent_research_default Removed                 0.3s
+Research PostgreSQL stopped; its named volume was preserved.
+(.venv-research) bash-5.2$ p0_stop_db_rc=$?
+(.venv-research) bash-5.2$ printf '__P0_STOP_DB__ rc=%s\n' "$p0_stop_db_rc"
+__P0_STOP_DB__ rc=0
+(.venv-research) bash-5.2$ 
+## cleanup_initial_scan
+session_id=1715
+exit_code=
+p0_cleanup_rc=0
+(.venv-research) bash-5.2$ <BEGIN__ time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+__P0_CLEANUP_BEGIN__ time=2026-08-06T13:56:09Z
+(.venv-research) bash-5.2$ for port in 6100 6101 6102 6433; do
+>   p0_line=$(ss -ltnp 2>/dev/null | grep -E ":$port[[:space:]]" || true)
+>   printf 'RESEARCH_LISTENER_%s=%s\n' "$port" "$p0_line"
+>   [[ -z "$p0_line" ]] || p0_cleanup_rc=1
+> done
+RESEARCH_LISTENER_6100=
+RESEARCH_LISTENER_6101=
+RESEARCH_LISTENER_6102=
+RESEARCH_LISTENER_6433=
+(.venv-research) bash-5.2$ <'; p0_cleanup_rc=1; else echo 'PID_FILE=absent'; fi
+PID_FILE=absent
+(.venv-research) bash-5.2$ <epth 3 -printf '%y %p %s %T@\n' 2>/dev/null || true
+RUNTIME_TREE
+d research-runtime 4096 1786024483.9766930710
+d research-runtime/logs 4096 1786024326.0494226580
+f research-runtime/logs/system_agent.log 523 1786024484.1207057960
+f research-runtime/logs/user_simulator.log 523 1786024484.1607093320
+f research-runtime/logs/db_environment.log 523 1786024484.1607093320
+(.venv-research) bash-5.2$ p0_proc_matches=$(python3 -c 'import os
+> <RD-Interact-ADK-agent-research/.venv-research/bin/"
+> out=[]
+> for name in os.listdir("/proc"):
+>     if not name.isdigit(): continue
+>     try:
+>         exe=os.readlink(f"/proc/{name}/exe")
+>         args=open(f"/proc/{name}/cmdline","rb").read().split(b"\0")
+>     except OSError: continue
+>     if exe.startswith(root) and any(b"uvicorn" in a for a in args):
+> <+exe+" "+b" ".join(args).decode("utf-8","replace"))
+> print("\n".join(out))')
+(.venv-research) bash-5.2$ printf 'RESEARCH_UVICORN=%s\n' "$p0_proc_matches"
+RESEARCH_UVICORN=85343 /home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/python3 python3 -c import os
+root="/home/user/code/BIRD-Interact/BIRD-Interact-ADK-agent-research/.venv-research/bin/"
+out=[]
+for name in os.listdir("/proc"):
+    if not name.isdigit(): continue
+    try:
+        exe=os.readlink(f"/proc/{name}/exe")
+        args=open(f"/proc/{name}/cmdline","rb").read().split(b"\0")
+    except OSError: continue
+    if exe.startswith(root) and any(b"uvicorn" in a for a in args):
+        out.append(name+" "+exe+" "+b" ".join(args).decode("utf-8","replace"))
+print("\n".join(out)) 
+(.venv-research) bash-5.2$ [[ -z "$p0_proc_matches" ]] || p0_cleanup_rc=1
+(.venv-research) bash-5.2$ <research --format '{{.ID}} {{.Names}} {{.Status}}')
+(.venv-research) bash-5.2$ <}}' --filter name=bird_interact_adk_agent_research)
+(.venv-research) bash-5.2$ <}}' --filter name=bird_interact_adk_agent_research)
+(.venv-research) bash-5.2$ <ME=%s\n' "$p0_container" "$p0_network" "$p0_volume"
+RESEARCH_CONTAINER=
+RESEARCH_NETWORK=
+RESEARCH_VOLUME=bird_interact_adk_agent_research_postgresql_data_full
+(.venv-research) bash-5.2$ <ontainer" && -z "$p0_network" ]] || p0_cleanup_rc=1
+(.venv-research) bash-5.2$ <research_postgresql_data_full ]] || p0_cleanup_rc=1
+(.venv-research) bash-5.2$ <-h 127.0.0.1 -p 5433 -U root 2>&1); p0_pg5433_rc=$?
+(.venv-research) bash-5.2$ <-h 127.0.0.1 -p 6433 -U root 2>&1); p0_pg6433_rc=$?
+(.venv-research) bash-5.2$ <g5433_rc" "$p0_pg5433" "$p0_pg6433_rc" "$p0_pg6433"
+PG5433_RC=0 PG5433=127.0.0.1:5433 - accepting connections
+PG6433_RC=2 PG6433=127.0.0.1:6433 - no response
+(.venv-research) bash-5.2$ <ns"* && "$p0_pg6433_rc" -ne 0 ]] || p0_cleanup_rc=1
+(.venv-research) bash-5.2$ for port in 6000 6001 6002; do
+> < 2>/dev/null | grep -E ":$port[[:space:]]" || true)
+>   printf 'FORMAL_LISTENER_%s=%s\n' "$port" "$p0_formal_line"
+>   [[ -z "$p0_formal_line" ]] || p0_cleanup_rc=1
+> done
+FORMAL_LISTENER_6000=
+FORMAL_LISTENER_6001=
+FORMAL_LISTENER_6002=
+(.venv-research) bash-5.2$ <.State.StartedAt}} {{json .NetworkSettings.Ports}}'
+FORMAL_DB=3d491a0ed13fa069fdd2ebfd13e3eb1a79fc3d64ba140c96a3c2be42225e89ff running 2026-08-03T17:48:30.680024131Z {"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5433"},{"HostIp":"::","HostPort":"5433"}]}
+(.venv-research) bash-5.2$ <-printf '%P\t%s\t%T@\n' | LC_ALL=C sort | sha256sum
+FORMAL_RESULTS_SHA=365728c3a5b3ad7e2b887ba65fbe8e02767632fa89cc95824a6787d4fe12e288  -
+(.venv-research) bash-5.2$ <-Interact/BIRD-Interact-ADK/results -type f | wc -l
+FORMAL_RESULTS_COUNT=6196
+(.venv-research) bash-5.2$ <e/user/code/BIRD-Interact/BIRD-Interact-ADK/results
+FORMAL_RESULTS_STAT=/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results directory 4096 1785872593
+(.venv-research) bash-5.2$ printf 'GIT_BRANCH='; git branch --show-current
+GIT_BRANCH=research/main
+(.venv-research) bash-5.2$ printf 'GIT_HEAD='; git rev-parse HEAD
+GIT_HEAD=aaf9dd73b79b254afb0d9f7c0893db8a30533ed1
+(.venv-research) bash-5.2$ git diff --exit-code; p0_diff_rc=$?
+(.venv-research) bash-5.2$ git diff --cached --exit-code; p0_cached_rc=$?
+(.venv-research) bash-5.2$ <_STAGED_DIFF_RC=%s\n' "$p0_diff_rc" "$p0_cached_rc"
+GIT_TRACKED_DIFF_RC=0 GIT_STAGED_DIFF_RC=0
+(.venv-research) bash-5.2$ <eq 0 && "$p0_cached_rc" -eq 0 ]] || p0_cleanup_rc=1
+(.venv-research) bash-5.2$ git status --short --branch --untracked-files=all
+## research/main
+?? evidence/p0_service_lifecycle_20260806T131902Z.zip
+?? evidence/p0_service_lifecycle_20260806T131902Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/02_script_review.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/03_pre_artifact_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/04_offline_checks.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/05_versions_and_fingerprints.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/06_database_start_and_failure.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/07_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/08_final_git_status.txt
+?? evidence/p0_service_lifecycle_20260806T131902Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_20260806T131902Z/README.md
+?? evidence/p0_service_lifecycle_20260806T131902Z/summary.json
+?? evidence/p0_service_lifecycle_persistent_pty_20260806T135001Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_persistent_pty_20260806T135001Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/00_start_gate.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/01_before_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/02_database_readiness.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/03_http_service_failure.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/04_cleanup_and_after_state.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/05_final_git_status.txt
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/MANIFEST.sha256
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/README.md
+?? evidence/p0_service_lifecycle_retry_20260806T133342Z/summary.json
+(.venv-research) bash-5.2$ <rintf '__P0_CLEANUP_END__ rc=%s\n' "$p0_cleanup_rc"
+__P0_CLEANUP_END__ rc=1
+(.venv-research) bash-5.2$ 
+## cleanup_corrected_self-excluding_scan
+session_id=1715
+exit_code=
+p0_corrected_cleanup_rc=0
+(.venv-research) bash-5.2$ p0_proc_matches=$(python3 -c 'import os
+> <RD-Interact-ADK-agent-research/.venv-research/bin/"
+> me=os.getpid()
+> out=[]
+> for name in os.listdir("/proc"):
+>     if not name.isdigit() or int(name)==me: continue
+>     try:
+>         exe=os.readlink(f"/proc/{name}/exe")
+>         args=open(f"/proc/{name}/cmdline","rb").read().split(b"\0")
+>     except OSError: continue
+>     if exe.startswith(root) and any(b"uvicorn" in a for a in args):
+> <+exe+" "+b" ".join(args).decode("utf-8","replace"))
+> print("\n".join(out))')
+(.venv-research) bash-5.2$ <CORRECTED_RESEARCH_UVICORN=%s\n' "$p0_proc_matches"
+CORRECTED_RESEARCH_UVICORN=
+(.venv-research) bash-5.2$ < "$p0_proc_matches" ]] || p0_corrected_cleanup_rc=1
+(.venv-research) bash-5.2$ for port in 6100 6101 6102 6433; do
+>   p0_line=$(ss -ltnp 2>/dev/null | grep -E ":$port[[:space:]]" || true)
+>   printf 'CORRECTED_RESEARCH_LISTENER_%s=%s\n' "$port" "$p0_line"
+>   [[ -z "$p0_line" ]] || p0_corrected_cleanup_rc=1
+> done
+CORRECTED_RESEARCH_LISTENER_6100=
+CORRECTED_RESEARCH_LISTENER_6101=
+CORRECTED_RESEARCH_LISTENER_6102=
+CORRECTED_RESEARCH_LISTENER_6433=
+(.venv-research) bash-5.2$ <untime/service_pids ]] || p0_corrected_cleanup_rc=1
+(.venv-research) bash-5.2$ <teract_postgresql_full_research --format '{{.ID}}')
+(.venv-research) bash-5.2$ <}}' --filter name=bird_interact_adk_agent_research)
+(.venv-research) bash-5.2$ <}}' --filter name=bird_interact_adk_agent_research)
+(.venv-research) bash-5.2$ <ntime/service_pids && echo present || echo absent)"
+CORRECTED_CONTAINER= NETWORK= VOLUME=bird_interact_adk_agent_research_postgresql_data_full PID_FILE=absent
+(.venv-research) bash-5.2$ <ostgresql_data_full ]] || p0_corrected_cleanup_rc=1
+(.venv-research) bash-5.2$ <D_CLEANUP_END__ rc=%s\n' "$p0_corrected_cleanup_rc"
+__P0_CORRECTED_CLEANUP_END__ rc=0
+(.venv-research) bash-5.2$ 
+## pty_exit
+session_id=
+exit_code=0
+<PLETE__ time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+__P0_PTY_COMPLETE__ time=2026-08-06T13:57:21Z
+(.venv-research) bash-5.2$ exit 0
+exit
+
+
+NOTE: cleanup_initial_scan rc=1 was a diagnostic false positive: its Python scanner matched its own command text containing "uvicorn". The corrected scanner excluded os.getpid() and returned rc=0. Independent post-PTY verification also found no Research uvicorn.
+
