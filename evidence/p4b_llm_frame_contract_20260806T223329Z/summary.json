@@ -1,0 +1,26 @@
+{
+  "baseline_head": "34f28fed117bb7fba7f80c1401730d526d7a2521",
+  "evidence_created_utc": "2026-08-06T22:33:29Z",
+  "phase": "P4.2a",
+  "result": "PASS",
+  "prompt_sha256": "5a4d67b21c1a6dda3e31e98e6a8242b1061e7bdb95d2f3fd33080f21f48b9458",
+  "frozen_environment_names": [
+    "GROUNDING_UPDATER_MODE",
+    "GROUNDING_MODEL_PRESET",
+    "GROUNDING_TIMEOUT_SECONDS",
+    "GROUNDING_MAX_TOKENS",
+    "GROUNDING_MAX_CALLS_PER_TASK",
+    "GROUNDING_PROMPT_SHA256"
+  ],
+  "offline_only": true,
+  "provider_calls": 0,
+  "active_grounding_updater": "rule",
+  "llm_updater_wired_to_callbacks": false,
+  "p4_complete": false,
+  "not_started": [
+    "real LLM Shadow",
+    "NLP",
+    "Ambiguity",
+    "Active Prompt View"
+  ]
+}

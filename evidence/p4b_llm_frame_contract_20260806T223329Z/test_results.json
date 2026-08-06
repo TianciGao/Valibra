@@ -1,0 +1,24 @@
+{
+  "pip_check": {
+    "command": ".venv-research/bin/pip check",
+    "result": "PASS",
+    "summary": "No broken requirements found."
+  },
+  "unittest": {
+    "command": ".venv-research/bin/python -m unittest discover -s tests -v",
+    "result": "PASS",
+    "tests_run": 140,
+    "pre_existing_tests": 121,
+    "new_p4_2a_tests": 19,
+    "failures": 0,
+    "errors": 0
+  },
+  "compileall": {
+    "command": ".venv-research/bin/python -m compileall valibra_agent tests/valibra",
+    "result": "PASS"
+  },
+  "diff_check": {
+    "command": "git diff --check",
+    "result": "PASS"
+  }
+}

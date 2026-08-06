@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from valibra_agent.requirement_grounding.models import (
+    KernelModel,
     MAX_ERROR_CHARS,
     RuntimeMetrics,
     ValibraError,
@@ -18,6 +21,78 @@ _REDACTIONS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)\b(api[_ -]?key|token|password)\s*[:=]\s*\S+"),
 )
+
+
+class LLMCallTelemetryRecorder:
+    """Per-call mutable usage sink; it is never stored in business State."""
+
+    __slots__ = (
+        "provider_attempted",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cost",
+    )
+
+    def __init__(self) -> None:
+        self.provider_attempted = False
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.reasoning_tokens = 0
+        self.cost = 0.0
+
+    def mark_provider_attempted(self) -> None:
+        self.provider_attempted = True
+
+    def capture_usage(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        reasoning_tokens: int,
+        cost: float,
+    ) -> None:
+        values = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "cost": cost,
+        }
+        for key, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"LLM usage {key} must be numeric")
+            if value < 0:
+                raise ValueError(f"LLM usage {key} must be non-negative")
+        if any(isinstance(value, float) and not _is_finite(value) for value in values.values()):
+            raise ValueError("LLM usage values must be finite")
+        self.input_tokens = int(input_tokens)
+        self.output_tokens = int(output_tokens)
+        self.reasoning_tokens = int(reasoning_tokens)
+        self.cost = float(cost)
+
+
+class LLMCallAudit(KernelModel):
+    """Bounded per-call audit returned by the offline async service path."""
+
+    status: Literal[
+        "succeeded",
+        "failed",
+        "timed_out",
+        "limit_rejected",
+        "duplicate",
+    ]
+    attempted: bool
+    configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    latency_ms: float = Field(default=0.0, ge=0.0)
+    cost: float = Field(default=0.0, ge=0.0)
+    timed_out: bool = False
+    provider_may_continue_after_cancel: bool | None = None
+    provider_may_bill_after_cancel: bool | None = None
+    error_type: str | None = Field(default=None, max_length=128)
 
 
 def increment_metrics(
@@ -36,6 +111,28 @@ def increment_metrics(
     _assert_revision_unchanged(runtime, result)
     validate_runtime(result)
     return result
+
+
+def increment_llm_call_metrics(
+    runtime: RequirementGroundingRuntime,
+    recorder: LLMCallTelemetryRecorder,
+    *,
+    calls: int,
+    latency_ms: float,
+    timeouts: int = 0,
+) -> RequirementGroundingRuntime:
+    """Record LLM-Updater-only aggregate usage without changing revision."""
+
+    return increment_metrics(
+        runtime,
+        llm_updater_calls=calls,
+        llm_updater_input_tokens=recorder.input_tokens,
+        llm_updater_output_tokens=recorder.output_tokens,
+        llm_updater_reasoning_tokens=recorder.reasoning_tokens,
+        llm_updater_latency_ms=latency_ms,
+        llm_updater_timeouts=timeouts,
+        llm_updater_cost=recorder.cost,
+    )
 
 
 def set_last_error(
@@ -58,6 +155,7 @@ def record_failure(
     function_call_id: str | None = None,
     retryable: bool = False,
     timestamp: str | None = None,
+    metric_namespace: Literal["generic", "llm"] = "generic",
 ) -> RequirementGroundingRuntime:
     error = ValibraError(
         stage=stage,
@@ -71,9 +169,16 @@ def record_failure(
     )
     result = set_last_error(runtime, error)
     if stage == "updater":
-        result = increment_metrics(result, updater_errors=1)
+        metric = (
+            "llm_updater_errors"
+            if metric_namespace == "llm"
+            else "updater_errors"
+        )
+        result = increment_metrics(result, **{metric: 1})
     elif stage == "reducer":
         result = increment_metrics(result, patches_rejected=1)
+        if metric_namespace == "llm":
+            result = increment_metrics(result, llm_updater_errors=1)
     return result
 
 
@@ -101,3 +206,7 @@ def _assert_revision_unchanged(
 ) -> None:
     if before.grounding_revision != after.grounding_revision:
         raise AssertionError("telemetry cannot change grounding_revision")
+
+
+def _is_finite(value: float) -> bool:
+    return value == value and value not in (float("inf"), float("-inf"))
