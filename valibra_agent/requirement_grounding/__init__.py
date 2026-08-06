@@ -28,6 +28,11 @@ from valibra_agent.requirement_grounding.models import (
     ValibraError,
     ValueSlot,
 )
+from valibra_agent.requirement_grounding.linguistic_hints import (
+    LinguisticHint,
+    extract_linguistic_hints,
+    normalize_linguistic_text,
+)
 from valibra_agent.requirement_grounding.observations import (
     ObservationNormalizationError,
     build_observation,
@@ -55,7 +60,9 @@ from valibra_agent.requirement_grounding.telemetry import (
 )
 from valibra_agent.requirement_grounding.updater import (
     NoOpUpdater,
+    RuleUpdater,
     build_noop_patch,
+    build_rule_patch,
 )
 
 __all__ = [
@@ -69,6 +76,7 @@ __all__ = [
     "GroundingServiceResult",
     "GroundingSlot",
     "InterpretationCandidate",
+    "LinguisticHint",
     "Metrics",
     "NoOpUpdater",
     "Observation",
@@ -84,6 +92,7 @@ __all__ = [
     "RequirementGroundingState",
     "Runtime",
     "RuntimeMetrics",
+    "RuleUpdater",
     "SCHEMA_VERSION",
     "SQLImpact",
     "SchemaSlot",
@@ -93,9 +102,12 @@ __all__ = [
     "apply_patch",
     "add_pending_tool_call",
     "build_noop_patch",
+    "build_rule_patch",
     "build_observation",
     "canonical_json",
     "increment_metrics",
+    "extract_linguistic_hints",
+    "normalize_linguistic_text",
     "process_observation",
     "process_phase_transition",
     "record_failure",

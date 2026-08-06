@@ -1,4 +1,4 @@
-"""Valibra P3 NoOp Shadow HTTP service on the configured agent port."""
+"""Valibra P4.1 Rule Shadow HTTP service on the configured agent port."""
 
 import hashlib
 import json
@@ -18,7 +18,7 @@ from shared.config import (
 from valibra_agent.adk_runtime import AdkRuntime
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="P3-NoOp-Shadow")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="P4.1-Rule-Shadow")
 runtime = AdkRuntime()
 
 
@@ -60,7 +60,7 @@ def _configuration_summary() -> Dict[str, Any]:
         },
         "grounding_enabled": True,
         "grounding_mode": "shadow",
-        "grounding_updater": "noop",
+        "grounding_updater": "rule",
         "prompt_view_injected": False,
     }
 
@@ -79,7 +79,7 @@ def _summary_sha256(summary: Dict[str, Any]) -> str:
 async def log_active_configuration() -> None:
     summary = _configuration_summary()
     logger.info(
-        "Valibra variant=P3-NoOp-Shadow git_commit=%s configuration_summary=%s "
+        "Valibra variant=P4.1-Rule-Shadow git_commit=%s configuration_summary=%s "
         "configuration_sha256=%s",
         _git_commit(),
         summary,
@@ -155,7 +155,7 @@ async def health():
     return {
         "status": "healthy",
         "service": "valibra_agent",
-        "variant": "P3-NoOp-Shadow",
+        "variant": "P4.1-Rule-Shadow",
         "git_commit": _git_commit(),
         "configuration_summary": summary,
         "configuration_sha256": _summary_sha256(summary),

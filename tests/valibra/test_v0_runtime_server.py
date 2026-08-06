@@ -159,13 +159,13 @@ class HttpContractTests(unittest.TestCase):
         fake_runtime.run_turn.assert_awaited_once()
         fake_runtime.cleanup_session.assert_awaited_once()
 
-    def test_health_identifies_noop_shadow_and_contains_no_credentials(self):
+    def test_health_identifies_rule_shadow_and_contains_no_credentials(self):
         with TestClient(valibra_server.app) as client:
             response = client.get("/health")
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["service"], "valibra_agent")
-        self.assertEqual(body["variant"], "P3-NoOp-Shadow")
+        self.assertEqual(body["variant"], "P4.1-Rule-Shadow")
         self.assertTrue(body["configuration_summary"]["grounding_enabled"])
         self.assertEqual(
             body["configuration_summary"]["grounding_mode"],
@@ -173,7 +173,7 @@ class HttpContractTests(unittest.TestCase):
         )
         self.assertEqual(
             body["configuration_summary"]["grounding_updater"],
-            "noop",
+            "rule",
         )
         self.assertFalse(
             body["configuration_summary"]["prompt_view_injected"]

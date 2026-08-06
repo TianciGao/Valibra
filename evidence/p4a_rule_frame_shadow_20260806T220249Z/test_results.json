@@ -1,0 +1,17 @@
+{
+  "compileall": {
+    "command": "python -m compileall valibra_agent tests/valibra",
+    "result": "PASS"
+  },
+  "pip_check": {
+    "command": "pip check",
+    "result": "PASS",
+    "summary": "No broken requirements found."
+  },
+  "unittest": {
+    "command": "python -m unittest discover -s tests -v",
+    "failed": 0,
+    "result": "PASS",
+    "tests_run": 121
+  }
+}

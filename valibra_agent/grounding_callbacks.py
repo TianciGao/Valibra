@@ -1,8 +1,8 @@
-"""P3 NoOp Shadow callbacks composed around the frozen Baseline callbacks.
+"""P4.1 Rule Shadow callbacks composed around the frozen Baseline callbacks.
 
-Shadow tracks only bounded lifecycle observations. It never changes the model
-request, tool protocol, Baseline callback return value, or semantic grounding
-state. Full tool responses remain solely in the existing Baseline trajectory.
+Shadow tracks bounded lifecycle observations and deterministic provisional
+Frame state. It never changes the model request, tool protocol, or Baseline
+callback return value. Full tool responses remain in the Baseline trajectory.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from valibra_agent.requirement_grounding.models import (
@@ -28,6 +30,7 @@ from valibra_agent.requirement_grounding.service import (
     remove_pending_tool_call,
 )
 from valibra_agent.requirement_grounding.telemetry import record_failure
+from valibra_agent.requirement_grounding.updater import RuleUpdater
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
@@ -44,7 +47,7 @@ else:
 GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
 GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
 SHADOW_AUDIT_KEY = "valibra_shadow"
-SHADOW_MODE = "noop"
+SHADOW_MODE = "rule"
 
 _MAX_ARGS_SUMMARY_CHARS = 768
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -61,6 +64,33 @@ _OBSERVATION_TYPES = {
     "ask_user": "user_answer",
     "submit_sql": "submission",
 }
+_RULE_UPDATER = RuleUpdater()
+
+
+@dataclass(slots=True)
+class _BoundTurnMessage:
+    task_id: str
+    mode: str
+    message: str
+    consumed: bool = False
+
+
+_ACTIVE_TURN_MESSAGE: ContextVar[_BoundTurnMessage | None] = ContextVar(
+    "valibra_active_turn_message",
+    default=None,
+)
+
+
+def _bind_turn_message(task_id: str, mode: str, message: str) -> Any:
+    """Bind the exact run_turn input to its current async context only."""
+
+    return _ACTIVE_TURN_MESSAGE.set(
+        _BoundTurnMessage(task_id=task_id, mode=mode, message=message)
+    )
+
+
+def _reset_turn_message(token: Any) -> None:
+    _ACTIVE_TURN_MESSAGE.reset(token)
 
 
 async def before_model_callback(
@@ -72,10 +102,16 @@ async def before_model_callback(
     state = getattr(callback_context, "state", None)
     if state is not None:
         try:
+            _consume_bound_user_message(state)
             _ensure_runtime(state)
-        except Exception:
+        except Exception as exc:
             # A Grounding initialization failure cannot replace Baseline.
-            pass
+            _record_callback_failure(
+                state,
+                stage="observation",
+                exception=exc,
+                sequence=_current_sequence(state),
+            )
     from system_agent import callbacks as baseline_callbacks
 
     return await baseline_callbacks.before_model_callback(
@@ -212,7 +248,11 @@ async def after_tool_callback(
             invocation_id=_valid_invocation_id(tool_context),
             tool_name=tool_name,
         )
-        result = process_observation(runtime, observation)
+        result = process_observation(
+            runtime,
+            observation,
+            updater=_RULE_UPDATER,
+        )
         runtime = result.runtime
 
         transition_observation_id: str | None = None
@@ -351,6 +391,48 @@ def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
     if state.get(GROUNDING_SEQUENCE_KEY) is None:
         state[GROUNDING_SEQUENCE_KEY] = 0
     return runtime
+
+
+def _consume_bound_user_message(state: Any) -> None:
+    bound = _ACTIVE_TURN_MESSAGE.get()
+    if bound is None or bound.consumed or bound.mode != "a-interact":
+        return
+    # Mark first so repeated before_model calls in the same ADK turn cannot
+    # duplicate an Observation even if deterministic processing fails.
+    bound.consumed = True
+    if _task_id(state) != bound.task_id:
+        raise ValueError("run_turn task_id does not match ADK session state")
+    sequence = _next_sequence(state)
+    observation = build_observation(
+        task_id=bound.task_id,
+        observation_type="user_query",
+        phase=_phase(state.get("current_phase", 1)),
+        sequence=sequence,
+        source="adk_run_turn_message",
+        raw=bound.message,
+        summary=_user_message_summary(bound.message),
+    )
+    result = process_observation(
+        _ensure_runtime(state),
+        observation,
+        updater=_RULE_UPDATER,
+    )
+    _store_runtime(state, result.runtime)
+
+
+def _user_message_summary(message: str) -> str:
+    if not isinstance(message, str):
+        raise TypeError("run_turn message must be a string")
+    marker = "User Query:\n"
+    suffix = "\n\nYou have a budget"
+    start = message.find(marker)
+    if start < 0:
+        return message
+    start += len(marker)
+    end = message.find(suffix, start)
+    if end < 0:
+        return message[start:]
+    return message[start:end]
 
 
 def _store_runtime(state: Any, runtime: RequirementGroundingRuntime) -> None:

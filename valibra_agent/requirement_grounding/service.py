@@ -1,4 +1,4 @@
-"""Fail-open orchestration for the pure K0 NoOp kernel."""
+"""Fail-open orchestration shared by NoOp and deterministic Rule updates."""
 
 from __future__ import annotations
 

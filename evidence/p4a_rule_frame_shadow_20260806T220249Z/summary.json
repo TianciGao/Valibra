@@ -1,0 +1,25 @@
+{
+  "baseline_head": "df1be732a2f65fb37be3ed96915146190c18d51e",
+  "completed_at_utc": "2026-08-06T22:02:49Z",
+  "result": "PASS",
+  "stage": "P4.1",
+  "variant": "P4.1-Rule-Shadow",
+  "boundaries": {
+    "ambiguity_created": false,
+    "database_accessed": false,
+    "evaluation_run": false,
+    "model_prompt_modified": false,
+    "new_dependency_installed": false,
+    "prompt_view_rendered_or_injected": false,
+    "provider_called": false,
+    "schema_identifier_bound": false,
+    "user_simulator_called": false
+  },
+  "implementation": {
+    "hint_engine": "deterministic standard-library rules",
+    "runtime_extension": "subclass delegates complete turn to Baseline run_turn",
+    "slot_grounding_status": "hypothesized",
+    "slot_origin": "rule_provisional",
+    "updater": "RuleUpdater"
+  }
+}

@@ -1,4 +1,4 @@
-"""Valibra agent shell with P3 NoOp Shadow lifecycle wiring."""
+"""Valibra agent shell with P4.1 deterministic Rule Shadow wiring."""
 
 from valibra_agent.agent import build_agent
 

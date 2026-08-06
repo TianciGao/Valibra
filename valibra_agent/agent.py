@@ -1,4 +1,4 @@
-"""Valibra Shadow Agent: Baseline behavior plus NoOp grounding lifecycle."""
+"""Valibra Rule Shadow Agent: Baseline behavior plus provisional Frame state."""
 
 from shared.config import settings
 from system_agent.agent import (
@@ -20,7 +20,7 @@ from valibra_agent.grounding_callbacks import (
 
 
 def build_agent(mode: str = "a-interact") -> Agent:
-    """Build Shadow while keeping the Baseline prompt, tools, and behavior.
+    """Build Rule Shadow while keeping the Baseline prompt, tools, and behavior.
 
     Shadow is an a-interact shell. Other modes delegate to the Baseline builder
     so the shared HTTP mode field remains backward compatible.
