@@ -1,0 +1,30 @@
+{
+  "status": "pass",
+  "environment": {
+    "python": "3.12.3",
+    "pydantic": "2.13.4"
+  },
+  "checks": [
+    {
+      "command": "pip check",
+      "status": "pass",
+      "summary": "No broken requirements found."
+    },
+    {
+      "command": "python -m unittest discover -s tests -v",
+      "status": "pass",
+      "tests_run": 81,
+      "existing_tests": 38,
+      "p2_tests": 43,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "elapsed_seconds": 0.299,
+      "note": "One pre-existing StarletteDeprecationWarning was non-failing."
+    },
+    {
+      "command": "python -m compileall valibra_agent tests/valibra",
+      "status": "pass"
+    }
+  ]
+}

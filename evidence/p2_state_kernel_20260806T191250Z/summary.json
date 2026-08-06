@@ -1,0 +1,23 @@
+{
+  "stage": "P2",
+  "variant": "K0",
+  "status": "verification_passed_pre_commit",
+  "verified_at_utc": "2026-08-06T19:12:50Z",
+  "branch": "research/main",
+  "baseline_commit": "e87242ffd9bb8deaf073dfabd6dcb773365d80b6",
+  "schema_version": "1.0",
+  "implementation_files": 8,
+  "test_support_files": 6,
+  "existing_tests": 38,
+  "p2_tests": 43,
+  "total_tests": 81,
+  "constraints": {
+    "adk_callback_connected": false,
+    "http_or_database_started": false,
+    "network_accessed": false,
+    "provider_or_model_called": false,
+    "evaluation_run": false,
+    "dependency_installed_or_changed": false,
+    "p3_started": false
+  }
+}
