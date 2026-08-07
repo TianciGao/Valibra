@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0",
+  "result": "PASS",
+  "started_utc": "2026-08-07T13:35:37Z",
+  "finished_utc": "2026-08-07T13:35:53Z",
+  "offline_contract_checkpoint": "a7e6194c400456c01c99efb5088989827781b00b",
+  "synthetic_input": true,
+  "model": "openai/glm-5.2",
+  "prompt_sha256": "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00",
+  "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+  "grounding_configuration_sha256": "d6ec85e73d6061bdfc8b4eb23196595ed9086a05b622fb75ccfbaaedc4d154b4",
+  "provider_request": {
+    "count": 1,
+    "max_tokens": 32768,
+    "retry_count": 0,
+    "tools": [],
+    "tool_choice": null,
+    "response_format_sent": true,
+    "response_format_type": "json_schema",
+    "response_format_strict": true,
+    "response_format_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "credential_source": "grounding_key_file_only"
+  },
+  "chain": {
+    "strict_json": true,
+    "strict_pydantic": true,
+    "verbatim_mention_anchor": true,
+    "patch_created": true,
+    "reducer_atomic_accept": true,
+    "service_status": "processed"
+  },
+  "slot_summary": {
+    "total": 9,
+    "value": 2,
+    "schema": 2,
+    "operation": 5,
+    "operation_types": [
+      "projection",
+      "filter",
+      "aggregation",
+      "order",
+      "limit"
+    ],
+    "all_hypothesized": true,
+    "all_mentions_verbatim_anchored": true,
+    "schema_unknown_unbound": true,
+    "ambiguity_count": 0
+  },
+  "grounding_revision": 1,
+  "usage": {
+    "grounding": {
+      "input_tokens": 548,
+      "output_tokens": 2014,
+      "reasoning_tokens": 1536,
+      "total_tokens": 2562,
+      "cost": null
+    },
+    "main_agent": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 0,
+      "cost": 0.0
+    },
+    "total_model_tokens": 2562,
+    "total_model_cost": null,
+    "bird_coin": 0,
+    "reasoning_tokens_are_output_subset": true
+  },
+  "latency_ms": 15647.660196002107,
+  "wall_latency_ms": 15649.542,
+  "request_sha256": "bb85a61ef7957d9630a8d275054037c51cb2b66fb5dc9011bdef321138042e44",
+  "response_sha256": "1cc388da1a6bced0b7805b495e87715c9fc8663745701869fed39289522a706b",
+  "private_audit_ref": "research-runtime/grounding-llm/grounding-20260807T133537614759Z-bb85a61ef795-f630c12d.json",
+  "private_audit_new_file_count": 1,
+  "private_audit_sensitive_field_count": 0,
+  "system_agent_used": false,
+  "db_used": false,
+  "user_simulator_used": false,
+  "benchmark_used": false,
+  "tools_used": false,
+  "fallback_used": false,
+  "enum_normalization_used": false,
+  "agent_mode_after_smoke": "rule_shadow",
+  "p4_complete": false
+}

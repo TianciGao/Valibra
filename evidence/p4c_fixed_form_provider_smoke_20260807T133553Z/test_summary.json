@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "pip_check": "pass: No broken requirements found",
+  "unittest": {
+    "status": "pass",
+    "tests_run": 167,
+    "failed": 0
+  },
+  "compileall": "pass",
+  "git_diff_check": "pass",
+  "real_provider_requests": 1,
+  "provider_retries": 0,
+  "fallbacks": 0
+}
