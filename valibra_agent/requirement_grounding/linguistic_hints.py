@@ -1,8 +1,7 @@
-"""Deterministic, standard-library-only linguistic hints for P4.1.
+"""P4.1 的确定性语言规则，只使用 Python 标准库。
 
-The rules intentionally prefer precision over recall. They emit bounded,
-provisional hints only; they never inspect a schema, bind an identifier, create
-an ambiguity, perform I/O, or call a model.
+规则宁可漏掉也不乱猜，只产出有限的临时候选；不看 Schema、不绑定字段、不做 I/O，
+也不调用模型。
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ MAX_HINTS = 32
 
 @dataclass(frozen=True, slots=True)
 class LinguisticHint:
-    """One stable provisional signal produced from caller-supplied text."""
+    """从输入文本中识别出的一条稳定临时线索。"""
 
     hint_id: str
     category: HintCategory
@@ -115,7 +114,7 @@ _AGGREGATION_FUNCTIONS = {
 
 
 def normalize_linguistic_text(text: str) -> str:
-    """Return one deterministic normalized text representation."""
+    """统一 Unicode、空白和大小写，得到稳定文本。"""
 
     if not isinstance(text, str):
         raise TypeError("linguistic hint input must be a string")
@@ -127,7 +126,7 @@ def normalize_linguistic_text(text: str) -> str:
 
 
 def extract_linguistic_hints(text: str) -> tuple[LinguisticHint, ...]:
-    """Extract stable high-precision hints in deterministic source order."""
+    """按原文顺序提取日期、比较、排序、聚合等高精度线索。"""
 
     normalized = normalize_linguistic_text(text)
     if not normalized:
@@ -136,6 +135,7 @@ def extract_linguistic_hints(text: str) -> tuple[LinguisticHint, ...]:
     found: list[LinguisticHint] = []
     occupied_time_spans: list[tuple[int, int]] = []
 
+    # 先识别完整日期和相对时间，避免年份规则重复命中日期中的年份。
     for pattern in (_DATE_RE, _RELATIVE_TIME_RE):
         for match in pattern.finditer(normalized):
             occupied_time_spans.append(match.span())
@@ -257,6 +257,7 @@ def extract_linguistic_hints(text: str) -> tuple[LinguisticHint, ...]:
         )
 
     unique: dict[str, LinguisticHint] = {}
+    # 排序后按稳定 ID 去重，保证同一输入每次产出完全一致。
     for hint in sorted(found, key=lambda item: (item.start, item.end, item.category, item.hint_id)):
         unique.setdefault(hint.hint_id, hint)
     if len(unique) > MAX_HINTS:
@@ -277,6 +278,8 @@ def _append_hint(
     operation_type: str | None = None,
     parameters: tuple[tuple[str, JsonScalar], ...] = (),
 ) -> None:
+    """把一次正则命中转成带稳定 ID 的 Hint。"""
+
     normalized_mention = mention or match.group(0)
     normalized_parameters = tuple(sorted(parameters))
     identity = {
@@ -315,4 +318,6 @@ def _append_hint(
 
 
 def _spans_overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
+    """判断两个半开文本区间是否重叠。"""
+
     return first[0] < second[1] and second[0] < first[1]

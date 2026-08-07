@@ -1,4 +1,4 @@
-"""Valibra P4.1 Rule Shadow HTTP service on the configured agent port."""
+"""Valibra 的 HTTP 服务入口，端口由 SYSTEM_AGENT_PORT 决定。"""
 
 import hashlib
 import json
@@ -23,6 +23,8 @@ runtime = AdkRuntime()
 
 
 def _git_commit() -> str:
+    """读取当前提交号；失败时返回 unknown，不影响服务启动。"""
+
     try:
         completed = subprocess.run(
             ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
@@ -37,6 +39,8 @@ def _git_commit() -> str:
 
 
 def _configuration_summary() -> Dict[str, Any]:
+    """生成不含密钥的运行配置摘要，便于复现实验。"""
+
     preset_report = active_model_preset_report()
     normalized = normalized_system_agent_config()
     return {
@@ -66,6 +70,8 @@ def _configuration_summary() -> Dict[str, Any]:
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:
+    """给配置摘要生成稳定指纹。"""
+
     payload = json.dumps(
         summary,
         ensure_ascii=False,
@@ -77,6 +83,8 @@ def _summary_sha256(summary: Dict[str, Any]) -> str:
 
 @app.on_event("startup")
 async def log_active_configuration() -> None:
+    """启动时记录版本和配置，但不记录凭据。"""
+
     summary = _configuration_summary()
     logger.info(
         "Valibra variant=P4.1-Rule-Shadow git_commit=%s configuration_summary=%s "
@@ -88,6 +96,8 @@ async def log_active_configuration() -> None:
 
 
 class SessionInitRequest(BaseModel):
+    """初始化或重置一个任务会话。"""
+
     task_id: str
     mode: str = "a-interact"
     state: Dict[str, Any] = {}
@@ -95,18 +105,24 @@ class SessionInitRequest(BaseModel):
 
 
 class SessionRunRequest(BaseModel):
+    """向已有会话发送一轮用户消息。"""
+
     task_id: str
     message: str
     mode: str = "a-interact"
 
 
 class SessionCleanupRequest(BaseModel):
+    """清理指定任务的会话状态。"""
+
     task_id: str
     mode: str = "a-interact"
 
 
 @app.post("/init_session")
 async def init_session(req: SessionInitRequest):
+    """创建会话；ADK 不可用时明确返回 503。"""
+
     if not runtime.available:
         raise HTTPException(
             status_code=503,
@@ -122,6 +138,8 @@ async def init_session(req: SessionInitRequest):
 
 @app.post("/run_session")
 async def run_session(req: SessionRunRequest):
+    """执行一轮 Agent 交互。"""
+
     if not runtime.available:
         raise HTTPException(
             status_code=503,
@@ -136,6 +154,8 @@ async def run_session(req: SessionRunRequest):
 
 @app.post("/cleanup_session")
 async def cleanup_session(req: SessionCleanupRequest):
+    """释放指定任务的运行时资源。"""
+
     if not runtime.available:
         raise HTTPException(
             status_code=503,
@@ -149,6 +169,8 @@ async def cleanup_session(req: SessionCleanupRequest):
 
 @app.get("/health")
 async def health():
+    """返回健康状态和可公开的配置指纹。"""
+
     normalized = normalized_system_agent_config()
     preset_report = active_model_preset_report()
     summary = _configuration_summary()

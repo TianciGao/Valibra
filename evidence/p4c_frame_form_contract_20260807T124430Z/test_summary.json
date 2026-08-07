@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "pip_check": "pass: No broken requirements found",
+  "unittest": {
+    "status": "pass",
+    "tests_run": 167
+  },
+  "compileall": "pass",
+  "git_diff_check": "pass",
+  "retained_response_offline_replay": "pass: 2/2 rejected, revision 0",
+  "structured_output_interface_check": "pass: LiteLLM acompletion exposes response_format",
+  "real_provider_calls": 0
+}

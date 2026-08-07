@@ -1,7 +1,6 @@
-"""Deterministic, bounded rendering of K0 business state.
+"""把 Grounding 状态渲染成稳定、有限的 Prompt View。
 
-K0 never injects this view into a model.  This pure renderer exists so the
-contract can be tested before any P3/P4 integration work.
+当前阶段不会把它注入模型；这里只提前验证未来注入时的数据格式。
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ def render_prompt_view(
     max_chars: int = DEFAULT_MAX_CHARS,
     max_items: int = DEFAULT_MAX_ITEMS,
 ) -> str:
-    """Render stable current-state facts without raw Evidence text or logs."""
+    """输出当前槽位和歧义，不包含原始证据正文或日志。"""
 
     if max_chars < 0 or max_items < 0:
         raise ValueError("prompt view limits must be non-negative")
@@ -62,6 +61,7 @@ def render_prompt_view(
             f"resolution={ambiguity.resolution or '-'}"
         )
 
+    # 先限制条目数，再限制总字符数；超出的内容统一显示 omitted 数量。
     selected = entries[:max_items]
     omitted = len(entries) - len(selected)
     lines = [_HEADER]

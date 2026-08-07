@@ -1,4 +1,4 @@
-"""Atomic reducer and cross-object invariants for the K0 business state."""
+"""原子应用 Patch，并检查整个 Grounding 状态的关联关系。"""
 
 from __future__ import annotations
 
@@ -29,20 +29,16 @@ MAX_RUNTIME_JSON_BYTES = 524_288
 
 
 class ReductionError(ValueError):
-    """A patch failed CAS, shape, reference, invariant, or size validation."""
+    """Patch 的版本、结构、引用、约束或大小不合法。"""
 
 
 def apply_patch(
     runtime: RequirementGroundingRuntime,
     patch: RequirementGroundingPatch,
 ) -> RequirementGroundingRuntime:
-    """Apply one complete patch or raise without changing ``runtime``.
+    """完整应用一个 Patch；任何检查失败都保留原 Runtime。"""
 
-    Observation replay is checked before revision CAS so a retry of an already
-    committed observation remains idempotent even when its patch carries the
-    former base revision.
-    """
-
+    # 先查 Observation 是否处理过，再查 revision；这样重试已成功的 Patch 仍是幂等的。
     processed = set(runtime.processed_observation_ids)
     sources = set(patch.source_observation_ids)
     already_processed = sources & processed
@@ -60,6 +56,7 @@ def apply_patch(
     if len(next_processed) > MAX_PROCESSED_OBSERVATIONS:
         raise ReductionError("processed observation limit exceeded")
 
+    # 所有变更先在候选副本上完成，通过全量校验后才生成新 Runtime。
     candidate_state, candidate_phase = _apply_business_operations(
         runtime.grounding_state,
         runtime.phase,
@@ -84,7 +81,7 @@ def apply_patch(
 
 
 def validate_runtime(runtime: RequirementGroundingRuntime) -> None:
-    """Validate the complete runtime without changing it."""
+    """只校验完整 Runtime，不做修改。"""
 
     if len(runtime.processed_observation_ids) > MAX_PROCESSED_OBSERVATIONS:
         raise ReductionError("processed observation limit exceeded")
@@ -107,6 +104,8 @@ def _apply_business_operations(
     phase: int,
     patch: RequirementGroundingPatch,
 ) -> tuple[RequirementGroundingState, int]:
+    """在临时列表上执行增删改和阶段切换。"""
+
     value_slots = list(state.requirement_frame.value_slots)
     schema_slots = list(state.requirement_frame.schema_slots)
     operation_slots = list(state.requirement_frame.operation_slots)
@@ -162,6 +161,7 @@ def _apply_business_operations(
     next_phase = phase
     transition = patch.phase_transition
     if transition is not None:
+        # Phase 2 可废弃旧槽位，也可按明确原因重新打开旧歧义。
         if phase not in (1, 2):
             raise ReductionError(f"invalid current phase: {phase}")
         next_phase = transition.target_phase
@@ -213,6 +213,8 @@ def _validate_state(
     state: RequirementGroundingState,
     processed_observation_ids: set[str],
 ) -> None:
+    """检查数量上限、全局 ID、双向引用和歧义约束。"""
+
     slots = list(_all_slots(state.requirement_frame))
     ambiguities = list(state.ambiguity_index)
     evidence = list(state.evidence)
@@ -230,6 +232,7 @@ def _validate_state(
     if len(candidates) > MAX_CANDIDATES:
         raise ReductionError("candidate limit exceeded")
 
+    # 槽位、歧义、证据和候选共用一个 ID 空间，避免引用含义不明确。
     all_ids = (
         [slot.slot_id for slot in slots]
         + [item.ambiguity_id for item in ambiguities]
@@ -301,6 +304,7 @@ def _validate_state(
             for item in ambiguity.candidate_interpretations
         }
         if ambiguity.status == "unresolved":
+            # 未解决歧义至少要有两个会产生不同 SQL 的有证据候选。
             if len(ambiguity.candidate_interpretations) < 2:
                 raise ReductionError(
                     "unresolved ambiguity requires at least two candidates"
@@ -336,6 +340,8 @@ def _validate_state(
 def _validate_dependencies(
     ambiguity_index: dict[str, GroundedAmbiguityHypothesis],
 ) -> None:
+    """检查歧义依赖是否存在自指、悬空引用或环。"""
+
     known = set(ambiguity_index)
     graph: dict[str, tuple[str, ...]] = {}
     for ambiguity_id, ambiguity in ambiguity_index.items():
@@ -348,6 +354,8 @@ def _validate_dependencies(
     visited: set[str] = set()
 
     def visit(node: str) -> None:
+        """用深度优先搜索检测依赖环。"""
+
         if node in visiting:
             raise ReductionError("ambiguity dependency cycle detected")
         if node in visited:
@@ -383,6 +391,8 @@ def _all_slots_from_lists(
 
 
 def _replace_by_id(values: list[Any], attr: str, replacement: Any) -> None:
+    """在列表中按 ID 原位替换一个对象。"""
+
     target = getattr(replacement, attr)
     for index, item in enumerate(values):
         if getattr(item, attr) == target:
@@ -395,6 +405,8 @@ def _validated_runtime_copy(
     runtime: RequirementGroundingRuntime,
     **updates: Any,
 ) -> RequirementGroundingRuntime:
+    """从旧 Runtime 数据构造并校验一个新副本。"""
+
     data = runtime.model_dump(mode="python")
     data.update(updates)
     return RequirementGroundingRuntime.model_validate(data)

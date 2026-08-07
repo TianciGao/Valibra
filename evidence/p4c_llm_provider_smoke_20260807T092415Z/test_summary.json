@@ -1,0 +1,21 @@
+{
+  "compileall": {
+    "command": ".venv-research/bin/python -m compileall valibra_agent tests/valibra",
+    "status": "passed"
+  },
+  "pip_check": {
+    "command": ".venv-research/bin/python -m pip check",
+    "status": "passed",
+    "summary": "No broken requirements found."
+  },
+  "targeted_tests": {
+    "count": 30,
+    "status": "passed"
+  },
+  "unit_tests": {
+    "command": ".venv-research/bin/python -m unittest discover -s tests -v",
+    "count": 151,
+    "failed": 0,
+    "status": "passed"
+  }
+}

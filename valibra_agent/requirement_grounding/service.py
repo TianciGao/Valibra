@@ -1,4 +1,4 @@
-"""Fail-open orchestration for sync and offline async Grounding updates."""
+"""串起 Observation、Updater 和 Reducer；Grounding 失败时保留旧状态。"""
 
 from __future__ import annotations
 
@@ -28,10 +28,16 @@ from valibra_agent.requirement_grounding.telemetry import (
     record_failure,
     set_last_error,
 )
-from valibra_agent.requirement_grounding.updater import LLMUpdater, NoOpUpdater
+from valibra_agent.requirement_grounding.updater import (
+    GROUNDING_LLM_OBSERVATION_TYPES,
+    LLMUpdater,
+    NoOpUpdater,
+)
 
 
 class Updater(Protocol):
+    """同步 Updater 只负责根据 Observation 提出 Patch。"""
+
     def propose(
         self,
         observation: Observation,
@@ -48,29 +54,31 @@ Reducer = Callable[
 
 
 class GroundingServiceResult(KernelModel):
+    """同步处理结果。"""
+
     status: Literal["processed", "duplicate", "failed"]
     runtime: RequirementGroundingRuntime
     patch_id: str | None = Field(default=None, max_length=128)
 
 
 class LLMGroundingServiceResult(KernelModel):
-    """Async LLM path result; Runtime remains the single state contract."""
+    """异步 LLM 处理结果；业务状态仍只认 Runtime。"""
 
-    status: Literal["processed", "duplicate", "failed"]
+    status: Literal["processed", "duplicate", "failed", "skipped"]
     runtime: RequirementGroundingRuntime
     patch_id: str | None = Field(default=None, max_length=128)
     llm_audit: LLMCallAudit
 
 
 class GroundingControlError(ValueError):
-    """A bounded runtime-control mutation is invalid or ambiguous."""
+    """Pending 等运行控制状态的修改不合法。"""
 
 
 def add_pending_tool_call(
     runtime: RequirementGroundingRuntime,
     pending: PendingToolCall,
 ) -> RequirementGroundingRuntime:
-    """Add one exactly identified Pending call without changing revision."""
+    """登记一个准确 ID 的 Pending 调用，不增加业务 revision。"""
 
     if pending.function_call_id in runtime.pending_tool_calls:
         raise GroundingControlError(
@@ -91,7 +99,7 @@ def remove_pending_tool_call(
     runtime: RequirementGroundingRuntime,
     function_call_id: str,
 ) -> tuple[RequirementGroundingRuntime, PendingToolCall | None]:
-    """Remove only the call matching ``function_call_id``."""
+    """只删除与 function_call_id 精确匹配的 Pending。"""
 
     pending = runtime.pending_tool_calls.get(function_call_id)
     if pending is None:
@@ -111,7 +119,7 @@ def process_phase_transition(
     runtime: RequirementGroundingRuntime,
     observation: Observation,
 ) -> GroundingServiceResult:
-    """Apply an explicit PhaseTransition Observation without semantic inference."""
+    """根据明确的阶段事件进入 Phase 2，不做语义猜测。"""
 
     if observation.observation_id in runtime.processed_observation_ids:
         return GroundingServiceResult(
@@ -132,6 +140,7 @@ def process_phase_transition(
         )
         return GroundingServiceResult(status="failed", runtime=failed)
 
+    # 阶段切换也走标准 Patch/Reducer，保证原子性和统一审计。
     patch = RequirementGroundingPatch(
         patch_id=f"phase-transition:{observation.observation_id}",
         base_revision=runtime.grounding_revision,
@@ -179,7 +188,7 @@ def process_observation(
     updater: Updater | None = None,
     reducer: Reducer = apply_patch,
 ) -> GroundingServiceResult:
-    """Process one Observation while preserving valid business state on error."""
+    """同步处理一条 Observation；失败时返回仍然有效的旧业务状态。"""
 
     if observation.observation_id in runtime.processed_observation_ids:
         return GroundingServiceResult(
@@ -189,9 +198,7 @@ def process_observation(
         )
 
     selected_updater = updater or NoOpUpdater()
-    # All untrusted extension points receive a detached working copy.  Even a
-    # faulty future Updater/Reducer that mutates before raising cannot corrupt
-    # the caller's last valid Runtime.
+    # Updater 和 Reducer 只拿到深拷贝；即使扩展代码先修改后报错，也污染不了旧状态。
     working = RequirementGroundingRuntime.model_validate_json(
         runtime.model_dump_json()
     )
@@ -201,6 +208,7 @@ def process_observation(
         updater_calls=1,
     )
     try:
+        # Updater 只提建议，是否真正落地由下一步 Reducer 决定。
         patch = selected_updater.propose(
             observation,
             working.grounding_state,
@@ -255,7 +263,7 @@ async def process_observation_with_llm(
     reducer: Reducer = apply_patch,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> LLMGroundingServiceResult:
-    """Run one injected async LLM update with atomic fail-open semantics."""
+    """执行一次异步 LLM 更新；超时或异常都不破坏原业务状态。"""
 
     config = updater.config
     if observation.observation_id in runtime.processed_observation_ids:
@@ -269,12 +277,25 @@ async def process_observation_with_llm(
             ),
         )
 
+    if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
+        # 当前只允许用户问题和用户回答触发 LLM，工具结果直接跳过。
+        return LLMGroundingServiceResult(
+            status="skipped",
+            runtime=runtime,
+            llm_audit=_llm_audit(
+                updater,
+                status="ineligible",
+                attempted=False,
+            ),
+        )
+
     calls_so_far = runtime.metrics.root.get("llm_updater_calls", 0)
     if (
         isinstance(calls_so_far, bool)
         or not isinstance(calls_so_far, (int, float))
         or calls_so_far >= config.max_calls_per_task
     ):
+        # 每题调用次数有硬上限，避免失控调用和额外费用。
         counted = increment_metrics(runtime, observations_seen=1)
         error = RuntimeError("Grounding LLM call limit reached")
         failed = record_failure(
@@ -297,6 +318,7 @@ async def process_observation_with_llm(
             ),
         )
 
+    # 和同步路径一样，模型及 Reducer 都只处理与旧状态隔离的副本。
     working = RequirementGroundingRuntime.model_validate_json(
         runtime.model_dump_json()
     )
@@ -314,6 +336,7 @@ async def process_observation_with_llm(
             timeout=config.timeout_seconds,
         )
     except TimeoutError as exc:
+        # 本地取消不代表 Provider 一定停止执行，因此审计会标出潜在继续计费。
         latency_ms = _elapsed_ms(monotonic, started)
         failed = increment_llm_call_metrics(
             counted,
@@ -377,6 +400,7 @@ async def process_observation_with_llm(
 
     latency_ms = _elapsed_ms(monotonic, started)
     try:
+        # 只有 Provider 返回、响应解析和 Reducer 全部成功，Patch 才会落地。
         reduced = reducer(working, patch)
         reduced = increment_metrics(
             reduced,
@@ -434,6 +458,8 @@ async def process_observation_with_llm(
 
 
 def _elapsed_ms(monotonic: Callable[[], float], started: float) -> float:
+    """安全计算非负毫秒耗时；异常时按 0 处理。"""
+
     try:
         elapsed = monotonic() - started
     except Exception:
@@ -453,6 +479,8 @@ def _llm_audit(
     timed_out: bool = False,
     error: BaseException | None = None,
 ) -> LLMCallAudit:
+    """把单次调用记录器整理成有限、可序列化的审计结果。"""
+
     usage = recorder or LLMCallTelemetryRecorder()
     timeout_relevant = timed_out and attempted
     return LLMCallAudit(
@@ -463,8 +491,15 @@ def _llm_audit(
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         reasoning_tokens=usage.reasoning_tokens,
+        total_tokens=usage.total_tokens,
         latency_ms=latency_ms,
         cost=usage.cost,
+        model=usage.model,
+        provider=usage.provider,
+        credential_source=usage.credential_source,
+        request_sha256=usage.request_sha256,
+        response_sha256=usage.response_sha256,
+        raw_audit_ref=usage.raw_audit_ref,
         timed_out=timed_out,
         provider_may_continue_after_cancel=(
             _declared_client_bool(
@@ -487,6 +522,8 @@ def _llm_audit(
 
 
 def _declared_client_bool(client: object, name: str) -> bool | None:
+    """只接受客户端明确声明的布尔能力。"""
+
     value = getattr(client, name, None)
     return value if isinstance(value, bool) else None
 
@@ -495,6 +532,8 @@ def _validated_runtime_copy(
     runtime: RequirementGroundingRuntime,
     **updates: object,
 ) -> RequirementGroundingRuntime:
+    """构造并校验 Runtime 副本。"""
+
     data = runtime.model_dump(mode="python")
     data.update(updates)
     return RequirementGroundingRuntime.model_validate(data)
@@ -504,5 +543,7 @@ def _assert_revision_unchanged(
     before: RequirementGroundingRuntime,
     after: RequirementGroundingRuntime,
 ) -> None:
+    """确保控制状态和遥测不会偷偷增加业务 revision。"""
+
     if before.grounding_revision != after.grounding_revision:
         raise AssertionError("runtime-control changes cannot increment revision")

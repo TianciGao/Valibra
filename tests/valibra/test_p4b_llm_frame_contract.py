@@ -554,7 +554,7 @@ class WiringBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["grounding_updater"], "rule")
         self.assertFalse(summary["prompt_view_injected"])
 
-    def test_llm_contract_has_no_provider_db_tool_or_prompt_view_implementation(self):
+    def test_llm_contract_has_no_db_tool_or_prompt_view_implementation(self):
         source = "\n".join(
             (
                 inspect.getsource(updater_module),
@@ -568,7 +568,6 @@ class WiringBoundaryTests(unittest.TestCase):
             "task_data",
             "test_cases",
             "sol_sql",
-            "litellm",
             "httpx",
             "requests",
             "spacy",

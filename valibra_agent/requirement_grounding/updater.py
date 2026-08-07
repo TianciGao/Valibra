@@ -1,4 +1,4 @@
-"""NoOp, deterministic Rule, and offline-testable LLM updater contracts."""
+"""三种 Updater：空操作、确定性规则，以及可离线测试的 LLM 版本。"""
 
 from __future__ import annotations
 
@@ -6,17 +6,22 @@ import hashlib
 import json
 import math
 import os
+import re
+import uuid
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
-from pydantic import ConfigDict, Field, JsonValue, model_validator
+from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from shared.model_presets import (
     canonical_json as preset_canonical_json,
     load_model_preset,
 )
+from shared.audit import to_jsonable
 
 from valibra_agent.requirement_grounding.linguistic_hints import (
     LinguisticHint,
@@ -46,23 +51,59 @@ GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_MAX_CALLS_PER_TASK",
     "GROUNDING_PROMPT_SHA256",
 )
+GROUNDING_PROVIDER_ENV_NAMES = (
+    "GROUNDING_API_BASE",
+    "GROUNDING_API_KEY",
+    "GROUNDING_API_KEY_FILE",
+    "GROUNDING_USE_BEARER_FOR_CUSTOM_BASE",
+)
+GROUNDING_LLM_OBSERVATION_TYPES = frozenset({"user_query", "user_answer"})
 
-LLM_FRAME_PROMPT = """You extract a provisional requirement frame from bounded JSON input.
-Return exactly one JSON object with keys value_slots, schema_slots,
-operation_slots, and ambiguities. Do not return Markdown or prose.
+_BEARER_TOKEN_RE = re.compile(
+    r"Authorization:\s*Bearer\s+([^\"'\\\s]+)",
+    flags=re.IGNORECASE,
+)
+_SENSITIVE_AUDIT_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "password",
+        "secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "extra_headers",
+        "headers",
+    }
+)
 
-Each value slot has exactly: slot_role, mention, interpretation, value_type.
-Each schema slot has exactly: slot_role, mention, interpretation. It is only a
-natural-language candidate; never emit a table, column, binding, identifier,
-database name, confidence, or hidden fact.
-Each operation slot has exactly: slot_role, mention, interpretation,
-operation_type, parameters. Parameters must contain JSON scalar values only.
-ambiguities must be an empty array.
+# 这是发给 Grounding 模型的冻结 Prompt；其 SHA 用于保证实验可复现。
+LLM_FRAME_PROMPT = """Fill the fixed Valibra requirement-frame form from bounded JSON input.
+You are filling a form, not designing a data structure. Return exactly one JSON
+object and no Markdown, prose, comments, or additional fields.
 
-Only use the supplied Observation and current bounded State. All output is
-provisional/hypothesized. If evidence is insufficient, return empty arrays.
-Never infer from ground truth, test cases, hidden follow-up, schema contents,
-prompt history, audit logs, tools, network resources, or outside knowledge."""
+The top-level fields must be exactly: value_slots, schema_slots,
+operation_slots, ambiguities. ambiguities must always be an empty array.
+
+Each value slot must contain exactly: slot_role, mention, interpretation,
+value_type. Each schema slot must contain exactly: slot_role, mention,
+interpretation. Schema slots are natural-language candidates only: never emit
+a real table, column, database identifier, binding, confidence, or hidden fact.
+Each operation slot must contain exactly: slot_role, mention, interpretation,
+operation_type, parameters. operation_type must be exactly one of projection,
+filter, aggregation, group, order, limit, distinct, or other. If no listed type
+matches exactly, use other; never invent a new value. parameters may contain
+JSON scalar values only, never nested objects or arrays.
+
+Every mention must be non-empty and copied verbatim as one continuous,
+case-sensitive substring of observation_text. Put any paraphrase or explanation
+only in interpretation. Never rewrite a mention.
+
+Only use observation_text, the supplied Observation, and current bounded State.
+All output is provisional/hypothesized. If evidence is insufficient, return
+empty arrays. Never infer from ground truth, test cases, hidden follow-up,
+schema contents, prompt history, audit logs, tools, network resources, or
+outside knowledge."""
 LLM_FRAME_PROMPT_SHA256 = hashlib.sha256(
     LLM_FRAME_PROMPT.encode("utf-8")
 ).hexdigest()
@@ -73,11 +114,19 @@ MAX_LLM_FRAME_SLOTS = 64
 
 
 class _StrictLLMModel(KernelModel):
-    model_config = ConfigDict(**KernelModel.model_config, strict=True)
+    """LLM 边界模型使用严格类型，不接受自动类型转换。"""
+
+    model_config = ConfigDict(
+        **{
+            **KernelModel.model_config,
+            "strict": True,
+            "str_strip_whitespace": False,
+        }
+    )
 
 
 class GroundingLLMConfig(_StrictLLMModel):
-    """Frozen, self-verifying configuration for one LLM Updater experiment."""
+    """一次 LLM Updater 实验的冻结、自校验配置。"""
 
     mode: Literal["llm"] = "llm"
     model_preset: str = Field(min_length=1, max_length=128)
@@ -87,12 +136,15 @@ class GroundingLLMConfig(_StrictLLMModel):
     max_tokens: int = Field(ge=1, le=131_072)
     max_calls_per_task: int = Field(ge=1, le=128)
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    form_schema_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_frozen_hashes(self) -> "GroundingLLMConfig":
         if self.prompt_sha256 != LLM_FRAME_PROMPT_SHA256:
             raise ValueError("GROUNDING_PROMPT_SHA256 does not match frozen prompt")
+        if self.form_schema_sha256 != LLM_FRAME_FORM_SCHEMA_SHA256:
+            raise ValueError("LLM Frame form schema SHA256 mismatch")
         try:
             preset_config = json.loads(self.preset_config_json)
         except json.JSONDecodeError as exc:
@@ -123,44 +175,101 @@ class GroundingLLMConfig(_StrictLLMModel):
             max_tokens=self.max_tokens,
             max_calls_per_task=self.max_calls_per_task,
             prompt_sha256=self.prompt_sha256,
+            form_schema_sha256=self.form_schema_sha256,
         ):
             raise ValueError("grounding configuration SHA256 mismatch")
         return self
 
     @property
     def preset_config(self) -> dict[str, JsonValue]:
+        """读取已校验的模型预设 JSON。"""
+
         return json.loads(self.preset_config_json)
 
 
 class GroundingLLMRequest(_StrictLLMModel):
+    """发送给可注入 LLM 客户端的完整请求。"""
+
     prompt: str = Field(min_length=1, max_length=MAX_LLM_FRAME_INPUT_CHARS)
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    form_schema_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     model_preset: str = Field(min_length=1, max_length=128)
     preset_config: dict[str, JsonValue]
     max_tokens: int = Field(ge=1, le=131_072)
+    timeout_seconds: float = Field(gt=0.0, le=600.0)
 
 
 class GroundingLLMUsage(_StrictLLMModel):
+    """单次 Grounding 模型的 Token 和费用。"""
+
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
-    cost: float = Field(default=0.0, ge=0.0)
+    total_tokens: int = Field(default=0, ge=0)
+    cost: float | None = Field(default=None, ge=0.0)
 
     @model_validator(mode="after")
     def validate_finite_cost(self) -> "GroundingLLMUsage":
-        if not math.isfinite(self.cost):
+        if self.cost is not None and not math.isfinite(self.cost):
             raise ValueError("LLM cost must be finite")
         return self
 
 
 class GroundingLLMResponse(_StrictLLMModel):
+    """LLM 客户端返回的正文、用量和审计摘要。"""
+
     content: str = Field(max_length=MAX_LLM_FRAME_RESPONSE_CHARS)
     usage: GroundingLLMUsage = Field(default_factory=GroundingLLMUsage)
+    model: str = Field(default="", max_length=256)
+    provider: str = Field(default="", max_length=128)
+    credential_source: Literal["", "direct", "file"] = ""
+    request_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
+    response_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
+    raw_audit_ref: str = Field(default="", max_length=1024)
+
+
+class GroundingProviderConfig(_StrictLLMModel):
+    """不含密钥正文、可自校验的 Provider 连接配置。"""
+
+    api_base: str = Field(min_length=1, max_length=2048)
+    model_id: str = Field(min_length=1, max_length=256)
+    llm_configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    credential_source: Literal["direct", "file"]
+    api_key_file: str | None = Field(default=None, max_length=2048)
+    use_bearer_for_custom_base: bool = False
+    retry_count: Literal[0] = 0
+    raw_audit_dir: str = Field(min_length=1, max_length=4096)
+    configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_provider_config(self) -> "GroundingProviderConfig":
+        parsed = urlsplit(self.api_base)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("GROUNDING_API_BASE must be an absolute HTTP(S) URL")
+        if self.credential_source == "file" and not self.api_key_file:
+            raise ValueError("file credential source requires api_key_file")
+        if self.credential_source == "direct" and self.api_key_file is not None:
+            raise ValueError("direct credential source cannot retain api_key_file")
+        expected = _provider_configuration_sha256(
+            api_base=self.api_base,
+            model_id=self.model_id,
+            llm_configuration_sha256=self.llm_configuration_sha256,
+            credential_source=self.credential_source,
+            use_bearer_for_custom_base=self.use_bearer_for_custom_base,
+            retry_count=self.retry_count,
+        )
+        if self.configuration_sha256 != expected:
+            raise ValueError("Grounding Provider configuration SHA256 mismatch")
+        return self
+
+
+class GroundingProviderError(RuntimeError):
+    """已脱敏的 Provider 错误，不包含响应正文或密钥。"""
 
 
 class AsyncGroundingLLMClient(Protocol):
-    """Injectable async boundary; P4.2a tests provide only fake clients."""
+    """可替换的异步客户端边界，测试时可注入 fake client。"""
 
     provider_may_continue_after_cancel: bool
     provider_may_bill_after_cancel: bool
@@ -171,22 +280,121 @@ class AsyncGroundingLLMClient(Protocol):
     ) -> GroundingLLMResponse | Mapping[str, Any]: ...
 
 
+class LiteLLMGroundingClient:
+    """LiteLLM 异步适配器：凭据独立，原始审计单独落盘。"""
+
+    provider_may_continue_after_cancel = True
+    provider_may_bill_after_cancel = True
+
+    def __init__(
+        self,
+        config: GroundingProviderConfig,
+        *,
+        environment: Mapping[str, str] | None = None,
+        completion: Callable[..., Awaitable[Any]] | None = None,
+    ) -> None:
+        """保存已校验配置，并允许测试注入 completion 函数。"""
+
+        self.config = GroundingProviderConfig.model_validate(
+            config.model_dump(mode="python")
+        )
+        self._environment = environment if environment is not None else os.environ
+        self._completion = completion
+
+    async def complete(self, request: GroundingLLMRequest) -> GroundingLLMResponse:
+        """调用 Provider，保存脱敏审计，再返回统一响应。"""
+
+        if request.preset_config.get("model") != self.config.model_id:
+            raise GroundingProviderError("Grounding request model mismatch")
+        if request.configuration_sha256 != self.config.llm_configuration_sha256:
+            raise GroundingProviderError("Grounding LLM configuration mismatch")
+
+        # 密钥只在发请求和落盘前的泄漏检查中使用，不进入配置或返回值。
+        api_key = _read_grounding_api_key(self.config, self._environment)
+        request_audit, provider_kwargs = _build_provider_request(
+            request,
+            self.config,
+            api_key=api_key,
+        )
+        request_sha = _stable_json_sha256(request_audit)
+        audit_path = _new_private_audit_path(self.config, request_sha)
+        completion = self._completion
+        if completion is None:
+            import litellm
+
+            completion = litellm.acompletion
+
+        try:
+            response = await completion(**provider_kwargs)
+        except Exception as exc:
+            # 失败审计只保存错误类型，不保存可能带敏感信息的异常正文。
+            _write_private_provider_audit(
+                audit_path,
+                {
+                    "schema_version": "1.0",
+                    "status": "failed",
+                    "request": request_audit,
+                    "request_sha256": request_sha,
+                    "error_type": type(exc).__name__[:128],
+                },
+                api_key=api_key,
+            )
+            raise GroundingProviderError(
+                f"Grounding Provider request failed ({type(exc).__name__[:128]})"
+            ) from None
+
+        # 原始响应先递归移除敏感字段，再计算指纹和写入私有目录。
+        raw_response = _sanitize_audit_value(to_jsonable(response))
+        response_sha = _stable_json_sha256(raw_response)
+        _write_private_provider_audit(
+            audit_path,
+            {
+                "schema_version": "1.0",
+                "status": "succeeded",
+                "request": request_audit,
+                "request_sha256": request_sha,
+                "response": raw_response,
+                "response_sha256": response_sha,
+            },
+            api_key=api_key,
+        )
+        content = _provider_response_content(response)
+        usage = _provider_usage(response)
+        provider = _provider_name(response)
+        return GroundingLLMResponse(
+            content=content,
+            usage=usage,
+            model=self.config.model_id,
+            provider=provider,
+            credential_source=self.config.credential_source,
+            request_sha256=request_sha,
+            response_sha256=response_sha,
+            raw_audit_ref=_private_audit_ref(self.config, audit_path),
+        )
+
+
 class LLMValueSlotProposal(_StrictLLMModel):
+    """模型提出的值槽位候选。"""
+
     slot_role: str = Field(min_length=1, max_length=64)
-    mention: str = Field(max_length=256)
+    mention: str = Field(min_length=1, max_length=256)
     interpretation: str = Field(min_length=1, max_length=512)
-    value_type: str | None = Field(default=None, max_length=64)
+    value_type: str | None = Field(max_length=64)
 
 
 class LLMSchemaSlotProposal(_StrictLLMModel):
+    """模型提出的 Schema 概念；此时不允许绑定真实字段。"""
+
     slot_role: str = Field(min_length=1, max_length=64)
-    mention: str = Field(max_length=256)
+    mention: str = Field(min_length=1, max_length=256)
     interpretation: str = Field(min_length=1, max_length=512)
 
 
 class LLMOperationSlotProposal(_StrictLLMModel):
+    """模型提出的查询操作候选。"""
+
     slot_role: str = Field(min_length=1, max_length=64)
-    mention: str = Field(max_length=256)
+    mention: str = Field(min_length=1, max_length=256)
     interpretation: str = Field(min_length=1, max_length=512)
     operation_type: Literal[
         "projection",
@@ -198,10 +406,31 @@ class LLMOperationSlotProposal(_StrictLLMModel):
         "distinct",
         "other",
     ]
-    parameters: dict[str, JsonValue] = Field(default_factory=dict)
+    parameters: dict[str, str | int | float | bool | None]
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_scalar_parameters(
+        cls,
+        value: dict[str, str | int | float | bool | None],
+    ) -> dict[str, str | int | float | bool | None]:
+        """限制表单参数的数量、长度和有限数值，不做类型转换。"""
+
+        if len(value) > 16:
+            raise ValueError("operation parameters exceed item limit")
+        for key, item in value.items():
+            if len(key) > 64:
+                raise ValueError("operation parameter key exceeds length limit")
+            if isinstance(item, str) and len(item) > 256:
+                raise ValueError("operation parameter value exceeds length limit")
+            if isinstance(item, float) and not math.isfinite(item):
+                raise ValueError("operation parameter must be finite")
+        return value
 
 
 class LLMFrameProposal(_StrictLLMModel):
+    """模型输出的完整临时 Frame；当前明确禁止生成歧义。"""
+
     value_slots: list[LLMValueSlotProposal] = Field(max_length=MAX_LLM_FRAME_SLOTS)
     schema_slots: list[LLMSchemaSlotProposal] = Field(max_length=MAX_LLM_FRAME_SLOTS)
     operation_slots: list[LLMOperationSlotProposal] = Field(max_length=MAX_LLM_FRAME_SLOTS)
@@ -215,8 +444,16 @@ class LLMFrameProposal(_StrictLLMModel):
         return self
 
 
+# 机器可读表单只从上面的严格 Pydantic 模型生成，Provider 与本地校验共用。
+LLM_FRAME_FORM_SCHEMA = LLMFrameProposal.model_json_schema()
+LLM_FRAME_FORM_SCHEMA_JSON = preset_canonical_json(LLM_FRAME_FORM_SCHEMA)
+LLM_FRAME_FORM_SCHEMA_SHA256 = hashlib.sha256(
+    LLM_FRAME_FORM_SCHEMA_JSON.encode("utf-8")
+).hexdigest()
+
+
 class LLMUpdater:
-    """Async LLM Frame contract; it is not wired into the current Agent."""
+    """异步 LLM Frame Updater；当前尚未接入在线 Agent 回调。"""
 
     mode = "llm"
 
@@ -225,6 +462,8 @@ class LLMUpdater:
         client: AsyncGroundingLLMClient,
         config: GroundingLLMConfig,
     ) -> None:
+        """绑定客户端，并复制一份已校验的冻结配置。"""
+
         self.client = client
         self.config = GroundingLLMConfig.model_validate(
             config.model_dump(mode="python")
@@ -238,6 +477,12 @@ class LLMUpdater:
         base_revision: int,
         telemetry: LLMCallTelemetryRecorder,
     ) -> RequirementGroundingPatch:
+        """把一条用户 Observation 转成 LLM Patch 提案。"""
+
+        if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
+            raise ValueError(
+                "LLMUpdater accepts only user_query and user_answer observations"
+            )
         detached_observation = Observation.model_validate(
             observation.model_dump(mode="python")
         )
@@ -250,6 +495,7 @@ class LLMUpdater:
             base_revision=base_revision,
             config=self.config,
         )
+        # 从这里起请求可能已产生费用，因此先标记 attempted。
         telemetry.mark_provider_attempted()
         raw_response = await self.client.complete(request)
         response = GroundingLLMResponse.model_validate(raw_response)
@@ -257,9 +503,24 @@ class LLMUpdater:
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             reasoning_tokens=response.usage.reasoning_tokens,
+            total_tokens=(
+                response.usage.total_tokens
+                or response.usage.input_tokens + response.usage.output_tokens
+            ),
             cost=response.usage.cost,
         )
-        proposal = _parse_llm_frame_response(response.content)
+        telemetry.capture_provider_audit(
+            model=response.model,
+            provider=response.provider,
+            credential_source=response.credential_source,
+            request_sha256=response.request_sha256,
+            response_sha256=response.response_sha256,
+            raw_audit_ref=response.raw_audit_ref,
+        )
+        proposal = _parse_llm_frame_response(
+            response.content,
+            observation_text=_observation_text(detached_observation),
+        )
         return _llm_patch_from_proposal(
             detached_observation,
             detached_state,
@@ -272,7 +533,7 @@ def load_grounding_llm_config(
     project_root: Path,
     environment: Mapping[str, str] | None = None,
 ) -> GroundingLLMConfig:
-    """Load but never activate a model preset, then freeze all LLM settings."""
+    """读取但不激活模型预设，并冻结全部 LLM 实验参数。"""
 
     source = environment if environment is not None else os.environ
     missing = [name for name in GROUNDING_LLM_ENV_NAMES if not source.get(name)]
@@ -305,6 +566,7 @@ def load_grounding_llm_config(
         max_tokens=max_tokens,
         max_calls_per_task=max_calls,
         prompt_sha256=LLM_FRAME_PROMPT_SHA256,
+        form_schema_sha256=LLM_FRAME_FORM_SCHEMA_SHA256,
     )
     return GroundingLLMConfig(
         mode="llm",
@@ -315,12 +577,82 @@ def load_grounding_llm_config(
         max_tokens=max_tokens,
         max_calls_per_task=max_calls,
         prompt_sha256=LLM_FRAME_PROMPT_SHA256,
+        form_schema_sha256=LLM_FRAME_FORM_SCHEMA_SHA256,
         configuration_sha256=config_sha,
     )
 
 
+def load_grounding_provider_config(
+    project_root: Path,
+    llm_config: GroundingLLMConfig,
+    environment: Mapping[str, str] | None = None,
+) -> GroundingProviderConfig:
+    """只读取显式 GROUNDING_* 连接配置，不借用主模型或用户模型配置。"""
+
+    source = environment if environment is not None else os.environ
+    api_base = str(source.get("GROUNDING_API_BASE", "")).strip()
+    direct_key_present = bool(str(source.get("GROUNDING_API_KEY", "")).strip())
+    key_file_value = str(source.get("GROUNDING_API_KEY_FILE", "")).strip()
+    if not api_base:
+        raise ValueError("missing Grounding Provider variable: GROUNDING_API_BASE")
+    # 直传密钥和密钥文件必须二选一，不能同时配置或同时为空。
+    if direct_key_present == bool(key_file_value):
+        raise ValueError(
+            "configure exactly one of GROUNDING_API_KEY or GROUNDING_API_KEY_FILE"
+        )
+
+    credential_source: Literal["direct", "file"]
+    resolved_key_file: str | None = None
+    if key_file_value:
+        credential_source = "file"
+        key_path = Path(key_file_value).expanduser()
+        if not key_path.is_absolute():
+            key_path = project_root / key_path
+        key_path = key_path.resolve()
+        try:
+            if not key_path.is_file() or key_path.stat().st_size <= 0:
+                raise ValueError("GROUNDING_API_KEY_FILE must be a non-empty file")
+            with key_path.open("rb") as handle:
+                if not handle.readable():
+                    raise ValueError("GROUNDING_API_KEY_FILE must be readable")
+        except OSError as exc:
+            raise ValueError("GROUNDING_API_KEY_FILE is not readable") from exc
+        resolved_key_file = str(key_path)
+    else:
+        credential_source = "direct"
+
+    use_bearer = _parse_bool(
+        str(source.get("GROUNDING_USE_BEARER_FOR_CUSTOM_BASE", "false")),
+        "GROUNDING_USE_BEARER_FOR_CUSTOM_BASE",
+    )
+    model_id = str(llm_config.preset_config.get("model", ""))
+    if not model_id:
+        raise ValueError("Grounding model preset does not contain a model ID")
+    provider_sha = _provider_configuration_sha256(
+        api_base=api_base,
+        model_id=model_id,
+        llm_configuration_sha256=llm_config.configuration_sha256,
+        credential_source=credential_source,
+        use_bearer_for_custom_base=use_bearer,
+        retry_count=0,
+    )
+    return GroundingProviderConfig(
+        api_base=api_base,
+        model_id=model_id,
+        llm_configuration_sha256=llm_config.configuration_sha256,
+        credential_source=credential_source,
+        api_key_file=resolved_key_file,
+        use_bearer_for_custom_base=use_bearer,
+        retry_count=0,
+        raw_audit_dir=str(
+            (project_root / "research-runtime" / "grounding-llm").resolve()
+        ),
+        configuration_sha256=provider_sha,
+    )
+
+
 class NoOpUpdater:
-    """Produce a deterministic empty Patch without changing State."""
+    """生成确定性的空 Patch，用来验证链路而不改业务状态。"""
 
     mode = "noop"
 
@@ -331,8 +663,9 @@ class NoOpUpdater:
         *,
         base_revision: int,
     ) -> RequirementGroundingPatch:
-        # Force contract validation of the supplied State without retaining or
-        # mutating it.  K0 deliberately derives no semantic facts.
+        """消费 Observation，但不提出任何业务变更。"""
+
+        # 仍复制并校验 State，用来尽早发现调用方传入的坏数据。
         RequirementGroundingState.model_validate(state.model_dump(mode="python"))
         return RequirementGroundingPatch(
             patch_id=f"noop:{observation.observation_id}",
@@ -343,7 +676,7 @@ class NoOpUpdater:
 
 
 class RuleUpdater:
-    """Build provisional Frame patches from bounded deterministic hints."""
+    """用有限的确定性语言规则生成临时 Frame Patch。"""
 
     mode = "rule"
 
@@ -354,6 +687,8 @@ class RuleUpdater:
         *,
         base_revision: int,
     ) -> RequirementGroundingPatch:
+        """只从用户问题或回答中提取高精度规则线索。"""
+
         detached_state = RequirementGroundingState.model_validate(
             state.model_dump(mode="python")
         )
@@ -380,6 +715,7 @@ class RuleUpdater:
         existing = _slot_index(detached_state)
         additions = []
         updates = []
+        # 用户回答更新旧槽位时必须唯一匹配，匹配不清就宁可跳过。
         answer_role_counts = Counter(
             (hint.slot_kind, hint.slot_role) for hint in hints
         )
@@ -440,6 +776,8 @@ def build_noop_patch(
     *,
     base_revision: int,
 ) -> RequirementGroundingPatch:
+    """函数式入口：构建一个 NoOp Patch。"""
+
     return NoOpUpdater().propose(
         observation,
         state,
@@ -453,6 +791,8 @@ def build_rule_patch(
     *,
     base_revision: int,
 ) -> RequirementGroundingPatch:
+    """函数式入口：构建一个规则 Patch。"""
+
     return RuleUpdater().propose(
         observation,
         state,
@@ -464,6 +804,8 @@ def _rule_noop_patch(
     observation: Observation,
     base_revision: int,
 ) -> RequirementGroundingPatch:
+    """规则没有足够把握时返回可审计的空 Patch。"""
+
     return RequirementGroundingPatch(
         patch_id=f"rule-noop.{observation.observation_id}",
         base_revision=base_revision,
@@ -473,8 +815,9 @@ def _rule_noop_patch(
 
 
 def _observation_text(observation: Observation) -> str:
-    # Tool string responses were canonicalized as JSON in P3; decode only that
-    # exact scalar shape. No history, hidden state, or audit log is consulted.
+    """取规则要分析的文本，不读取历史、隐藏状态或审计日志。"""
+
+    # P3 会把工具字符串规范成 JSON；这里只解码这一种明确格式。
     text = observation.summary
     if observation.observation_type == "user_answer" and text.startswith('"'):
         try:
@@ -487,6 +830,8 @@ def _observation_text(observation: Observation) -> str:
 
 
 def _slot_index(state: RequirementGroundingState) -> dict[str, GroundingSlot]:
+    """把三类槽位合并成按 slot_id 查询的索引。"""
+
     frame = state.requirement_frame
     return {
         slot.slot_id: slot
@@ -499,6 +844,8 @@ def _slot_index(state: RequirementGroundingState) -> dict[str, GroundingSlot]:
 
 
 def _slot_id(hint: LinguisticHint) -> str:
+    """从稳定 Hint ID 派生稳定 Slot ID。"""
+
     return f"slot.{hint.slot_kind}.{hint.hint_id.removeprefix('hint.')}"
 
 
@@ -510,6 +857,8 @@ def _slot_from_hint(
     observation: Observation,
     current: GroundingSlot | None,
 ) -> GroundingSlot:
+    """把规则 Hint 新建或合并成对应类型的槽位。"""
+
     existing_evidence = tuple(getattr(current, "evidence_refs", ()))
     evidence_refs = tuple(dict.fromkeys((*existing_evidence, evidence_id)))
     introduced_in_phase = getattr(
@@ -557,7 +906,10 @@ def _grounding_configuration_sha256(
     max_tokens: int,
     max_calls_per_task: int,
     prompt_sha256: str,
+    form_schema_sha256: str,
 ) -> str:
+    """计算 LLM 实验参数的稳定指纹。"""
+
     payload = {
         "GROUNDING_UPDATER_MODE": mode,
         "GROUNDING_MODEL_PRESET": model_preset,
@@ -566,6 +918,31 @@ def _grounding_configuration_sha256(
         "GROUNDING_MAX_TOKENS": max_tokens,
         "GROUNDING_MAX_CALLS_PER_TASK": max_calls_per_task,
         "GROUNDING_PROMPT_SHA256": prompt_sha256,
+        "LLM_FRAME_FORM_SCHEMA_SHA256": form_schema_sha256,
+    }
+    return hashlib.sha256(
+        preset_canonical_json(payload).encode("utf-8")
+    ).hexdigest()
+
+
+def _provider_configuration_sha256(
+    *,
+    api_base: str,
+    model_id: str,
+    llm_configuration_sha256: str,
+    credential_source: str,
+    use_bearer_for_custom_base: bool,
+    retry_count: int,
+) -> str:
+    """计算不含密钥的 Provider 配置指纹。"""
+
+    payload = {
+        "GROUNDING_API_BASE": api_base,
+        "GROUNDING_MODEL_ID": model_id,
+        "GROUNDING_LLM_CONFIGURATION_SHA256": llm_configuration_sha256,
+        "GROUNDING_CREDENTIAL_SOURCE": credential_source,
+        "GROUNDING_USE_BEARER_FOR_CUSTOM_BASE": use_bearer_for_custom_base,
+        "GROUNDING_PROVIDER_RETRY_COUNT": retry_count,
     }
     return hashlib.sha256(
         preset_canonical_json(payload).encode("utf-8")
@@ -592,6 +969,15 @@ def _parse_positive_float(raw: str, name: str) -> float:
     return value
 
 
+def _parse_bool(raw: str, name: str) -> bool:
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 def _build_llm_request(
     observation: Observation,
     state: RequirementGroundingState,
@@ -599,9 +985,12 @@ def _build_llm_request(
     base_revision: int,
     config: GroundingLLMConfig,
 ) -> GroundingLLMRequest:
+    """把有限 Observation 和 State 拼成冻结 Prompt 请求。"""
+
     payload = {
         "base_revision": base_revision,
         "observation": observation.model_dump(mode="json"),
+        "observation_text": _observation_text(observation),
         "state": state.model_dump(mode="json"),
     }
     dynamic_input = preset_canonical_json(payload)
@@ -615,10 +1004,297 @@ def _build_llm_request(
         model_preset=config.model_preset,
         preset_config=config.preset_config,
         max_tokens=config.max_tokens,
+        timeout_seconds=config.timeout_seconds,
+        form_schema_sha256=config.form_schema_sha256,
     )
 
 
-def _parse_llm_frame_response(content: str) -> LLMFrameProposal:
+def _read_grounding_api_key(
+    config: GroundingProviderConfig,
+    environment: Mapping[str, str],
+) -> str:
+    """从显式环境变量或文件读取 Grounding 专用密钥。"""
+
+    if config.credential_source == "direct":
+        value = str(environment.get("GROUNDING_API_KEY", "")).strip()
+        if not value:
+            raise GroundingProviderError("Grounding direct credential is unavailable")
+        return value
+
+    path = Path(config.api_key_file or "")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        raise GroundingProviderError("Grounding credential file is unavailable") from None
+    match = _BEARER_TOKEN_RE.search(content)
+    if match:
+        return match.group(1)
+    nonempty_lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if (
+        len(nonempty_lines) == 1
+        and not any(character.isspace() for character in nonempty_lines[0])
+    ):
+        return nonempty_lines[0]
+    raise GroundingProviderError("Grounding credential file format is invalid")
+
+
+def _build_provider_request(
+    request: GroundingLLMRequest,
+    config: GroundingProviderConfig,
+    *,
+    api_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """同时构造可发送参数和不含密钥的审计参数。"""
+
+    if request.form_schema_sha256 != LLM_FRAME_FORM_SCHEMA_SHA256:
+        raise GroundingProviderError("Grounding form schema mismatch")
+    preset = request.preset_config
+    messages = [{"role": "user", "content": request.prompt}]
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "valibra_requirement_frame",
+            "strict": True,
+            "schema": json.loads(LLM_FRAME_FORM_SCHEMA_JSON),
+        },
+    }
+    generation: dict[str, Any] = {
+        "temperature": preset.get("temperature", 0.0),
+        "max_tokens": request.max_tokens,
+    }
+    if "top_p" in preset:
+        generation["top_p"] = preset["top_p"]
+    extra_body: dict[str, Any] = {}
+    if "thinking" in preset:
+        extra_body["thinking"] = preset["thinking"]
+    if "reasoning_effort" in preset:
+        extra_body["reasoning_effort"] = preset["reasoning_effort"]
+
+    provider_kwargs: dict[str, Any] = {
+        "model": config.model_id,
+        "messages": messages,
+        **generation,
+        "stream": False,
+        "timeout": request.timeout_seconds,
+        "num_retries": 0,
+        "max_retries": 0,
+        "api_base": config.api_base,
+        "api_key": api_key,
+        "response_format": response_format,
+    }
+    if extra_body:
+        provider_kwargs["extra_body"] = extra_body
+    if config.use_bearer_for_custom_base:
+        provider_kwargs["use_bearer_for_custom_base"] = True
+
+    request_audit = {
+        "model": config.model_id,
+        "messages": messages,
+        "generation": generation,
+        "extra_body": extra_body,
+        "timeout_seconds": request.timeout_seconds,
+        "provider_retry_count": 0,
+        "tools": [],
+        "tool_choice": None,
+        "response_format": response_format,
+        "connection": {
+            "api_base": config.api_base,
+            "credential_source": config.credential_source,
+            "use_bearer_for_custom_base": config.use_bearer_for_custom_base,
+        },
+        "prompt_sha256": request.prompt_sha256,
+        "form_schema_sha256": request.form_schema_sha256,
+        "llm_configuration_sha256": request.configuration_sha256,
+        "provider_configuration_sha256": config.configuration_sha256,
+    }
+    return request_audit, provider_kwargs
+
+
+def _provider_response_content(response: Any) -> str:
+    """从 OpenAI 兼容响应中取出第一条文本。"""
+
+    try:
+        choices = _value(response, "choices")
+        first = choices[0]
+        message = _value(first, "message")
+        content = _value(message, "content")
+    except Exception:
+        raise GroundingProviderError(
+            "Grounding Provider response has no text content"
+        ) from None
+    if not isinstance(content, str):
+        raise GroundingProviderError("Grounding Provider response content is invalid")
+    return content.strip()
+
+
+def _provider_usage(response: Any) -> GroundingLLMUsage:
+    """兼容常见字段名，归一化 Provider 返回的用量。"""
+
+    raw_usage = to_jsonable(_value(response, "usage", default={})) or {}
+    if not isinstance(raw_usage, dict):
+        raw_usage = {}
+    input_tokens = _usage_token(raw_usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_token(
+        raw_usage,
+        "completion_tokens",
+        "output_tokens",
+    )
+    total_tokens = _usage_token(raw_usage, "total_tokens")
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    reasoning_tokens = _usage_token(raw_usage, "reasoning_tokens")
+    if not reasoning_tokens:
+        for details_name in (
+            "completion_tokens_details",
+            "output_tokens_details",
+        ):
+            details = raw_usage.get(details_name)
+            if isinstance(details, dict):
+                reasoning_tokens = _usage_token(details, "reasoning_tokens")
+                if reasoning_tokens:
+                    break
+    cost = _provider_reported_cost(raw_usage)
+    return GroundingLLMUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        total_tokens=total_tokens,
+        cost=cost,
+    )
+
+
+def _provider_reported_cost(raw_usage: Mapping[str, Any]) -> float | None:
+    for name in ("cost", "response_cost"):
+        value = raw_usage.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        numeric = float(value)
+        if math.isfinite(numeric) and numeric >= 0:
+            return numeric
+    return None
+
+
+def _usage_token(raw: Mapping[str, Any], *names: str) -> int:
+    for name in names:
+        value = raw.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if math.isfinite(float(value)) and value >= 0 and int(value) == value:
+            return int(value)
+    return 0
+
+
+def _provider_name(response: Any) -> str:
+    """尽力读取 LiteLLM 标注的实际 Provider 名称。"""
+
+    hidden = _value(response, "_hidden_params", default={}) or {}
+    if isinstance(hidden, Mapping):
+        value = hidden.get("custom_llm_provider")
+        if isinstance(value, str):
+            return value[:128]
+    return ""
+
+
+def _value(value: Any, name: str, *, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _sanitize_audit_value(value: Any) -> Any:
+    """递归删除审计数据中的常见敏感字段。"""
+
+    if isinstance(value, Mapping):
+        sanitized = {}
+        for key, item in value.items():
+            normalized = str(key).strip().lower().replace("-", "_")
+            if normalized in _SENSITIVE_AUDIT_KEYS:
+                continue
+            sanitized[str(key)] = _sanitize_audit_value(item)
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_audit_value(item) for item in value]
+    return value
+
+
+def _stable_json_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        preset_canonical_json(value).encode("utf-8")
+    ).hexdigest()
+
+
+def _new_private_audit_path(
+    config: GroundingProviderConfig,
+    request_sha256: str,
+) -> Path:
+    """为单次调用生成不冲突的私有审计文件名。"""
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    filename = (
+        f"grounding-{timestamp}-{request_sha256[:12]}-{uuid.uuid4().hex[:8]}.json"
+    )
+    return Path(config.raw_audit_dir) / filename
+
+
+def _write_private_provider_audit(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    api_key: str,
+) -> None:
+    """用临时文件原子写入权限受限的脱敏审计。"""
+
+    sanitized = _sanitize_audit_value(payload)
+    encoded = json.dumps(
+        sanitized,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    if api_key and api_key in encoded:
+        raise GroundingProviderError("Grounding audit credential check failed")
+    # 目录仅当前用户可访问；文件写完后固定为 0600。
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(encoded)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _private_audit_ref(
+    config: GroundingProviderConfig,
+    path: Path,
+) -> str:
+    """优先返回相对项目路径，避免审计结果泄露机器绝对路径。"""
+
+    project_root = Path(config.raw_audit_dir).parents[1]
+    try:
+        return str(path.relative_to(project_root))
+    except ValueError:
+        return path.name
+
+
+def _parse_llm_frame_response(
+    content: str,
+    *,
+    observation_text: str,
+) -> LLMFrameProposal:
+    """严格解析模型 JSON：拒绝重复键、NaN 和多余字段。"""
+
     if not isinstance(content, str):
         raise TypeError("LLM Frame response content must be a string")
     if len(content) > MAX_LLM_FRAME_RESPONSE_CHARS:
@@ -633,12 +1309,36 @@ def _parse_llm_frame_response(content: str) -> LLMFrameProposal:
         raise ValueError("LLM Frame response must be strict JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError("LLM Frame response root must be an object")
-    return LLMFrameProposal.model_validate(raw)
+    proposal = LLMFrameProposal.model_validate(raw)
+    _validate_verbatim_mentions(proposal, observation_text)
+    return proposal
+
+
+def _validate_verbatim_mentions(
+    proposal: LLMFrameProposal,
+    observation_text: str,
+) -> None:
+    """要求每个 mention 都是当前 Observation 文本中的逐字连续片段。"""
+
+    if not isinstance(observation_text, str):
+        raise TypeError("Observation text must be a string")
+    slots = (
+        *proposal.value_slots,
+        *proposal.schema_slots,
+        *proposal.operation_slots,
+    )
+    for slot in slots:
+        if not slot.mention or not slot.mention.strip():
+            raise ValueError("LLM Frame mention must be non-empty")
+        if slot.mention not in observation_text:
+            raise ValueError("LLM Frame mention is not verbatim Observation text")
 
 
 def _reject_duplicate_json_keys(
     pairs: list[tuple[str, Any]],
 ) -> dict[str, Any]:
+    """让 json.loads 遇到重复键时直接失败。"""
+
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
@@ -658,11 +1358,14 @@ def _llm_patch_from_proposal(
     *,
     base_revision: int,
 ) -> RequirementGroundingPatch:
+    """把已校验的 LLM Frame 转成原子 Patch。"""
+
     existing = _slot_index(state)
     evidence_id = f"evidence.{observation.observation_id}"
     additions: list[GroundingSlot] = []
     updates: list[GroundingSlot] = []
 
+    # 三类提案统一走同一套稳定 ID、更新和证据逻辑。
     typed_proposals: list[tuple[str, KernelModel]] = [
         *(('value', item) for item in proposal.value_slots),
         *(('schema', item) for item in proposal.schema_slots),
@@ -726,6 +1429,8 @@ def _llm_patch_from_proposal(
 
 
 def _llm_slot_id(slot_kind: str, proposal: KernelModel) -> str:
+    """根据槽位类型和完整提案内容生成稳定 ID。"""
+
     identity = {
         "slot_kind": slot_kind,
         "proposal": proposal.model_dump(mode="json"),
@@ -745,6 +1450,8 @@ def _llm_slot_from_proposal(
     observation: Observation,
     current: GroundingSlot | None,
 ) -> GroundingSlot:
+    """把 LLM 提案新建或合并成对应类型的槽位。"""
+
     evidence_refs = tuple(
         dict.fromkeys((*tuple(getattr(current, "evidence_refs", ())), evidence_id))
     )

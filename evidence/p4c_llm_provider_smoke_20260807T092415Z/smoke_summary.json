@@ -1,0 +1,56 @@
+{
+  "agent_wiring": "rule_shadow_unchanged",
+  "ambiguity_count": 0,
+  "business_state_preserved": true,
+  "configuration_sha256": "38b33b1411db1a0f572e121f3df9c9e9df83f58ff3f31843556f7d71f65f22b1",
+  "credential_source": "file",
+  "credential_sources_distinct": true,
+  "failure": {
+    "actual_operation_type": "order_by",
+    "allowed_operation_types": [
+      "projection",
+      "filter",
+      "aggregation",
+      "group",
+      "order",
+      "limit",
+      "distinct",
+      "other"
+    ],
+    "location": [
+      "operation_slots",
+      1,
+      "operation_type"
+    ],
+    "stage": "strict_pydantic_validation",
+    "type": "ValidationError"
+  },
+  "grounding_revision": 0,
+  "hard_checks_passed": false,
+  "latency_ms": 18237.89441899862,
+  "model": "openai/glm-5.2",
+  "model_matches_system_agent": true,
+  "private_audit": {
+    "file_mode": "0600",
+    "gitignored": true,
+    "new_file_count": 1,
+    "ref": "research-runtime/grounding-llm/grounding-20260807T092318874049Z-36af91d1d06d-da6542cc.json"
+  },
+  "prompt_sha256": "5a4d67b21c1a6dda3e31e98e6a8242b1061e7bdb95d2f3fd33080f21f48b9458",
+  "provider": "openai",
+  "provider_configuration_sha256": "7c8589c44361a31baced880e5c41cc432fc3b48b6bc2d759f4ea6702240b3505",
+  "provider_requests": 1,
+  "provider_retry_count": 0,
+  "request_sha256": "36af91d1d06d22a0246ed7629578495059c320aeccd13427229b2a5a609cf971",
+  "response_sha256": "87d96cd162e7eb8ba82079fbc96be86de5a630b2b49fd1233b70040e869f81a8",
+  "result": "P4.2b FAIL",
+  "slot_count": 0,
+  "system_agent_key_used": false,
+  "tokens": {
+    "cost": null,
+    "input": 416,
+    "output": 1511,
+    "reasoning": 1139,
+    "total": 1927
+  }
+}

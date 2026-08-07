@@ -1,4 +1,4 @@
-"""Bounded normalization of caller-provided, already-authorized inputs."""
+"""把 Agent 已获准看到的输入规范化为有大小上限的 Observation。"""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ MAX_RAW_STRING_CHARS = 262_144
 
 
 class ObservationNormalizationError(ValueError):
-    """Caller input is not JSON-safe or exceeds an explicit K0 limit."""
+    """输入无法安全转成 JSON，或超过明确的大小限制。"""
 
 
 def canonical_json(value: Any) -> str:
-    """Return canonical JSON after rejecting coercions and unbounded input."""
+    """严格检查后生成键顺序稳定的 JSON，不偷偷做类型转换。"""
 
     count = [0]
     _validate_json_value(value, depth=0, count=count)
@@ -46,6 +46,8 @@ def canonical_json(value: Any) -> str:
 
 
 def stable_digest(value: Any) -> str:
+    """对规范 JSON 计算稳定 SHA-256。"""
+
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
@@ -63,7 +65,7 @@ def build_observation(
     invocation_id: str | None = None,
     tool_name: str | None = None,
 ) -> Observation:
-    """Normalize only the supplied value; no external lookup is performed."""
+    """只根据传入内容构造 Observation，不查询任何外部数据。"""
 
     raw_json = canonical_json(raw)
     raw_digest = hashlib.sha256(raw_json.encode("utf-8")).hexdigest()
@@ -79,6 +81,7 @@ def build_observation(
         "invocation_id": invocation_id,
         "tool_name": tool_name,
     }
+    # ID 同时包含来源和内容摘要，可用于安全去重。
     observation_id = hashlib.sha256(
         canonical_json(identity).encode("utf-8")
     ).hexdigest()
@@ -99,6 +102,8 @@ def build_observation(
 
 
 def _validate_json_value(value: Any, *, depth: int, count: list[int]) -> None:
+    """递归检查 JSON 类型、深度、数量和字符串长度。"""
+
     if depth > MAX_NESTING_DEPTH:
         raise ObservationNormalizationError("JSON input exceeds nesting limit")
     count[0] += 1
@@ -132,6 +137,8 @@ def _validate_json_value(value: Any, *, depth: int, count: list[int]) -> None:
 
 
 def _bounded_summary(value: str) -> str:
+    """压平空白，并把摘要截到状态允许的长度。"""
+
     if not isinstance(value, str):
         raise ObservationNormalizationError("summary must be a string")
     normalized = re.sub(r"\s+", " ", value).strip()

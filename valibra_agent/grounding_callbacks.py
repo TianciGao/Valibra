@@ -1,8 +1,7 @@
-"""P4.1 Rule Shadow callbacks composed around the frozen Baseline callbacks.
+"""把规则 Shadow 包在 Baseline 回调外层。
 
-Shadow tracks bounded lifecycle observations and deterministic provisional
-Frame state. It never changes the model request, tool protocol, or Baseline
-callback return value. Full tool responses remain in the Baseline trajectory.
+Shadow 只旁路记录有限的 Observation 和临时 Frame，不修改模型请求、工具协议
+或 Baseline 返回值；完整工具结果仍由 Baseline 轨迹保存。
 """
 
 from __future__ import annotations
@@ -69,6 +68,8 @@ _RULE_UPDATER = RuleUpdater()
 
 @dataclass(slots=True)
 class _BoundTurnMessage:
+    """当前异步任务绑定的用户消息，只允许消费一次。"""
+
     task_id: str
     mode: str
     message: str
@@ -82,7 +83,7 @@ _ACTIVE_TURN_MESSAGE: ContextVar[_BoundTurnMessage | None] = ContextVar(
 
 
 def _bind_turn_message(task_id: str, mode: str, message: str) -> Any:
-    """Bind the exact run_turn input to its current async context only."""
+    """把 run_turn 原始消息绑定到当前异步上下文。"""
 
     return _ACTIVE_TURN_MESSAGE.set(
         _BoundTurnMessage(task_id=task_id, mode=mode, message=message)
@@ -90,6 +91,8 @@ def _bind_turn_message(task_id: str, mode: str, message: str) -> Any:
 
 
 def _reset_turn_message(token: Any) -> None:
+    """恢复绑定前的上下文，防止并发任务互相污染。"""
+
     _ACTIVE_TURN_MESSAGE.reset(token)
 
 
@@ -97,7 +100,7 @@ async def before_model_callback(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> LlmResponse | None:
-    """Initialize Shadow state fail-open, then delegate without prompt edits."""
+    """尽力初始化 Shadow，再原样交给 Baseline 的模型前回调。"""
 
     state = getattr(callback_context, "state", None)
     if state is not None:
@@ -105,7 +108,7 @@ async def before_model_callback(
             _consume_bound_user_message(state)
             _ensure_runtime(state)
         except Exception as exc:
-            # A Grounding initialization failure cannot replace Baseline.
+            # Grounding 初始化失败只能记日志，不能打断 Baseline。
             _record_callback_failure(
                 state,
                 stage="observation",
@@ -124,7 +127,7 @@ async def after_model_callback(
     callback_context: CallbackContext,
     llm_response: LlmResponse,
 ) -> LlmResponse | None:
-    """Delegate exactly once and never alter the model response."""
+    """模型响应只交给 Baseline 处理一次，Valibra 不改内容。"""
 
     from system_agent import callbacks as baseline_callbacks
 
@@ -139,7 +142,7 @@ async def before_tool_callback(
     args: dict,
     tool_context: ToolContext,
 ) -> dict | None:
-    """Let Baseline decide budget first, then create an exact Pending call."""
+    """先让 Baseline 判断预算；获准后再登记待完成工具调用。"""
 
     from system_agent import callbacks as baseline_callbacks
 
@@ -149,6 +152,7 @@ async def before_tool_callback(
         tool_context,
     )
     if baseline_result is not None:
+        # 非 None 表示 Baseline 已拒绝或接管，本层不能再登记调用。
         return baseline_result
 
     state = getattr(tool_context, "state", None)
@@ -189,7 +193,7 @@ async def after_tool_callback(
     tool_context: ToolContext,
     tool_response: Any,
 ) -> Any:
-    """Delegate once, consume the original response, and return its override."""
+    """先执行 Baseline 回调，再用原始工具结果更新 Shadow。"""
 
     from system_agent import callbacks as baseline_callbacks
 
@@ -224,7 +228,7 @@ async def after_tool_callback(
         function_call_id = _require_function_call_id(tool_context)
         runtime = _ensure_runtime(state)
         runtime, pending = remove_pending_tool_call(runtime, function_call_id)
-        # Persist cleanup before any normalization/updater/reducer work.
+        # 先删除 Pending 并落盘；后续失败也不会遗留“正在调用”的假状态。
         _store_runtime(state, runtime)
         if pending is None:
             return baseline_override
@@ -262,6 +266,7 @@ async def after_tool_callback(
             and pending.phase_before == 1
             and phase_after == 2
         ):
+            # submit_sql 让 Baseline 进入 Phase 2 时，显式记录阶段切换。
             transition_sequence = _next_sequence(state)
             transition_observation = build_observation(
                 task_id=task_id,
@@ -337,7 +342,7 @@ async def on_tool_error_callback(
     tool_context: ToolContext,
     error: Exception,
 ) -> None:
-    """Clean only the exact Pending call, record bounded telemetry, return None."""
+    """工具报错时只清理对应 Pending，记有限错误信息后交还 ADK。"""
 
     del tool, args
     state = tool_context.state
@@ -368,6 +373,8 @@ async def on_tool_error_callback(
 
 
 def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
+    """读取并校验 Runtime；坏数据回退为空状态，始终不阻断主流程。"""
+
     try:
         raw = state.get(GROUNDING_RUNTIME_KEY)
         runtime = (
@@ -394,11 +401,12 @@ def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
 
 
 def _consume_bound_user_message(state: Any) -> None:
+    """把本轮用户消息转成一次 Observation，并交给规则 Updater。"""
+
     bound = _ACTIVE_TURN_MESSAGE.get()
     if bound is None or bound.consumed or bound.mode != "a-interact":
         return
-    # Mark first so repeated before_model calls in the same ADK turn cannot
-    # duplicate an Observation even if deterministic processing fails.
+    # 先标记已消费：即使处理失败，同一轮多次 before_model 也不会重复记账。
     bound.consumed = True
     if _task_id(state) != bound.task_id:
         raise ValueError("run_turn task_id does not match ADK session state")
@@ -421,6 +429,8 @@ def _consume_bound_user_message(state: Any) -> None:
 
 
 def _user_message_summary(message: str) -> str:
+    """从 Baseline 拼装的提示中取出真正的用户问题。"""
+
     if not isinstance(message, str):
         raise TypeError("run_turn message must be a string")
     marker = "User Query:\n"
@@ -436,6 +446,8 @@ def _user_message_summary(message: str) -> str:
 
 
 def _store_runtime(state: Any, runtime: RequirementGroundingRuntime) -> None:
+    """校验后以纯 JSON 数据写回 ADK Session State。"""
+
     validate_runtime(runtime)
     state[GROUNDING_RUNTIME_KEY] = runtime.model_dump(mode="json")
 
@@ -448,6 +460,8 @@ def _record_callback_failure(
     sequence: int,
     function_call_id: str | None = None,
 ) -> RequirementGroundingRuntime:
+    """尽力记录回调错误；记录失败也不能覆盖 Baseline 结果。"""
+
     runtime = _ensure_runtime(state)
     try:
         runtime = record_failure(
@@ -459,12 +473,14 @@ def _record_callback_failure(
         )
         _store_runtime(state, runtime)
     except Exception:
-        # Grounding diagnostics must never replace a Baseline result/error.
+        # 连诊断本身失败也直接忽略，Baseline 的结果优先。
         pass
     return runtime
 
 
 def _cleanup_pending_best_effort(state: Any, tool_context: Any) -> None:
+    """尽力清理一个准确匹配的 Pending，不向外抛错。"""
+
     function_call_id = _valid_context_identifier(tool_context)
     if function_call_id is None:
         return
@@ -477,6 +493,8 @@ def _cleanup_pending_best_effort(state: Any, tool_context: Any) -> None:
 
 
 def _require_function_call_id(tool_context: Any) -> str:
+    """强制使用 ADK 的真实调用 ID，不允许自造兜底 ID。"""
+
     function_call_id = getattr(tool_context, "function_call_id", None)
     if not isinstance(function_call_id, str) or not _IDENTIFIER_RE.fullmatch(
         function_call_id
@@ -539,6 +557,8 @@ def _current_sequence(state: Any) -> int:
 
 
 def _next_sequence(state: Any) -> int:
+    """生成严格递增的 Shadow 事件序号。"""
+
     current = state.get(GROUNDING_SEQUENCE_KEY, 0)
     if (
         isinstance(current, bool)
@@ -577,14 +597,15 @@ def _attach_shadow_audit(
     index: int,
     metadata: dict[str, Any],
 ) -> None:
+    """把有限 Shadow 摘要挂到对应 Baseline 工具轨迹。"""
+
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list) or not 0 <= index < len(trajectory):
         return
     event = trajectory[index]
     if not isinstance(event, dict):
         return
-    # Fail closed on accidental expansion; this metadata never contains raw
-    # tool response, prompt, credentials, or model content.
+    # 摘要一旦意外膨胀就不写；这里严禁原始响应、Prompt、凭据和模型正文。
     encoded = json.dumps(
         metadata,
         ensure_ascii=False,
@@ -602,6 +623,8 @@ def _attach_shadow_audit(
 
 
 def _runtime_bytes(runtime: RequirementGroundingRuntime) -> int:
+    """计算 Runtime 的规范 JSON 大小，供审计查看。"""
+
     return len(
         json.dumps(
             runtime.model_dump(mode="json"),

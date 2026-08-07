@@ -1,4 +1,4 @@
-"""Stable, side-effect-free public API for the K0 grounding state kernel."""
+"""Grounding 内核的稳定公开接口；导入本包不会启动服务或执行 I/O。"""
 
 from valibra_agent.requirement_grounding.models import (
     Ambiguity,
@@ -56,12 +56,15 @@ from valibra_agent.requirement_grounding.service import (
     remove_pending_tool_call,
 )
 from valibra_agent.requirement_grounding.telemetry import (
+    CombinedModelUsage,
     LLMCallAudit,
     LLMCallTelemetryRecorder,
+    ModelUsageLedger,
     increment_llm_call_metrics,
     increment_metrics,
     record_failure,
     set_last_error,
+    summarize_model_usage_totals,
 )
 from valibra_agent.requirement_grounding.updater import (
     AsyncGroundingLLMClient,
@@ -69,7 +72,12 @@ from valibra_agent.requirement_grounding.updater import (
     GroundingLLMRequest,
     GroundingLLMResponse,
     GroundingLLMUsage,
+    GroundingProviderConfig,
+    GroundingProviderError,
+    LiteLLMGroundingClient,
     LLMUpdater,
+    LLM_FRAME_FORM_SCHEMA,
+    LLM_FRAME_FORM_SCHEMA_SHA256,
     LLM_FRAME_PROMPT,
     LLM_FRAME_PROMPT_SHA256,
     NoOpUpdater,
@@ -77,12 +85,14 @@ from valibra_agent.requirement_grounding.updater import (
     build_noop_patch,
     build_rule_patch,
     load_grounding_llm_config,
+    load_grounding_provider_config,
 )
 
 __all__ = [
     "Ambiguity",
     "AsyncGroundingLLMClient",
     "Candidate",
+    "CombinedModelUsage",
     "Error",
     "Evidence",
     "GroundedAmbiguityHypothesis",
@@ -96,6 +106,8 @@ __all__ = [
     "LLMCallTelemetryRecorder",
     "LLMGroundingServiceResult",
     "LLMUpdater",
+    "LLM_FRAME_FORM_SCHEMA",
+    "LLM_FRAME_FORM_SCHEMA_SHA256",
     "LLM_FRAME_PROMPT",
     "LLM_FRAME_PROMPT_SHA256",
     "Metrics",
@@ -118,6 +130,10 @@ __all__ = [
     "GroundingLLMRequest",
     "GroundingLLMResponse",
     "GroundingLLMUsage",
+    "GroundingProviderConfig",
+    "GroundingProviderError",
+    "LiteLLMGroundingClient",
+    "ModelUsageLedger",
     "SCHEMA_VERSION",
     "SQLImpact",
     "SchemaSlot",
@@ -142,6 +158,8 @@ __all__ = [
     "remove_pending_tool_call",
     "set_last_error",
     "load_grounding_llm_config",
+    "load_grounding_provider_config",
+    "summarize_model_usage_totals",
     "stable_digest",
     "validate_runtime",
 ]

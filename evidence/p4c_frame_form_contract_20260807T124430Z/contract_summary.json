@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "status": "offline_pass_waiting_for_real_smoke",
+  "prompt_sha256": "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00",
+  "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+  "grounding_configuration_sha256": "d6ec85e73d6061bdfc8b4eb23196595ed9086a05b622fb75ccfbaaedc4d154b4",
+  "top_level_fields": [
+    "value_slots",
+    "schema_slots",
+    "operation_slots",
+    "ambiguities"
+  ],
+  "operation_type_enum": [
+    "projection",
+    "filter",
+    "aggregation",
+    "group",
+    "order",
+    "limit",
+    "distinct",
+    "other"
+  ],
+  "additional_fields_forbidden": true,
+  "ambiguities_max_items": 0,
+  "parameters_json_scalars_only": true,
+  "mention_policy": "non-empty verbatim case-sensitive continuous Observation-text substring",
+  "schema_binding": "unknown_unbound_only",
+  "enum_alias_normalization": false,
+  "structured_output": {
+    "litellm_version": "1.93.0",
+    "acompletion_response_format_parameter": true,
+    "same_generated_schema_passed_to_adapter": true,
+    "provider_enforcement_verified": false
+  },
+  "retained_response_replay": {
+    "responses": 2,
+    "provider_requests": 0,
+    "statuses": [
+      "failed",
+      "failed"
+    ],
+    "revisions": [
+      0,
+      0
+    ],
+    "observed_invalid_operation_types": [
+      "order_by",
+      "sort"
+    ]
+  },
+  "private_audit_count_before": 2,
+  "private_audit_count_after": 2,
+  "real_provider_calls": 0,
+  "agent_grounding_updater": "rule",
+  "prompt_view_injected": false,
+  "p4_complete": false
+}

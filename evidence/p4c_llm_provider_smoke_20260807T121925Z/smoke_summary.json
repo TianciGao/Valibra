@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "status": "failed",
+  "failure_stage": "strict_llm_frame_validation",
+  "failure_reason": "unsupported operation_type",
+  "unsupported_operation_types": [
+    "sort"
+  ],
+  "raw_operation_types": [
+    "limit",
+    "sort"
+  ],
+  "exact_alias_policy": {
+    "allowed_mapping": "order_by -> order",
+    "mapping_applied_in_this_response": false,
+    "additional_mapping_added": false
+  },
+  "provider_request": {
+    "count": 1,
+    "model": "openai/glm-5.2",
+    "max_tokens": 32768,
+    "retry_count": 0,
+    "tools": [],
+    "tool_choice": null,
+    "credential_source": "file"
+  },
+  "provider_response": {
+    "status": "succeeded",
+    "strict_json_valid": true,
+    "request_sha256": "d7fb7d5fa0150e07d921662c18b071a92216a8667492084342c9723107b51b86",
+    "response_sha256": "37e578bc2f1875f37e9478255280772f11eb3295d6e91d9c5eb4ff192eb84afe",
+    "private_audit_file_mode": "0600",
+    "private_audit_directory_mode": "0700"
+  },
+  "grounding_usage": {
+    "input_tokens": 408,
+    "output_tokens": 858,
+    "reasoning_tokens": 602,
+    "total_tokens": 1266,
+    "cost": null,
+    "latency_ms": null,
+    "latency_note": "The post-check harness exited before emitting its in-memory latency value; no estimate was substituted."
+  },
+  "main_agent_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "total_tokens": 0,
+    "cost": 0.0
+  },
+  "combined_usage": {
+    "total_model_tokens": 1266,
+    "total_model_cost": null,
+    "bird_coin_included": false
+  },
+  "offline_exact_response_replay": {
+    "count": 1,
+    "provider_requests": 0,
+    "service_status": "failed",
+    "business_revision": 0,
+    "slot_count": 0,
+    "ambiguity_count": 0,
+    "atomic_state_preserved": true
+  },
+  "frozen_configuration": {
+    "prompt_sha256": "5a4d67b21c1a6dda3e31e98e6a8242b1061e7bdb95d2f3fd33080f21f48b9458",
+    "llm_configuration_sha256": "38b33b1411db1a0f572e121f3df9c9e9df83f58ff3f31843556f7d71f65f22b1"
+  },
+  "no_retry_after_failure": true,
+  "current_agent_mode": "rule_shadow"
+}

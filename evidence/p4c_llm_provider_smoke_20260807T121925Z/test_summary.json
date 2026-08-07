@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "pip_check": "pass: No broken requirements found",
+  "unittest": {
+    "status": "pass",
+    "tests_run": 156
+  },
+  "compileall": "pass",
+  "git_diff_check": "pass",
+  "targeted_normalization_tests": "pass",
+  "first_retained_response_offline_replay": "pass: exact order_by normalized to order and reducer accepted",
+  "second_retained_response_offline_replay": "expected strict rejection: unsupported sort",
+  "real_provider_requests_in_retry_round": 1,
+  "additional_real_provider_retries": 0
+}

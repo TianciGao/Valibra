@@ -1,4 +1,4 @@
-"""Valibra Rule Shadow Agent: Baseline behavior plus provisional Frame state."""
+"""Valibra Agent：保留 Baseline 行为，旁路维护临时需求 Frame。"""
 
 from shared.config import settings
 from system_agent.agent import (
@@ -20,12 +20,10 @@ from valibra_agent.grounding_callbacks import (
 
 
 def build_agent(mode: str = "a-interact") -> Agent:
-    """Build Rule Shadow while keeping the Baseline prompt, tools, and behavior.
+    """构建规则 Shadow；Prompt、工具和主行为仍使用 Baseline。"""
 
-    Shadow is an a-interact shell. Other modes delegate to the Baseline builder
-    so the shared HTTP mode field remains backward compatible.
-    """
     if mode != "a-interact":
+        # 非 a-interact 模式直接使用原 Agent，保证接口兼容。
         return build_baseline_agent(mode)
     if not ADK_AVAILABLE:
         raise RuntimeError(
@@ -34,6 +32,7 @@ def build_agent(mode: str = "a-interact") -> Agent:
 
     from system_agent.tools import get_ainteract_tools
 
+    # Valibra 只替换回调；模型、Prompt 和九个官方工具都复用 Baseline。
     return Agent(
         model=_build_model(settings.system_agent_model),
         name="bird_interact_agent",

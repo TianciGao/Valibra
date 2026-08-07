@@ -1,7 +1,6 @@
-"""Pydantic data contracts for the K0 requirement-grounding kernel.
+"""需求 Grounding 内核的数据结构。
 
-The models in this module contain only bounded, JSON-safe state.  They do not
-import ADK, perform I/O, read clocks, or mutate a runtime.
+这里只保存有大小上限、可转成 JSON 的状态；不依赖 ADK，不做 I/O，也不直接改 Runtime。
 """
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ def _unique(values: tuple[str, ...], label: str) -> tuple[str, ...]:
 
 
 class KernelModel(BaseModel):
-    """Strict-shape base model shared by all K0 contracts."""
+    """所有内核模型的严格基类：禁止多余字段，创建后不可变。"""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -85,6 +84,8 @@ class KernelModel(BaseModel):
 
 
 class GroundingEvidence(KernelModel):
+    """从一次 Observation 提炼出的有限证据引用。"""
+
     evidence_id: Identifier
     observation_id: Identifier
     source_type: Annotated[str, Field(min_length=1, max_length=64)]
@@ -97,11 +98,15 @@ class GroundingEvidence(KernelModel):
 
 
 class SQLImpact(KernelModel):
+    """某种解释会怎样改变 SQL。"""
+
     effect_key: Identifier
     summary: Annotated[str, Field(min_length=1, max_length=MAX_SUMMARY_CHARS)]
 
 
 class InterpretationCandidate(KernelModel):
+    """一个歧义的候选解释及其 SQL 影响。"""
+
     candidate_id: Identifier
     interpretation: Annotated[
         str,
@@ -118,6 +123,8 @@ class InterpretationCandidate(KernelModel):
 
 
 class SlotBase(KernelModel):
+    """需求槽位的公共字段：原词、当前解释、证据和生命周期。"""
+
     slot_id: Identifier
     slot_kind: str
     slot_role: Annotated[str, Field(min_length=1, max_length=64)]
@@ -148,11 +155,15 @@ class SlotBase(KernelModel):
 
 
 class ValueSlot(SlotBase):
+    """值类约束，例如日期、阈值或范围。"""
+
     slot_kind: Literal["value"] = "value"
     value_type: Annotated[str, Field(max_length=64)] | None = None
 
 
 class SchemaSlot(SlotBase):
+    """可能对应表、列或指标的自然语言概念。"""
+
     slot_kind: Literal["schema"] = "schema"
     binding_type: Literal[
         "table",
@@ -166,6 +177,8 @@ class SchemaSlot(SlotBase):
 
 
 class OperationSlot(SlotBase):
+    """查询操作，例如过滤、聚合、排序或限制条数。"""
+
     slot_kind: Literal["operation"] = "operation"
     operation_type: Literal[
         "projection",
@@ -206,12 +219,16 @@ GroundingSlot = Annotated[
 
 
 class RequirementFrame(KernelModel):
+    """当前需求的三类槽位集合。"""
+
     value_slots: tuple[ValueSlot, ...] = ()
     schema_slots: tuple[SchemaSlot, ...] = ()
     operation_slots: tuple[OperationSlot, ...] = ()
 
 
 class GroundedAmbiguityHypothesis(KernelModel):
+    """一个待确认的歧义，以及候选解释和依赖关系。"""
+
     ambiguity_id: Identifier
     pivot_term: Annotated[str, Field(min_length=1, max_length=MAX_MENTION_CHARS)]
     primary_slot_id: Identifier
@@ -241,10 +258,11 @@ class GroundedAmbiguityHypothesis(KernelModel):
 
 
 class RequirementGroundingState(KernelModel):
+    """业务状态：需求 Frame、歧义索引和证据。"""
+
     requirement_frame: RequirementFrame = Field(default_factory=RequirementFrame)
     ambiguity_index: tuple[GroundedAmbiguityHypothesis, ...] = ()
-    # Empty evidence is omitted so the default Runtime matches the frozen
-    # shell in the main plan exactly.  Once evidence exists it is serialized.
+    # 空 evidence 不序列化，以保持默认 Runtime 与冻结规格完全一致。
     evidence: tuple[GroundingEvidence, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,
@@ -252,6 +270,8 @@ class RequirementGroundingState(KernelModel):
 
 
 class Observation(KernelModel):
+    """Agent 已合法看到的一条用户消息或工具结果摘要。"""
+
     observation_id: Digest
     observation_type: ObservationType
     task_id: Identifier
@@ -287,6 +307,8 @@ class Observation(KernelModel):
 
 
 class PendingToolCall(KernelModel):
+    """before_tool 已放行、但 after_tool 尚未收尾的调用。"""
+
     function_call_id: Identifier
     tool_name: Annotated[str, Field(min_length=1, max_length=64)]
     args_summary: dict[str, JsonValue] | Annotated[str, Field(max_length=1024)]
@@ -324,6 +346,7 @@ MetricName = Literal[
     "llm_updater_input_tokens",
     "llm_updater_output_tokens",
     "llm_updater_reasoning_tokens",
+    "llm_updater_total_tokens",
     "llm_updater_latency_ms",
     "llm_updater_timeouts",
     "llm_updater_errors",
@@ -334,6 +357,8 @@ MetricName = Literal[
 
 
 class RuntimeMetrics(RootModel[dict[MetricName, int | float]]):
+    """只用于诊断的非负计数和耗时指标。"""
+
     root: dict[MetricName, int | float] = Field(default_factory=dict)
 
     @field_validator("root")
@@ -351,6 +376,8 @@ class RuntimeMetrics(RootModel[dict[MetricName, int | float]]):
 
 
 class ValibraError(KernelModel):
+    """脱敏且有长度上限的最近一次错误。"""
+
     stage: Literal["observation", "updater", "reducer", "service", "telemetry"]
     error_type: Annotated[str, Field(min_length=1, max_length=128)]
     message_preview: Annotated[str, Field(max_length=MAX_ERROR_CHARS)]
@@ -362,6 +389,8 @@ class ValibraError(KernelModel):
 
 
 class PhaseTransition(KernelModel):
+    """从 Phase 1 进入 Phase 2 时要执行的显式状态变更。"""
+
     target_phase: Literal[2] = 2
     supersede_slot_ids: tuple[Identifier, ...] = ()
     reopen_ambiguity_ids: tuple[Identifier, ...] = ()
@@ -381,6 +410,8 @@ class PhaseTransition(KernelModel):
 
 
 class RequirementGroundingPatch(KernelModel):
+    """Updater 提出的原子变更包；Reducer 要么全收，要么全拒。"""
+
     patch_id: Identifier
     base_revision: Annotated[int, Field(ge=0)]
     source_observation_ids: tuple[Digest, ...]
@@ -434,6 +465,8 @@ class RequirementGroundingPatch(KernelModel):
 
 
 class RequirementGroundingRuntime(KernelModel):
+    """一个任务的完整 Grounding 运行状态。"""
+
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
     grounding_revision: Annotated[int, Field(ge=0)] = 0
     phase: Phase = 1
@@ -460,8 +493,7 @@ class RequirementGroundingRuntime(KernelModel):
         return self
 
 
-# Short aliases are stable conveniences; canonical names remain the primary
-# serialization contract.
+# 短别名只方便调用；序列化仍以完整类名对应的结构为准。
 Runtime = RequirementGroundingRuntime
 State = RequirementGroundingState
 Evidence = GroundingEvidence
