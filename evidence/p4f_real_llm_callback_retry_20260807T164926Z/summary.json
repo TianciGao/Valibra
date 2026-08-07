@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "stage": "P4.2d",
+  "run_kind": "final_real_llm_callback_shadow_retry",
+  "branch": "research/main",
+  "starting_head": "5292a162a3e6dd4e42d617e0a0d9ec56b54e03fc",
+  "frozen_contract": {
+    "prompt_sha256": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9",
+    "model": "openai/glm-5.2",
+    "max_tokens": 32768,
+    "provider_retry_count": 0
+  },
+  "offline_gate": {
+    "pip_check": "PASS",
+    "unit_tests": {
+      "passed": 192,
+      "failed": 0
+    },
+    "compileall": "PASS",
+    "git_diff_check": "PASS",
+    "real_provider_calls_during_gate": 0
+  },
+  "rule_control": {
+    "status": "PASS",
+    "wall_ms": 19.907,
+    "model_visible_request_sha256": "86d8c799d2e3faf3b7b65bea80acec6f122d144369af1675e7a51c99256491a4",
+    "contents_sha256": "2df19818eb4e8b41ddbb83604f15fc13dbd3dabbf10ac068e4d5730e4d58a123",
+    "tools_sha256": "678c4a6604c2dc5da1c6403b913da56a8655f9468c5d133eee5f935ed254d0c1",
+    "generation_config_sha256": "b462d71f556c3baec5e21710f04b1212fe2584b527b53a221f4100607671a262",
+    "final_response_sha256": "f14255fe9bef5d0977c9bbef4e997225cbc66db6cad18bc1aa9ded7a575f672d",
+    "main_stub_calls": 1,
+    "grounding_provider_requests": 0,
+    "system_agent_provider_requests": 0,
+    "tools_used": false,
+    "bird_coin": 0
+  },
+  "llm_shadow": {
+    "status": "PASS",
+    "wall_ms": 15363.06,
+    "grounding_provider_latency_ms": 15340.073,
+    "observed_shadow_overhead_ms": 15343.153,
+    "grounding_provider_requests": 1,
+    "system_agent_provider_requests": 0,
+    "system_agent_provider_tokens": 0,
+    "main_stub_calls": 1,
+    "tools_used": false,
+    "db_calls": 0,
+    "user_simulator_calls": 0,
+    "benchmark_calls": 0,
+    "bird_coin": 0,
+    "structured_output_request_sent": true,
+    "response_format_strict_requested": true,
+    "provider_schema_enforcement_guaranteed": false,
+    "local_pydantic_authoritative": true,
+    "request_sha256": "7345f47f805840b9917feaf12458258b0d59057ccd95cb69e70c99468dce9039",
+    "response_sha256": "41b7a7fff0f376e5d69b1c2ef0502f91fc88451a0cbbe2ea5c9a70b0af577ad5",
+    "private_audit_ref": "research-runtime/grounding-llm/grounding-20260807T164952153393Z-7345f47f8058-60da3cc8.json",
+    "usage": {
+      "input_tokens": 616,
+      "output_tokens": 1758,
+      "reasoning_tokens": 1351,
+      "total_tokens": 2374,
+      "cost": null,
+      "reasoning_tokens_are_output_subset": true
+    },
+    "frame": {
+      "slot_count": 8,
+      "value_slots": 2,
+      "schema_slots": 2,
+      "operation_slots": 4,
+      "operation_types": [
+        "projection",
+        "limit",
+        "filter",
+        "order"
+      ],
+      "parameters_object_count": 4,
+      "parameters_non_object_count": 0,
+      "parameter_value_runtime_types": [
+        "int",
+        "str"
+      ],
+      "all_parameter_values_scalar": true,
+      "all_mentions_verbatim": true,
+      "statuses": [
+        "hypothesized"
+      ],
+      "origins": [
+        "llm_provisional"
+      ],
+      "schema_binding_types": [
+        "unknown"
+      ],
+      "schema_bound_identifier_count": 0,
+      "ambiguity_count": 0,
+      "grounding_revision": 1
+    }
+  },
+  "model_visible_equivalence": {
+    "rule_request_sha256": "86d8c799d2e3faf3b7b65bea80acec6f122d144369af1675e7a51c99256491a4",
+    "llm_request_sha256": "86d8c799d2e3faf3b7b65bea80acec6f122d144369af1675e7a51c99256491a4",
+    "request_equal": true,
+    "contents_equal": true,
+    "tools_equal": true,
+    "generation_config_equal": true,
+    "final_response_equal": true,
+    "grounding_markers_absent": true,
+    "prompt_view_injected": false
+  },
+  "validation_chain": {
+    "strict_json": "PASS",
+    "strict_pydantic": "PASS",
+    "mention_anchoring": "PASS",
+    "patch_construction": "PASS",
+    "reducer_application": "PASS",
+    "enum_conversion_used": false,
+    "scalar_to_object_repair_used": false,
+    "rule_fallback_used": false
+  },
+  "harness_evaluation_note": {
+    "initial_process_exit": 1,
+    "initial_assertion": "expected origin llm",
+    "actual_contract_origin": "llm_provisional",
+    "production_contract_reference": "updater.py and existing P4.2a tests",
+    "offline_saved_response_verdict": "PASS",
+    "second_provider_request_performed": false
+  },
+  "production_code_modified": false,
+  "local_env_prompt_sha_updated": true,
+  "local_env_committed": false,
+  "tag_created": false,
+  "p4_overall_complete": false
+}
