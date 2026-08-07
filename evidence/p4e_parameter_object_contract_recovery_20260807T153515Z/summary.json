@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "stage": "P4.2d-recovery",
+  "scope": "offline Prompt contract clarification only",
+  "sha256": {
+    "old_prompt": "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00",
+    "new_prompt": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "form_schema": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "old_grounding_configuration": "d6ec85e73d6061bdfc8b4eb23196595ed9086a05b622fb75ccfbaaedc4d154b4",
+    "new_grounding_configuration": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
+  },
+  "sha_invariants": {
+    "prompt_changed": true,
+    "grounding_configuration_changed_with_prompt": true,
+    "form_schema_unchanged": true
+  },
+  "historical_offline_replays": [
+    {
+      "label": "order_by",
+      "request_sha256": "36af91d1d06d22a0246ed7629578495059c320aeccd13427229b2a5a609cf971",
+      "response_sha256": "87d96cd162e7eb8ba82079fbc96be86de5a630b2b49fd1233b70040e869f81a8",
+      "strictly_rejected": true,
+      "grounding_revision": 0,
+      "frame_slot_count": 0,
+      "real_provider_calls": 0
+    },
+    {
+      "label": "sort",
+      "request_sha256": "d7fb7d5fa0150e07d921662c18b071a92216a8667492084342c9723107b51b86",
+      "response_sha256": "37e578bc2f1875f37e9478255280772f11eb3295d6e91d9c5eb4ff192eb84afe",
+      "strictly_rejected": true,
+      "grounding_revision": 0,
+      "frame_slot_count": 0,
+      "real_provider_calls": 0
+    },
+    {
+      "label": "scalar_parameters",
+      "parameter_runtime_types": [
+        "bool",
+        "int",
+        "int",
+        "str"
+      ],
+      "request_sha256": "dc571ac3759297bf5e3ff0c758ad16bc26d63e0477e72717c70d319ddec83f28",
+      "response_sha256": "542d702c689b468b292fe587269a63bcb8f1c14cd9b4ab5e7ad555c45de3b5ae",
+      "strictly_rejected": true,
+      "grounding_revision": 0,
+      "frame_slot_count": 0,
+      "real_provider_calls": 0
+    }
+  ],
+  "historical_replay_result": "3/3 PASS",
+  "tests": {
+    "pip_check": "PASS",
+    "unit_tests_passed": 192,
+    "unit_tests_failed": 0,
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "provider_capability_statement": "Provider structured-output request was sent, but schema enforcement is not treated as guaranteed. Local strict Pydantic validation remains the authoritative boundary.",
+  "boundaries": {
+    "pydantic_relaxed": false,
+    "scalar_to_object_repair_added": false,
+    "enum_alias_added": false,
+    "provider_adapter_behavior_changed": false,
+    "callback_wiring_changed": false,
+    "form_schema_changed": false,
+    "real_provider_calls": 0,
+    "p4_2d_status": "FAIL",
+    "next_real_retry_authorized": false
+  }
+}

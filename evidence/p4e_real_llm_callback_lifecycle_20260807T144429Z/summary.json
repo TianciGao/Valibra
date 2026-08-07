@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0",
+  "status": "FAIL",
+  "stage": "P4.2d",
+  "branch": "research/main",
+  "head": "8a0776df8365ae487276bd0304c4b4ace7bc299a",
+  "frozen_contract": {
+    "prompt_sha256": "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00",
+    "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "d6ec85e73d6061bdfc8b4eb23196595ed9086a05b622fb75ccfbaaedc4d154b4"
+  },
+  "offline_gate": {
+    "pip_check": "PASS",
+    "unit_tests": {
+      "passed": 182,
+      "failed": 0
+    },
+    "compileall": "PASS",
+    "git_diff_check": "PASS",
+    "real_provider_calls_during_gate": 0
+  },
+  "rule_control": {
+    "status": "PASS",
+    "wall_ms": 19.971,
+    "model_visible_request_sha256": "86d8c799d2e3faf3b7b65bea80acec6f122d144369af1675e7a51c99256491a4",
+    "contents_sha256": "2df19818eb4e8b41ddbb83604f15fc13dbd3dabbf10ac068e4d5730e4d58a123",
+    "tools_sha256": "678c4a6604c2dc5da1c6403b913da56a8655f9468c5d133eee5f935ed254d0c1",
+    "generation_config_sha256": "b462d71f556c3baec5e21710f04b1212fe2584b527b53a221f4100607671a262",
+    "final_response_sha256": "f14255fe9bef5d0977c9bbef4e997225cbc66db6cad18bc1aa9ded7a575f672d",
+    "main_stub_calls": 1,
+    "grounding_provider_requests": 0,
+    "system_agent_provider_calls": 0,
+    "tools_used": false,
+    "bird_coin_spent": 0.0
+  },
+  "llm_shadow": {
+    "status": "FAIL",
+    "grounding_provider_requests": 1,
+    "system_agent_provider_calls": 0,
+    "system_agent_provider_tokens": 0,
+    "main_stub_calls": 1,
+    "tools_used": false,
+    "bird_coin_spent": 0.0,
+    "model": "openai/glm-5.2",
+    "max_tokens": 32768,
+    "retry_count": 0,
+    "response_format_sent": true,
+    "response_format_strict": true,
+    "provider_audit_status": "succeeded",
+    "request_sha256": "dc571ac3759297bf5e3ff0c758ad16bc26d63e0477e72717c70d319ddec83f28",
+    "response_sha256": "542d702c689b468b292fe587269a63bcb8f1c14cd9b4ab5e7ad555c45de3b5ae",
+    "private_audit_ref": "research-runtime/grounding-llm/grounding-20260807T144820721920Z-dc571ac37592-9e4db695.json",
+    "provider_form_summary": {
+      "top_level_fields": [
+        "ambiguities",
+        "operation_slots",
+        "schema_slots",
+        "value_slots"
+      ],
+      "value_slots": 2,
+      "schema_slots": 2,
+      "operation_slots": 4,
+      "operation_types": [
+        "projection",
+        "limit",
+        "filter",
+        "order"
+      ],
+      "ambiguities": 0,
+      "all_mentions_anchored": true,
+      "strict_validation": "FAIL",
+      "validation_errors": [
+        {
+          "location": "operation_slots.0.parameters",
+          "type": "dict_type",
+          "received_runtime_type": "bool"
+        },
+        {
+          "location": "operation_slots.1.parameters",
+          "type": "dict_type",
+          "received_runtime_type": "int"
+        },
+        {
+          "location": "operation_slots.2.parameters",
+          "type": "dict_type",
+          "received_runtime_type": "int"
+        },
+        {
+          "location": "operation_slots.3.parameters",
+          "type": "dict_type",
+          "received_runtime_type": "str"
+        }
+      ]
+    },
+    "accepted_frame": {
+      "slot_count": 0,
+      "ambiguity_count": 0,
+      "grounding_revision": 0,
+      "reason": "strict form rejection followed by callback fail-open"
+    },
+    "usage": {
+      "input_tokens": 548,
+      "output_tokens": 1938,
+      "reasoning_tokens": 1540,
+      "total_tokens": 2486,
+      "cost": null,
+      "reasoning_tokens_are_output_subset": true
+    },
+    "latency": {
+      "rule_control_wall_ms": 19.971,
+      "llm_shadow_wall_ms": null,
+      "grounding_provider_latency_ms": null,
+      "observed_shadow_overhead_ms": null,
+      "failure_note": "The unique real request completed, but the harness intentionally aborted on the empty accepted Frame before flushing the in-memory LLM timing trace. No value was estimated."
+    },
+    "model_visible_equivalence": {
+      "rule_request_sha256": "86d8c799d2e3faf3b7b65bea80acec6f122d144369af1675e7a51c99256491a4",
+      "llm_request_sha256": null,
+      "comparison": "NOT_COMPLETED_DUE_PRIOR_HARD_FAILURE",
+      "prompt_view_injected": false,
+      "grounding_markers_absent_before_failure": true,
+      "final_response_sha256": "f14255fe9bef5d0977c9bbef4e997225cbc66db6cad18bc1aa9ded7a575f672d"
+    }
+  },
+  "failure_reason": "Provider returned scalar operation parameters despite strict JSON Schema; local strict validation rejected the entire form, so no Shadow business state was accepted.",
+  "second_real_request_performed": false,
+  "production_code_modified": false,
+  "agent_mode_after_test": "Rule Shadow",
+  "commit_created": false,
+  "push_performed": false,
+  "tag_created": false
+}

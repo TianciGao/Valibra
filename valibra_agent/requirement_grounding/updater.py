@@ -92,8 +92,16 @@ a real table, column, database identifier, binding, confidence, or hidden fact.
 Each operation slot must contain exactly: slot_role, mention, interpretation,
 operation_type, parameters. operation_type must be exactly one of projection,
 filter, aggregation, group, order, limit, distinct, or other. If no listed type
-matches exactly, use other; never invent a new value. parameters may contain
-JSON scalar values only, never nested objects or arrays.
+matches exactly, use other; never invent a new value. parameters MUST always be
+a JSON object. Values inside that object may be JSON scalars only, never nested
+objects or arrays.
+
+Correct: "parameters": {"direction": "desc"}
+Correct: "parameters": {"limit": 5}
+Correct when there are no parameters: "parameters": {}
+Wrong: "parameters": "desc"
+Wrong: "parameters": 5
+Wrong: "parameters": true
 
 Every mention must be non-empty and copied verbatim as one continuous,
 case-sensitive substring of observation_text. Put any paraphrase or explanation

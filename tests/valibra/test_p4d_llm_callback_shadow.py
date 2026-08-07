@@ -27,7 +27,7 @@ from valibra_agent.requirement_grounding.updater import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PROMPT_SHA256 = (
-    "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00"
+    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
 )
 EXPECTED_FORM_SHA256 = (
     "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
