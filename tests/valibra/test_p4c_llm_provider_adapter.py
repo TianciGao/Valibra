@@ -1,8 +1,10 @@
 import json
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from valibra_agent import grounding_callbacks
 from valibra_agent import server as valibra_server
@@ -529,13 +531,14 @@ class ObservationEligibilityAndLedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("bird", combined.model_dump_json().lower())
         self.assertEqual(runtime.model_dump_json(), before)
 
-    def test_current_agent_remains_rule_shadow(self):
+    def test_empty_mode_keeps_rule_shadow(self):
         callback_source = Path(grounding_callbacks.__file__).read_text(
             encoding="utf-8"
         )
-        self.assertNotIn("LLMUpdater", callback_source)
-        self.assertNotIn("LiteLLMGroundingClient", callback_source)
-        summary = valibra_server._configuration_summary()
+        self.assertIn("LLMUpdater", callback_source)
+        self.assertIn("LiteLLMGroundingClient", callback_source)
+        with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}):
+            summary = valibra_server._configuration_summary()
         self.assertEqual(summary["grounding_updater"], "rule")
         self.assertFalse(summary["prompt_view_injected"])
 

@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "phase": "P4.2c",
+  "status": "PASS",
+  "base_head": "570343dcdf19965a5a867247abcd801e910e8aef",
+  "completed_utc": "2026-08-07T14:13:25Z",
+  "validation": {
+    "pip_check": "PASS",
+    "unittest": "PASS",
+    "tests_passed": 182,
+    "tests_failed": 0,
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "frozen_contracts": {
+    "prompt_sha256": "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00",
+    "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "d6ec85e73d6061bdfc8b4eb23196595ed9086a05b622fb75ccfbaaedc4d154b4",
+    "changed": false
+  },
+  "mode_contract": {
+    "empty_or_unset": "rule",
+    "exact_llm": "llm",
+    "other": "invalid_fail_open",
+    "rule_fallback_on_llm_error": false,
+    "prompt_view_injected": false
+  },
+  "provider_audit": {
+    "real_provider_calls": 0,
+    "fake_client_only": true,
+    "private_audit_files_before": 3,
+    "private_audit_files_after": 3,
+    "new_private_audit_files": 0
+  },
+  "scope": {
+    "system_agent_diff": false,
+    "updater_diff": false,
+    "service_diff": false,
+    "core_model_diff": false,
+    "dependency_diff": false,
+    "new_dependencies": false,
+    "real_model_calls": false,
+    "benchmark_calls": false
+  }
+}

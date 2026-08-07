@@ -1,4 +1,5 @@
 import copy
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -7,6 +8,25 @@ from system_agent import callbacks as baseline_callbacks
 from system_agent.tools import get_ainteract_tools
 from valibra_agent import grounding_callbacks
 from valibra_agent.requirement_grounding.models import RequirementGroundingRuntime
+
+
+_RULE_MODE_PATCHER = None
+
+
+def setUpModule():
+    """V0 parity 固定走 Rule 默认路径，不读取开发者本机模式。"""
+
+    global _RULE_MODE_PATCHER
+    _RULE_MODE_PATCHER = patch.dict(
+        os.environ,
+        {"GROUNDING_UPDATER_MODE": ""},
+    )
+    _RULE_MODE_PATCHER.start()
+
+
+def tearDownModule():
+    if _RULE_MODE_PATCHER is not None:
+        _RULE_MODE_PATCHER.stop()
 
 
 class CallbackDelegationTests(unittest.IsolatedAsyncioTestCase):

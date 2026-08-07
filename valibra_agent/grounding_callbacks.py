@@ -1,4 +1,4 @@
-"""把规则 Shadow 包在 Baseline 回调外层。
+"""把可选的 Rule/LLM Shadow 包在 Baseline 回调外层。
 
 Shadow 只旁路记录有限的 Observation 和临时 Frame，不修改模型请求、工具协议
 或 Baseline 返回值；完整工具结果仍由 Baseline 轨迹保存。
@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from shared.config import PROJECT_ROOT
 from valibra_agent.requirement_grounding.models import (
+    Observation,
     PendingToolCall,
     RequirementGroundingRuntime,
 )
@@ -25,11 +29,20 @@ from valibra_agent.requirement_grounding.reducer import validate_runtime
 from valibra_agent.requirement_grounding.service import (
     add_pending_tool_call,
     process_observation,
+    process_observation_with_llm,
     process_phase_transition,
     remove_pending_tool_call,
 )
 from valibra_agent.requirement_grounding.telemetry import record_failure
-from valibra_agent.requirement_grounding.updater import RuleUpdater
+from valibra_agent.requirement_grounding.updater import (
+    GROUNDING_LLM_OBSERVATION_TYPES,
+    LLMUpdater,
+    LiteLLMGroundingClient,
+    NoOpUpdater,
+    RuleUpdater,
+    load_grounding_llm_config,
+    load_grounding_provider_config,
+)
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
@@ -46,7 +59,7 @@ else:
 GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
 GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
 SHADOW_AUDIT_KEY = "valibra_shadow"
-SHADOW_MODE = "rule"
+GROUNDING_UPDATER_MODE_ENV = "GROUNDING_UPDATER_MODE"
 
 _MAX_ARGS_SUMMARY_CHARS = 768
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -64,6 +77,94 @@ _OBSERVATION_TYPES = {
     "submit_sql": "submission",
 }
 _RULE_UPDATER = RuleUpdater()
+_NOOP_UPDATER = NoOpUpdater()
+
+
+def _requested_updater_mode(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """解析唯一模式开关；不做 trim、大小写或隐式回退。"""
+
+    source = environment if environment is not None else os.environ
+    raw_mode = source.get(GROUNDING_UPDATER_MODE_ENV)
+    if raw_mode is None or raw_mode == "":
+        return "rule"
+    if raw_mode == "llm":
+        return "llm"
+    return "invalid"
+
+
+def _grounding_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """只复制显式 GROUNDING_* 变量，隔离主 Agent 的连接配置。"""
+
+    source = environment if environment is not None else os.environ
+    return {
+        key: str(value)
+        for key, value in source.items()
+        if key.startswith("GROUNDING_")
+    }
+
+
+def _build_llm_updater(
+    environment: Mapping[str, str] | None = None,
+) -> LLMUpdater:
+    """按调用即时构造 LLM Updater；对象和凭据不会进入 Session State。"""
+
+    grounding_environment = _grounding_environment(environment)
+    llm_config = load_grounding_llm_config(
+        PROJECT_ROOT,
+        grounding_environment,
+    )
+    provider_config = load_grounding_provider_config(
+        PROJECT_ROOT,
+        llm_config,
+        grounding_environment,
+    )
+    client = LiteLLMGroundingClient(
+        provider_config,
+        environment=grounding_environment,
+    )
+    return LLMUpdater(client, llm_config)
+
+
+def grounding_updater_status(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """返回 health 可公开的有效模式，不暴露配置内容或凭据。"""
+
+    requested_mode = _requested_updater_mode(environment)
+    if requested_mode == "rule":
+        return {
+            "requested_mode": "rule",
+            "effective_mode": "rule",
+            "configuration_valid": True,
+            "error_type": None,
+        }
+    if requested_mode == "invalid":
+        return {
+            "requested_mode": "invalid",
+            "effective_mode": "invalid",
+            "configuration_valid": False,
+            "error_type": "InvalidUpdaterMode",
+        }
+    try:
+        # 这里只校验冻结配置并构造对象；不会读取密钥内容或发送请求。
+        _build_llm_updater(environment)
+    except Exception as exc:
+        return {
+            "requested_mode": "llm",
+            "effective_mode": "invalid",
+            "configuration_valid": False,
+            "error_type": type(exc).__name__[:128],
+        }
+    return {
+        "requested_mode": "llm",
+        "effective_mode": "llm",
+        "configuration_valid": True,
+        "error_type": None,
+    }
 
 
 @dataclass(slots=True)
@@ -105,7 +206,7 @@ async def before_model_callback(
     state = getattr(callback_context, "state", None)
     if state is not None:
         try:
-            _consume_bound_user_message(state)
+            await _consume_bound_user_message(state)
             _ensure_runtime(state)
         except Exception as exc:
             # Grounding 初始化失败只能记日志，不能打断 Baseline。
@@ -224,6 +325,7 @@ async def after_tool_callback(
     )
     sequence = _current_sequence(state)
     audit_metadata: dict[str, Any] | None = None
+    shadow_mode = _requested_updater_mode()
     try:
         function_call_id = _require_function_call_id(tool_context)
         runtime = _ensure_runtime(state)
@@ -252,12 +354,10 @@ async def after_tool_callback(
             invocation_id=_valid_invocation_id(tool_context),
             tool_name=tool_name,
         )
-        result = process_observation(
+        runtime, result_status, llm_audit = await _process_shadow_observation(
             runtime,
             observation,
-            updater=_RULE_UPDATER,
         )
-        runtime = result.runtime
 
         transition_observation_id: str | None = None
         phase_after = _phase(state.get("current_phase", pending.phase_before))
@@ -294,8 +394,8 @@ async def after_tool_callback(
 
         _store_runtime(state, runtime)
         audit_metadata = {
-            "mode": SHADOW_MODE,
-            "status": result.status,
+            "mode": shadow_mode,
+            "status": result_status,
             "function_call_id": function_call_id,
             "tool_name": tool_name,
             "phase_before": pending.phase_before,
@@ -308,6 +408,8 @@ async def after_tool_callback(
             "grounding_revision": runtime.grounding_revision,
             "runtime_bytes": _runtime_bytes(runtime),
         }
+        if llm_audit is not None:
+            audit_metadata["llm"] = llm_audit
     except Exception as exc:
         function_call_id = _valid_context_identifier(tool_context)
         _cleanup_pending_best_effort(state, tool_context)
@@ -319,7 +421,7 @@ async def after_tool_callback(
             function_call_id=function_call_id,
         )
         audit_metadata = {
-            "mode": SHADOW_MODE,
+            "mode": shadow_mode,
             "status": "failed",
             "function_call_id": function_call_id,
             "tool_name": _safe_tool_name(tool),
@@ -400,8 +502,8 @@ def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
     return runtime
 
 
-def _consume_bound_user_message(state: Any) -> None:
-    """把本轮用户消息转成一次 Observation，并交给规则 Updater。"""
+async def _consume_bound_user_message(state: Any) -> None:
+    """把本轮用户消息转成一次 Observation，并交给所选 Shadow。"""
 
     bound = _ACTIVE_TURN_MESSAGE.get()
     if bound is None or bound.consumed or bound.mode != "a-interact":
@@ -420,12 +522,102 @@ def _consume_bound_user_message(state: Any) -> None:
         raw=bound.message,
         summary=_user_message_summary(bound.message),
     )
-    result = process_observation(
+    runtime, _, _ = await _process_shadow_observation(
         _ensure_runtime(state),
         observation,
-        updater=_RULE_UPDATER,
     )
-    _store_runtime(state, result.runtime)
+    _store_runtime(state, runtime)
+
+
+async def _process_shadow_observation(
+    runtime: RequirementGroundingRuntime,
+    observation: Observation,
+) -> tuple[RequirementGroundingRuntime, str, dict[str, Any] | None]:
+    """按精确模式处理 Observation；错误只写有限 telemetry，不降级到 Rule。"""
+
+    mode = _requested_updater_mode()
+    if mode == "rule":
+        result = process_observation(
+            runtime,
+            observation,
+            updater=_RULE_UPDATER,
+        )
+        return result.runtime, result.status, None
+
+    if mode == "invalid":
+        failed = record_failure(
+            runtime,
+            stage="updater",
+            exception=ValueError("invalid GROUNDING_UPDATER_MODE"),
+            sequence=observation.sequence,
+            observation_id=observation.observation_id,
+            function_call_id=observation.function_call_id,
+            metric_namespace="llm",
+        )
+        return failed, "failed", None
+
+    if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
+        # 非用户 Observation 只记生命周期，不调用模型也不消耗 LLM call budget。
+        result = process_observation(
+            runtime,
+            observation,
+            updater=_NOOP_UPDATER,
+        )
+        return result.runtime, result.status, None
+
+    try:
+        updater = _build_llm_updater()
+    except Exception as exc:
+        failed = record_failure(
+            runtime,
+            stage="updater",
+            exception=exc,
+            sequence=observation.sequence,
+            observation_id=observation.observation_id,
+            function_call_id=observation.function_call_id,
+            metric_namespace="llm",
+        )
+        return failed, "failed", None
+
+    result = await process_observation_with_llm(
+        runtime,
+        observation,
+        updater=updater,
+    )
+    return (
+        result.runtime,
+        result.status,
+        _bounded_llm_audit(result.llm_audit),
+    )
+
+
+def _bounded_llm_audit(audit: Any) -> dict[str, Any]:
+    """保留有限、无正文的单次 LLM 审计摘要。"""
+
+    return {
+        "status": audit.status,
+        "attempted": audit.attempted,
+        "configuration_sha256": audit.configuration_sha256,
+        "prompt_sha256": audit.prompt_sha256,
+        "input_tokens": audit.input_tokens,
+        "output_tokens": audit.output_tokens,
+        "reasoning_tokens": audit.reasoning_tokens,
+        "total_tokens": audit.total_tokens,
+        "latency_ms": audit.latency_ms,
+        "cost": audit.cost,
+        "model": audit.model,
+        "provider": audit.provider,
+        "credential_source": audit.credential_source,
+        "request_sha256": audit.request_sha256,
+        "response_sha256": audit.response_sha256,
+        "raw_audit_ref": audit.raw_audit_ref,
+        "timed_out": audit.timed_out,
+        "provider_may_continue_after_cancel": (
+            audit.provider_may_continue_after_cancel
+        ),
+        "provider_may_bill_after_cancel": audit.provider_may_bill_after_cancel,
+        "error_type": audit.error_type,
+    }
 
 
 def _user_message_summary(message: str) -> str:

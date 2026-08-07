@@ -3,6 +3,7 @@ import copy
 import importlib.metadata
 import inspect
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -16,6 +17,25 @@ from valibra_agent import grounding_callbacks
 from valibra_agent.agent import build_agent as build_valibra_agent
 from valibra_agent.requirement_grounding.models import RequirementGroundingRuntime
 from valibra_agent.requirement_grounding.observations import stable_digest
+
+
+_RULE_MODE_PATCHER = None
+
+
+def setUpModule():
+    """P3 回归固定验证原有 Rule Shadow，不依赖本机 .env。"""
+
+    global _RULE_MODE_PATCHER
+    _RULE_MODE_PATCHER = patch.dict(
+        os.environ,
+        {"GROUNDING_UPDATER_MODE": ""},
+    )
+    _RULE_MODE_PATCHER.start()
+
+
+def tearDownModule():
+    if _RULE_MODE_PATCHER is not None:
+        _RULE_MODE_PATCHER.stop()
 
 
 def _state(task_id="task-shadow", phase=1, budget=10.0):

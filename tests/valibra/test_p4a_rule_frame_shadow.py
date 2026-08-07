@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import inspect
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -24,6 +25,25 @@ from valibra_agent.requirement_grounding.service import (
     process_phase_transition,
 )
 from valibra_agent.requirement_grounding.updater import RuleUpdater
+
+
+_RULE_MODE_PATCHER = None
+
+
+def setUpModule():
+    """P4.1 回归固定验证 Rule Shadow，不依赖本机 .env。"""
+
+    global _RULE_MODE_PATCHER
+    _RULE_MODE_PATCHER = patch.dict(
+        os.environ,
+        {"GROUNDING_UPDATER_MODE": ""},
+    )
+    _RULE_MODE_PATCHER.start()
+
+
+def tearDownModule():
+    if _RULE_MODE_PATCHER is not None:
+        _RULE_MODE_PATCHER.stop()
 
 
 def _observation(

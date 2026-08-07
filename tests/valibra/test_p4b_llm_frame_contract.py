@@ -545,11 +545,12 @@ class LLMUpdaterContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WiringBoundaryTests(unittest.TestCase):
-    def test_current_runtime_remains_rule_shadow_and_llm_is_not_wired(self):
+    def test_empty_mode_remains_rule_shadow_without_prompt_injection(self):
         callback_source = inspect.getsource(grounding_callbacks)
-        self.assertNotIn("LLMUpdater", callback_source)
-        self.assertNotIn("process_observation_with_llm", callback_source)
-        summary = valibra_server._configuration_summary()
+        self.assertIn("LLMUpdater", callback_source)
+        self.assertIn("process_observation_with_llm", callback_source)
+        with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}):
+            summary = valibra_server._configuration_summary()
         self.assertEqual(summary["grounding_mode"], "shadow")
         self.assertEqual(summary["grounding_updater"], "rule")
         self.assertFalse(summary["prompt_view_injected"])

@@ -16,9 +16,10 @@ from shared.config import (
     settings,
 )
 from valibra_agent.adk_runtime import AdkRuntime
+from valibra_agent.grounding_callbacks import grounding_updater_status
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="P4.1-Rule-Shadow")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="P4.2c-Frame-Shadow")
 runtime = AdkRuntime()
 
 
@@ -43,6 +44,7 @@ def _configuration_summary() -> Dict[str, Any]:
 
     preset_report = active_model_preset_report()
     normalized = normalized_system_agent_config()
+    updater_status = grounding_updater_status()
     return {
         "dataset": settings.dataset,
         "prompt_version": settings.prompt_version,
@@ -64,9 +66,25 @@ def _configuration_summary() -> Dict[str, Any]:
         },
         "grounding_enabled": True,
         "grounding_mode": "shadow",
-        "grounding_updater": "rule",
+        "grounding_updater": updater_status["effective_mode"],
+        "grounding_requested_updater": updater_status["requested_mode"],
+        "grounding_configuration_valid": updater_status[
+            "configuration_valid"
+        ],
+        "grounding_configuration_error_type": updater_status["error_type"],
         "prompt_view_injected": False,
     }
+
+
+def _variant(summary: Dict[str, Any]) -> str:
+    """依据有效 Updater 模式返回可公开的 Shadow 版本名。"""
+
+    updater = summary.get("grounding_updater")
+    if updater == "rule":
+        return "P4.1-Rule-Shadow"
+    if updater == "llm":
+        return "P4.2c-LLM-Frame-Shadow"
+    return "P4.2c-Invalid-Grounding-Config"
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:
@@ -87,8 +105,9 @@ async def log_active_configuration() -> None:
 
     summary = _configuration_summary()
     logger.info(
-        "Valibra variant=P4.1-Rule-Shadow git_commit=%s configuration_summary=%s "
+        "Valibra variant=%s git_commit=%s configuration_summary=%s "
         "configuration_sha256=%s",
+        _variant(summary),
         _git_commit(),
         summary,
         _summary_sha256(summary),
@@ -177,7 +196,7 @@ async def health():
     return {
         "status": "healthy",
         "service": "valibra_agent",
-        "variant": "P4.1-Rule-Shadow",
+        "variant": _variant(summary),
         "git_commit": _git_commit(),
         "configuration_summary": summary,
         "configuration_sha256": _summary_sha256(summary),

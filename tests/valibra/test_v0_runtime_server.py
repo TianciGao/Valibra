@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -160,8 +161,9 @@ class HttpContractTests(unittest.TestCase):
         fake_runtime.cleanup_session.assert_awaited_once()
 
     def test_health_identifies_rule_shadow_and_contains_no_credentials(self):
-        with TestClient(valibra_server.app) as client:
-            response = client.get("/health")
+        with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}):
+            with TestClient(valibra_server.app) as client:
+                response = client.get("/health")
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["service"], "valibra_agent")
