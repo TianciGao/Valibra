@@ -1379,6 +1379,25 @@ def _llm_patch_from_proposal(
         *(('schema', item) for item in proposal.schema_slots),
         *(('operation', item) for item in proposal.operation_slots),
     ]
+
+    if observation.observation_type == "user_answer":
+        return _llm_reconciled_patch(
+            observation,
+            state,
+            typed_proposals,
+            base_revision=base_revision,
+            allow_new_slots=False,
+        )
+    if observation.observation_type == "user_query" and observation.phase == 2:
+        return _llm_reconciled_patch(
+            observation,
+            state,
+            typed_proposals,
+            base_revision=base_revision,
+            allow_new_slots=True,
+        )
+
+    # Phase 1 初始问题保留 P4.2 已冻结的、按完整提案生成 Slot ID 的行为。
     for slot_kind, item in typed_proposals:
         slot_id = _llm_slot_id(slot_kind, item)
         current = existing.get(slot_id)
@@ -1434,6 +1453,153 @@ def _llm_patch_from_proposal(
             "P4.2a provisional LLM Frame; no ambiguity or schema binding",
         ),
     )
+
+
+def _llm_reconciled_patch(
+    observation: Observation,
+    state: RequirementGroundingState,
+    typed_proposals: list[tuple[str, KernelModel]],
+    *,
+    base_revision: int,
+    allow_new_slots: bool,
+) -> RequirementGroundingPatch:
+    """按 slot_kind + slot_role 原子匹配 user_answer 或 Phase-2 follow-up。"""
+
+    proposal_counts = Counter(
+        (slot_kind, item.slot_role) for slot_kind, item in typed_proposals
+    )
+    duplicate_keys = sorted(
+        key for key, count in proposal_counts.items() if count != 1
+    )
+    if duplicate_keys:
+        return _llm_reconciliation_noop(
+            observation,
+            base_revision,
+            "duplicate proposal key",
+        )
+
+    all_slots = tuple(_slot_index(state).values())
+    active_by_key: dict[tuple[str, str], list[GroundingSlot]] = {}
+    for slot in all_slots:
+        if slot.lifecycle == "active":
+            active_by_key.setdefault((slot.slot_kind, slot.slot_role), []).append(slot)
+
+    for key in proposal_counts:
+        matches = active_by_key.get(key, [])
+        if len(matches) > 1:
+            return _llm_reconciliation_noop(
+                observation,
+                base_revision,
+                "multiple active Slot matches",
+            )
+        if not allow_new_slots and len(matches) != 1:
+            return _llm_reconciliation_noop(
+                observation,
+                base_revision,
+                "user_answer requires exactly one active Slot match",
+            )
+
+    evidence_id = f"evidence.{observation.observation_id}"
+    additions: list[GroundingSlot] = []
+    updates: list[GroundingSlot] = []
+    existing_ids = {slot.slot_id for slot in all_slots}
+    for slot_kind, item in typed_proposals:
+        key = (slot_kind, item.slot_role)
+        matches = active_by_key.get(key, [])
+        current = matches[0] if matches else None
+        slot_id = (
+            current.slot_id
+            if current is not None
+            else _llm_unique_addition_id(
+                slot_kind,
+                item,
+                observation=observation,
+                existing_ids=existing_ids,
+            )
+        )
+        slot = _llm_slot_from_proposal(
+            slot_kind,
+            item,
+            slot_id=slot_id,
+            evidence_id=evidence_id,
+            observation=observation,
+            current=current,
+        )
+        if current is None:
+            additions.append(slot)
+            existing_ids.add(slot.slot_id)
+        else:
+            updates.append(slot)
+
+    if not additions and not updates:
+        return _llm_reconciliation_noop(
+            observation,
+            base_revision,
+            "proposal contained no Slot changes",
+        )
+
+    evidence = GroundingEvidence(
+        evidence_id=evidence_id,
+        observation_id=observation.observation_id,
+        source_type=f"llm_{observation.observation_type}",
+        phase=observation.phase,
+        summary=observation.summary,
+        raw_digest=observation.raw_digest,
+        raw_log_ref=observation.raw_log_ref,
+        sequence=observation.sequence,
+        timestamp=None,
+    )
+    return RequirementGroundingPatch(
+        patch_id=f"llm-reconcile.{observation.observation_id}",
+        base_revision=base_revision,
+        source_observation_ids=(observation.observation_id,),
+        slot_additions=tuple(additions),
+        slot_updates=tuple(updates),
+        ambiguity_additions=(),
+        ambiguity_updates=(),
+        evidence_additions=(evidence,),
+        diagnostics=(
+            "P4.3a deterministic Slot reconciliation; atomic semantic update",
+        ),
+    )
+
+
+def _llm_reconciliation_noop(
+    observation: Observation,
+    base_revision: int,
+    reason: str,
+) -> RequirementGroundingPatch:
+    """用有界诊断拒绝整次语义更新，同时仍把 Observation 标为已处理。"""
+
+    return RequirementGroundingPatch(
+        patch_id=f"llm-reconcile-noop.{observation.observation_id}",
+        base_revision=base_revision,
+        source_observation_ids=(observation.observation_id,),
+        diagnostics=(f"P4.3a reconciliation no-op: {reason}"[:512],),
+    )
+
+
+def _llm_unique_addition_id(
+    slot_kind: str,
+    proposal: KernelModel,
+    *,
+    observation: Observation,
+    existing_ids: set[str],
+) -> str:
+    """为 Phase-2 新逻辑 Slot 生成稳定 ID，并避免碰撞旧生命周期。"""
+
+    candidate = _llm_slot_id(slot_kind, proposal)
+    if candidate not in existing_ids:
+        return candidate
+    identity = {
+        "slot_kind": slot_kind,
+        "proposal": proposal.model_dump(mode="json"),
+        "observation_id": observation.observation_id,
+    }
+    digest = hashlib.sha256(
+        preset_canonical_json(identity).encode("utf-8")
+    ).hexdigest()
+    return f"slot.llm.{slot_kind}.{digest[:24]}"
 
 
 def _llm_slot_id(slot_kind: str, proposal: KernelModel) -> str:

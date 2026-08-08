@@ -276,9 +276,14 @@ class LLMCallbackShadowTests(unittest.IsolatedAsyncioTestCase):
         context = _context(state, "call-answer")
         tool = SimpleNamespace(name="ask_user")
         args = {"question": "Which year?"}
-        client = FakeClient(content=ANSWER_CONTENT)
+        client = FakeClient(
+            content=lambda request: (
+                ANSWER_CONTENT if ANSWER in request.prompt else QUERY_CONTENT
+            )
+        )
         updater = LLMUpdater(client, _llm_config())
         override = {"baseline": "override-must-be-returned"}
+        before_delegate = AsyncMock(return_value=None)
         after_delegate = AsyncMock(return_value=override)
         with (
             patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
@@ -289,10 +294,19 @@ class LLMCallbackShadowTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 baseline_callbacks,
+                "before_model_callback",
+                before_delegate,
+            ),
+            patch.object(
+                baseline_callbacks,
                 "after_tool_callback",
                 after_delegate,
             ),
         ):
+            await _run_bound_query(state, QUERY, {"prompt": "unchanged"})
+            original_slot_id = _runtime(state).grounding_state.requirement_frame.value_slots[
+                0
+            ].slot_id
             rejection = await grounding_callbacks.before_tool_callback(
                 tool,
                 args,
@@ -308,15 +322,19 @@ class LLMCallbackShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rejection)
         self.assertIs(result, override)
         after_delegate.assert_awaited_once_with(tool, args, context, ANSWER)
-        self.assertEqual(client.calls, 1)
-        self.assertIn(ANSWER, client.requests[0].prompt)
-        self.assertNotIn("override-must-be-returned", client.requests[0].prompt)
+        self.assertEqual(client.calls, 2)
+        self.assertIn(ANSWER, client.requests[1].prompt)
+        self.assertNotIn("override-must-be-returned", client.requests[1].prompt)
         runtime = _runtime(state)
         self.assertEqual(runtime.pending_tool_calls, {})
         self.assertGreater(runtime.grounding_revision, 0)
         self.assertEqual(
             runtime.grounding_state.requirement_frame.value_slots[0].mention,
             "2023",
+        )
+        self.assertEqual(
+            runtime.grounding_state.requirement_frame.value_slots[0].slot_id,
+            original_slot_id,
         )
 
     async def test_non_user_tool_observations_are_noop_without_llm_budget(self):
@@ -366,8 +384,9 @@ class LLMCallbackShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_delegate.await_count, len(tools))
         runtime = _runtime(state)
         self.assertEqual(runtime.pending_tool_calls, {})
-        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertEqual(runtime.grounding_revision, len(tools))
         self.assertEqual(len(runtime.processed_observation_ids), len(tools))
+        self.assertEqual(len(runtime.grounding_state.evidence), len(tools))
         self.assertEqual(runtime.metrics.root.get("llm_updater_calls", 0), 0)
         frame = runtime.grounding_state.requirement_frame
         self.assertEqual(frame.value_slots, ())
@@ -749,7 +768,7 @@ class ModeAndBoundaryTests(unittest.TestCase):
         self.assertNotIn("activate_model_preset", source)
         self.assertNotIn("SYSTEM_AGENT_API", source)
         self.assertNotIn("task_data", source)
-        self.assertNotIn("follow_up", source)
+        self.assertNotIn("_last_submit_raw", source)
         self.assertNotIn("test_cases", source)
 
 

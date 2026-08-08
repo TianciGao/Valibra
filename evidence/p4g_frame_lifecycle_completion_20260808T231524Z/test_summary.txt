@@ -1,0 +1,5 @@
+pip check: PASS
+python -m unittest discover -s tests -v: PASS (203/203)
+python -m compileall valibra_agent tests/valibra: PASS
+git diff --check: PASS
+real_provider_calls: 0

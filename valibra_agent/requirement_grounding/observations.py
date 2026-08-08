@@ -20,6 +20,23 @@ MAX_COLLECTION_ITEMS = 512
 MAX_NESTING_DEPTH = 12
 MAX_RAW_STRING_CHARS = 262_144
 
+_OFFICIAL_TOOL_ERROR_PREFIXES: dict[str, tuple[str, ...]] = {
+    "execute_sql": (
+        "SQL Error:",
+        "Error calling DB environment:",
+    ),
+    "get_schema": ("Error:",),
+    "get_all_column_meanings": ("Error:",),
+    "get_column_meaning": ("Error:",),
+    "get_all_external_knowledge_names": ("Error:",),
+    "get_knowledge_definition": ("Error:",),
+    "get_all_knowledge_definitions": ("Error:",),
+    "submit_sql": ("Error:",),
+}
+
+_FOLLOW_UP_PREFIX = "Follow-up question: "
+_BUDGET_PREFIX = "\nBudget remaining: "
+
 
 class ObservationNormalizationError(ValueError):
     """输入无法安全转成 JSON，或超过明确的大小限制。"""
@@ -99,6 +116,57 @@ def build_observation(
         invocation_id=invocation_id,
         tool_name=tool_name,
     )
+
+
+def classify_tool_observation_type(
+    *,
+    tool_name: str,
+    tool_response: Any,
+    success_type: ObservationType,
+) -> ObservationType:
+    """只按冻结官方工具的精确错误前缀区分成功与失败。"""
+
+    prefixes = _OFFICIAL_TOOL_ERROR_PREFIXES.get(tool_name, ())
+    if isinstance(tool_response, str) and any(
+        tool_response.startswith(prefix) for prefix in prefixes
+    ):
+        return "tool_error"
+    return success_type
+
+
+def extract_submit_follow_up(tool_response: Any) -> str:
+    """从本次合法 submit_sql 原始返回中提取唯一、有界的 Phase-2 问题。"""
+
+    if not isinstance(tool_response, str):
+        raise ObservationNormalizationError(
+            "submit_sql follow-up response must be a string"
+        )
+    starts = []
+    offset = 0
+    while True:
+        index = tool_response.find(_FOLLOW_UP_PREFIX, offset)
+        if index < 0:
+            break
+        if index == 0 or tool_response[index - 1] == "\n":
+            starts.append(index)
+        offset = index + len(_FOLLOW_UP_PREFIX)
+    if len(starts) != 1:
+        raise ObservationNormalizationError(
+            "submit_sql response must contain exactly one legal follow-up marker"
+        )
+
+    value_start = starts[0] + len(_FOLLOW_UP_PREFIX)
+    value_end = tool_response.find(_BUDGET_PREFIX, value_start)
+    if value_end < 0:
+        raise ObservationNormalizationError(
+            "submit_sql follow-up must precede the official budget line"
+        )
+    value = tool_response[value_start:value_end]
+    if not value or not value.strip():
+        raise ObservationNormalizationError("submit_sql follow-up is empty")
+    if len(value) > MAX_RAW_STRING_CHARS:
+        raise ObservationNormalizationError("submit_sql follow-up exceeds length limit")
+    return value.strip()
 
 
 def _validate_json_value(value: Any, *, depth: int, count: list[int]) -> None:

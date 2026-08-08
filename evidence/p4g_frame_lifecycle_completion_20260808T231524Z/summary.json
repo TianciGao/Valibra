@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0",
+  "stage": "P4.3a",
+  "status": "PASS",
+  "head_before": "249b4a61ab30517e20539105f1e3946eae65e038",
+  "tests": {
+    "total": 203,
+    "passed": 203,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "frozen_contract": {
+    "prompt_sha256": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9",
+    "unchanged": true
+  },
+  "slot_reconciliation": {
+    "user_answer_unique_match": "reused original slot_id and appended evidence",
+    "user_answer_zero_match": "atomic semantic no-op",
+    "user_answer_multiple_matches": "atomic semantic no-op",
+    "duplicate_proposal_key": "atomic semantic no-op",
+    "phase2_unique_match": "updated stable Slot identity",
+    "phase2_zero_match": "added a new provisional Slot",
+    "phase2_multiple_matches": "atomic semantic no-op"
+  },
+  "evidence_bridge": {
+    "observation_type_count": 5,
+    "observation_types": [
+      "knowledge",
+      "metadata",
+      "schema",
+      "sql_execution",
+      "submission"
+    ],
+    "frame_mutations": 0,
+    "ambiguity_mutations": 0,
+    "schema_bindings": 0,
+    "duplicate_observation": "idempotent"
+  },
+  "tool_error": {
+    "official_string_forms": "classified by finite exact prefixes",
+    "real_exception_callback": "bounded ToolErrorObservation and exact Pending cleanup",
+    "evidence_created": 0,
+    "business_revision_increment": 0,
+    "baseline_tool_return_changed": false
+  },
+  "phase2": {
+    "order": [
+      "baseline_after_tool",
+      "submission_evidence",
+      "phase_transition",
+      "legal_submit_response_follow_up",
+      "llm_frame_update"
+    ],
+    "legal_follow_up_source": "current original submit_sql tool_response only",
+    "frame_preserved_on_extraction_failure": true,
+    "frame_preserved_on_fake_llm_failure": true,
+    "phase_remains_2_on_failure": true
+  },
+  "synthetic_lifecycle_fake_llm_calls": {
+    "total": 3,
+    "user_query": 2,
+    "user_answer": 1,
+    "ordinary_tool_observation": 0
+  },
+  "main_agent": {
+    "llm_request_changed": false,
+    "prompt_view_injected": false
+  },
+  "real_provider_calls": 0,
+  "private_audit_file_count_before": 5,
+  "private_audit_file_count_after": 5,
+  "forbidden_file_diffs": 0
+}

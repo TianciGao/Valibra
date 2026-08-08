@@ -117,7 +117,8 @@ class CallbackBehaviorParityTests(unittest.IsolatedAsyncioTestCase):
             valibra_context.state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
         )
         self.assertEqual(runtime.pending_tool_calls, {})
-        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertEqual(runtime.grounding_revision, 1)
+        self.assertEqual(len(runtime.grounding_state.evidence), 1)
 
     async def test_two_function_calls_in_one_turn_share_baseline_state_machine(self):
         tools = {tool.name: tool for tool in get_ainteract_tools()}

@@ -84,7 +84,7 @@ class AdkApiContractTests(unittest.TestCase):
         source = inspect.getsource(grounding_callbacks)
         for forbidden in (
             "task_data",
-            "follow_up",
+            "_last_submit_raw",
             "sol_sql",
             "test_cases",
             "render_prompt_view",
@@ -197,8 +197,9 @@ class ShadowToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(shadow["raw_log_ref"], "session://tool_trajectory/0")
         runtime = _runtime(state)
         self.assertEqual(runtime.pending_tool_calls, {})
-        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertEqual(runtime.grounding_revision, 1)
         self.assertEqual(len(runtime.processed_observation_ids), 1)
+        self.assertEqual(len(runtime.grounding_state.evidence), 1)
 
     async def test_db_error_text_remains_the_baseline_visible_response(self):
         state = _state()
@@ -225,6 +226,10 @@ class ShadowToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
             grounding_callbacks.SHADOW_AUDIT_KEY
         ]
         self.assertEqual(shadow["raw_digest"], stable_digest(original))
+        runtime = _runtime(state)
+        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertEqual(runtime.grounding_state.evidence, ())
+        self.assertEqual(len(runtime.processed_observation_ids), 1)
 
     async def test_two_same_name_calls_pair_and_clean_by_distinct_ids(self):
         state = _state()
@@ -360,8 +365,9 @@ class ShadowToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
         runtime = _runtime(state)
         self.assertEqual(runtime.phase, 2)
-        self.assertEqual(runtime.grounding_revision, 1)
+        self.assertEqual(runtime.grounding_revision, 2)
         self.assertEqual(len(runtime.processed_observation_ids), 2)
+        self.assertEqual(len(runtime.grounding_state.evidence), 1)
         self.assertEqual(runtime.grounding_state.requirement_frame.value_slots, ())
         self.assertEqual(runtime.grounding_state.ambiguity_index, ())
         shadow = state["tool_trajectory"][0][grounding_callbacks.SHADOW_AUDIT_KEY]
@@ -393,8 +399,9 @@ class ShadowToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     )
                 runtime = _runtime(state)
                 self.assertEqual(runtime.phase, 1)
-                self.assertEqual(runtime.grounding_revision, 0)
+                self.assertEqual(runtime.grounding_revision, 1)
                 self.assertEqual(len(runtime.processed_observation_ids), 1)
+                self.assertEqual(len(runtime.grounding_state.evidence), 1)
 
     async def test_missing_function_call_id_never_creates_or_guesses_pending(self):
         state = _state()
@@ -437,6 +444,9 @@ class ShadowToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         runtime = _runtime(state)
         self.assertEqual(runtime.pending_tool_calls, {})
+        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertEqual(runtime.grounding_state.evidence, ())
+        self.assertEqual(len(runtime.processed_observation_ids), 1)
         self.assertEqual(state["_infrastructure_error"], "User Simulator outage")
         self.assertNotIn("super-secret-token", runtime.model_dump_json())
         self.assertIn("<redacted>", runtime.last_error.message_preview)

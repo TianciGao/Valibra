@@ -16,14 +16,21 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from shared.config import PROJECT_ROOT
+from valibra_agent.requirement_grounding.evidence_bridge import (
+    EVIDENCE_OBSERVATION_TYPES,
+    EvidenceBridgeUpdater,
+)
 from valibra_agent.requirement_grounding.models import (
     Observation,
     PendingToolCall,
     RequirementGroundingRuntime,
 )
 from valibra_agent.requirement_grounding.observations import (
+    ObservationNormalizationError,
     build_observation,
     canonical_json,
+    classify_tool_observation_type,
+    extract_submit_follow_up,
 )
 from valibra_agent.requirement_grounding.reducer import validate_runtime
 from valibra_agent.requirement_grounding.service import (
@@ -78,6 +85,7 @@ _OBSERVATION_TYPES = {
 }
 _RULE_UPDATER = RuleUpdater()
 _NOOP_UPDATER = NoOpUpdater()
+_EVIDENCE_UPDATER = EvidenceBridgeUpdater()
 
 
 def _requested_updater_mode(
@@ -342,9 +350,15 @@ async def after_tool_callback(
             )
         task_id = _task_id(state)
         sequence = _next_sequence(state)
+        success_type = _observation_type(tool_name)
+        observation_type = classify_tool_observation_type(
+            tool_name=tool_name,
+            tool_response=tool_response,
+            success_type=success_type,
+        )
         observation = build_observation(
             task_id=task_id,
-            observation_type=_observation_type(tool_name),
+            observation_type=observation_type,
             phase=pending.phase_before,
             sequence=sequence,
             source="adk_tool_result",
@@ -358,11 +372,26 @@ async def after_tool_callback(
             runtime,
             observation,
         )
+        if observation_type == "tool_error":
+            runtime = record_failure(
+                runtime,
+                stage="observation",
+                exception=RuntimeError(
+                    f"official {tool_name} returned its frozen error form"
+                ),
+                sequence=observation.sequence,
+                observation_id=observation.observation_id,
+                function_call_id=function_call_id,
+            )
 
         transition_observation_id: str | None = None
+        follow_up_observation_id: str | None = None
+        follow_up_status: str | None = None
+        follow_up_llm_audit: dict[str, Any] | None = None
         phase_after = _phase(state.get("current_phase", pending.phase_before))
         if (
             tool_name == "submit_sql"
+            and observation_type == "submission"
             and pending.phase_before == 1
             and phase_after == 2
         ):
@@ -391,6 +420,40 @@ async def after_tool_callback(
             )
             runtime = transition_result.runtime
             transition_observation_id = transition_observation.observation_id
+            if transition_result.status == "processed" and runtime.phase == 2:
+                try:
+                    follow_up = extract_submit_follow_up(tool_response)
+                    follow_up_sequence = _next_sequence(state)
+                    follow_up_observation = build_observation(
+                        task_id=task_id,
+                        observation_type="user_query",
+                        phase=2,
+                        sequence=follow_up_sequence,
+                        source="submit_sql_follow_up",
+                        raw=follow_up,
+                        summary=follow_up,
+                        raw_log_ref=raw_log_ref,
+                        function_call_id=function_call_id,
+                        invocation_id=_valid_invocation_id(tool_context),
+                        tool_name=tool_name,
+                    )
+                    runtime, follow_up_status, follow_up_llm_audit = (
+                        await _process_shadow_observation(
+                            runtime,
+                            follow_up_observation,
+                        )
+                    )
+                    follow_up_observation_id = follow_up_observation.observation_id
+                except ObservationNormalizationError as exc:
+                    follow_up_status = "failed"
+                    runtime = record_failure(
+                        runtime,
+                        stage="observation",
+                        exception=exc,
+                        sequence=_current_sequence(state),
+                        observation_id=transition_observation.observation_id,
+                        function_call_id=function_call_id,
+                    )
 
         _store_runtime(state, runtime)
         audit_metadata = {
@@ -401,7 +464,10 @@ async def after_tool_callback(
             "phase_before": pending.phase_before,
             "phase_after": phase_after,
             "observation_id": observation.observation_id,
+            "observation_type": observation.observation_type,
             "transition_observation_id": transition_observation_id,
+            "follow_up_observation_id": follow_up_observation_id,
+            "follow_up_status": follow_up_status,
             "raw_digest": observation.raw_digest,
             "raw_log_ref": raw_log_ref,
             "summary": observation.summary,
@@ -410,6 +476,8 @@ async def after_tool_callback(
         }
         if llm_audit is not None:
             audit_metadata["llm"] = llm_audit
+        if follow_up_llm_audit is not None:
+            audit_metadata["follow_up_llm"] = follow_up_llm_audit
     except Exception as exc:
         function_call_id = _valid_context_identifier(tool_context)
         _cleanup_pending_best_effort(state, tool_context)
@@ -444,17 +512,38 @@ async def on_tool_error_callback(
     tool_context: ToolContext,
     error: Exception,
 ) -> None:
-    """工具报错时只清理对应 Pending，记有限错误信息后交还 ADK。"""
+    """真实工具异常形成有界 ToolErrorObservation，并精确清理 Pending。"""
 
-    del tool, args
+    del args
     state = tool_context.state
     sequence = _current_sequence(state)
     function_call_id = _valid_context_identifier(tool_context)
     try:
         exact_id = _require_function_call_id(tool_context)
         runtime = _ensure_runtime(state)
-        runtime, _ = remove_pending_tool_call(runtime, exact_id)
+        runtime, pending = remove_pending_tool_call(runtime, exact_id)
+        _store_runtime(state, runtime)
+        if pending is None:
+            return None
+        tool_name = _tool_name(tool)
+        if pending.tool_name != tool_name:
+            raise ValueError(
+                "pending tool name does not match the exact function call"
+            )
         sequence = _next_sequence(state)
+        observation = build_observation(
+            task_id=_task_id(state),
+            observation_type="tool_error",
+            phase=pending.phase_before,
+            sequence=sequence,
+            source="adk_tool_error",
+            raw={"error_type": type(error).__name__[:128]},
+            summary=f"{tool_name} raised {type(error).__name__[:128]}",
+            function_call_id=exact_id,
+            invocation_id=_valid_invocation_id(tool_context),
+            tool_name=tool_name,
+        )
+        runtime, _, _ = await _process_shadow_observation(runtime, observation)
         runtime = record_failure(
             runtime,
             stage="service",
@@ -534,6 +623,22 @@ async def _process_shadow_observation(
     observation: Observation,
 ) -> tuple[RequirementGroundingRuntime, str, dict[str, Any] | None]:
     """按精确模式处理 Observation；错误只写有限 telemetry，不降级到 Rule。"""
+
+    if observation.observation_type in EVIDENCE_OBSERVATION_TYPES:
+        result = process_observation(
+            runtime,
+            observation,
+            updater=_EVIDENCE_UPDATER,
+        )
+        return result.runtime, result.status, None
+
+    if observation.observation_type == "tool_error":
+        result = process_observation(
+            runtime,
+            observation,
+            updater=_NOOP_UPDATER,
+        )
+        return result.runtime, result.status, None
 
     mode = _requested_updater_mode()
     if mode == "rule":
