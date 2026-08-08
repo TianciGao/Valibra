@@ -1,0 +1,89 @@
+{
+  "checkpoint": "P4.3b Agent-facing Requirement View Shadow",
+  "status": "PASS",
+  "starting_head": "e18e457f70487eee1bfe95c360f20bbea2adfb06",
+  "tests": {
+    "passed": 219,
+    "failed": 0,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "frozen_contracts": {
+    "grounding_prompt_sha256": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "frame_form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
+  },
+  "example_view": {
+    "sha256": "3b8af60882fae063d43bb7c3820e2b81fb978f2d18c87712bd7d6a916a3a2132",
+    "chars": 486,
+    "tokens_cl100k": 128
+  },
+  "semantic_equivalence": {
+    "different_slot_ids": true,
+    "different_origins": true,
+    "different_evidence_refs": true,
+    "different_slot_order": true,
+    "same_view": true,
+    "same_sha256": true
+  },
+  "bounds": {
+    "defaults": {
+      "max_chars": 2000,
+      "max_items": 50,
+      "max_tokens_cl100k": 512
+    },
+    "char_limit_case": {
+      "limit": 300,
+      "actual_chars": 296,
+      "actual_tokens": 74,
+      "items": 3,
+      "omitted": 3
+    },
+    "item_limit_case": {
+      "limit": 2,
+      "actual_chars": 216,
+      "actual_tokens": 56,
+      "items": 2,
+      "omitted": 4
+    },
+    "token_limit_case": {
+      "limit": 90,
+      "actual_chars": 341,
+      "actual_tokens": 87,
+      "items": 4,
+      "omitted": 2
+    },
+    "whole_items_only": true,
+    "mid_string_truncation": false
+  },
+  "safety": {
+    "unsafe_text_json_escaped": true,
+    "unsafe_text_created_instruction_line": false,
+    "internal_field_leakage": false,
+    "ambiguity_rendered": false,
+    "evidence_rendered": false
+  },
+  "callback_shadow": {
+    "baseline_calls": 1,
+    "main_request_sha256_before": "8e77ee5aefa7557725cecb208483eb3317692f6bfb7e2dcaf6e6a205a24323a9",
+    "main_request_sha256_after": "8e77ee5aefa7557725cecb208483eb3317692f6bfb7e2dcaf6e6a205a24323a9",
+    "main_request_equal": true,
+    "injected": false,
+    "renderer_failure_fail_open": true
+  },
+  "external_calls": {
+    "real_provider_calls": 0,
+    "system_agent_provider_calls": 0,
+    "database_calls": 0,
+    "user_simulator_calls": 0,
+    "benchmark_runs": 0
+  },
+  "diff_boundary": {
+    "system_agent_zero_diff": true,
+    "core_state_contract_zero_diff": true,
+    "agent_runtime_server_zero_diff": true,
+    "dependencies_zero_diff": true,
+    "prompt_form_provider_contract_zero_diff": true
+  }
+}

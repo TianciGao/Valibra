@@ -129,7 +129,9 @@ class PromptViewTests(unittest.TestCase):
         first = render_prompt_view(state)
         second = render_prompt_view(state)
         self.assertEqual(first, second)
-        self.assertLess(first.index("slot-a"), first.index("slot-b"))
+        self.assertLess(first.index('"A"'), first.index('"B"'))
+        self.assertNotIn("slot-a", first)
+        self.assertNotIn("slot-b", first)
 
     def test_prompt_view_is_strictly_bounded(self):
         state = self._state()
@@ -147,9 +149,9 @@ class PromptViewTests(unittest.TestCase):
     def test_item_limit_is_deterministic(self):
         state = self._state()
         rendered = render_prompt_view(state, max_chars=1000, max_items=1)
-        self.assertIn("slot-a", rendered)
-        self.assertNotIn("slot-b", rendered)
-        self.assertIn("<truncated>", rendered)
+        self.assertIn('"A"', rendered)
+        self.assertNotIn('"B"', rendered)
+        self.assertIn("... omitted=1", rendered)
 
 
 if __name__ == "__main__":

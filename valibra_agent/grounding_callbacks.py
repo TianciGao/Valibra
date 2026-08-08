@@ -32,6 +32,11 @@ from valibra_agent.requirement_grounding.observations import (
     classify_tool_observation_type,
     extract_submit_follow_up,
 )
+from valibra_agent.requirement_grounding.prompt_view import (
+    count_prompt_view_tokens,
+    prompt_view_sha256,
+    render_prompt_view,
+)
 from valibra_agent.requirement_grounding.reducer import validate_runtime
 from valibra_agent.requirement_grounding.service import (
     add_pending_tool_call,
@@ -66,6 +71,7 @@ else:
 GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
 GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
 SHADOW_AUDIT_KEY = "valibra_shadow"
+REQUIREMENT_VIEW_AUDIT_KEY = "valibra_requirement_view"
 GROUNDING_UPDATER_MODE_ENV = "GROUNDING_UPDATER_MODE"
 
 _MAX_ARGS_SUMMARY_CHARS = 768
@@ -209,13 +215,25 @@ async def before_model_callback(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> LlmResponse | None:
-    """尽力初始化 Shadow，再原样交给 Baseline 的模型前回调。"""
+    """生成审计用 Requirement View，再原样交给 Baseline 回调。"""
 
     state = getattr(callback_context, "state", None)
+    model_call_count: int | None = None
+    view_audit: dict[str, Any] | None = None
     if state is not None:
         try:
+            model_call_count = _model_call_count(state)
             await _consume_bound_user_message(state)
-            _ensure_runtime(state)
+            runtime = _ensure_runtime(state)
+            view = render_prompt_view(runtime.grounding_state)
+            view_audit = {
+                "mode": "shadow",
+                "view": view,
+                "view_sha256": prompt_view_sha256(view),
+                "chars": len(view),
+                "tokens_cl100k": count_prompt_view_tokens(view),
+                "injected": False,
+            }
         except Exception as exc:
             # Grounding 初始化失败只能记日志，不能打断 Baseline。
             _record_callback_failure(
@@ -224,12 +242,34 @@ async def before_model_callback(
                 exception=exc,
                 sequence=_current_sequence(state),
             )
+            view_audit = {
+                "mode": "shadow",
+                "injected": False,
+                "error_type": type(exc).__name__[:128],
+            }
     from system_agent import callbacks as baseline_callbacks
 
-    return await baseline_callbacks.before_model_callback(
+    baseline_result = await baseline_callbacks.before_model_callback(
         callback_context,
         llm_request,
     )
+    if state is not None and view_audit is not None:
+        try:
+            model_call_index = _new_model_call_index(state, model_call_count)
+            if model_call_index is not None:
+                _attach_requirement_view_audit(
+                    state,
+                    model_call_index,
+                    view_audit,
+                )
+        except Exception as exc:
+            _record_callback_failure(
+                state,
+                stage="service",
+                exception=exc,
+                sequence=_current_sequence(state),
+            )
+    return baseline_result
 
 
 async def after_model_callback(
@@ -887,6 +927,52 @@ def _new_trajectory_index(state: Any, before: int | None) -> int | None:
     if len(trajectory) != before + 1:
         return None
     return before
+
+
+def _model_call_count(state: Any) -> int | None:
+    if state is None:
+        return None
+    calls = state.get("system_agent_llm_calls", [])
+    return len(calls) if isinstance(calls, list) else None
+
+
+def _new_model_call_index(state: Any, before: int | None) -> int | None:
+    calls = state.get("system_agent_llm_calls", [])
+    active = state.get("_active_llm_call_index")
+    if before is None or not isinstance(calls, list):
+        return None
+    if len(calls) != before + 1 or active != before:
+        return None
+    return before
+
+
+def _attach_requirement_view_audit(
+    state: Any,
+    index: int,
+    metadata: dict[str, Any],
+) -> None:
+    """Attach one bounded Shadow View to its exact Baseline model call."""
+
+    calls = state.get("system_agent_llm_calls", [])
+    if not isinstance(calls, list) or not 0 <= index < len(calls):
+        return
+    call = calls[index]
+    if not isinstance(call, dict):
+        return
+    encoded = json.dumps(
+        metadata,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > 4096:
+        raise ValueError("Requirement View audit exceeds bounded size")
+    updated = list(calls)
+    updated_call = dict(call)
+    updated_call[REQUIREMENT_VIEW_AUDIT_KEY] = metadata
+    updated[index] = updated_call
+    state["system_agent_llm_calls"] = updated
 
 
 def _attach_shadow_audit(

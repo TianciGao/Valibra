@@ -764,7 +764,6 @@ class ModeAndBoundaryTests(unittest.TestCase):
         self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, EXPECTED_FORM_SHA256)
         source = inspect.getsource(grounding_callbacks)
         self.assertNotIn("create_task", source)
-        self.assertNotIn("render_prompt_view", source)
         self.assertNotIn("activate_model_preset", source)
         self.assertNotIn("SYSTEM_AGENT_API", source)
         self.assertNotIn("task_data", source)

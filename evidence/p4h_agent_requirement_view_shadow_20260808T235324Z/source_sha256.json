@@ -1,0 +1,8 @@
+{
+  "tests/valibra/test_k0_service_prompt.py": "4824e76255f7f6b451c34455021252b5f1f40a60eac55e5fe454cf953d242bbd",
+  "tests/valibra/test_p3_shadow_callbacks.py": "3068ad96ea0d771259ab1d282ccf8797338282025aa39da5993b9a2ab1640a14",
+  "tests/valibra/test_p4d_llm_callback_shadow.py": "c3c598d086dcdb280f0c243ee91638f6ec44a0866aa6d126d8cc91e125806100",
+  "tests/valibra/test_p4h_agent_requirement_view_shadow.py": "a9d99354706df07a0d269cfb07facacd48cf82c4467db81a930e4f538ee79041",
+  "valibra_agent/grounding_callbacks.py": "9a2ae530eb4f71f89c22dae0ad321a9f57d6e6a04b38a366c790b74c8c2f2f77",
+  "valibra_agent/requirement_grounding/prompt_view.py": "faef9412ca0a93ac194936a8f542ccad38765085adef8d9766bd171e52f7f9c9"
+}

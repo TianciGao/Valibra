@@ -87,7 +87,6 @@ class AdkApiContractTests(unittest.TestCase):
             "_last_submit_raw",
             "sol_sql",
             "test_cases",
-            "render_prompt_view",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
