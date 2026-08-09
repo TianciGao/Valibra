@@ -1,0 +1,201 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "stage": "P6b real leaderboard integration",
+  "smoke_code_head": "7aeec775a71c171a9f5bc31846be89bc4e21931f",
+  "cost_completeness_commit": "7aeec775a71c171a9f5bc31846be89bc4e21931f",
+  "selection": {
+    "task_id": "cross_border_15",
+    "source_count": 600,
+    "candidate_count": 593,
+    "dataset_sha256": "a051f7a78462d6c17e840c048ea15c4be65b9f8eed61aad3d2df1370561b10c0",
+    "initial_budget": 14.0,
+    "rule": "has follow-up and official ambiguity; then minimum initial bird-coin and lexicographically minimum instance_id"
+  },
+  "execution": {
+    "dataset": "full",
+    "mode": "a-interact",
+    "orchestrator_runs": 1,
+    "tasks": 1,
+    "limit": 1,
+    "concurrency": 1,
+    "runner_exit_code": 0,
+    "runner_wall_ms": 81100,
+    "pre_provider_launcher_adjustment": {
+      "provider_calls": 0,
+      "orchestrator_runs": 0,
+      "production_changes": 0,
+      "final_lifecycle_used_fresh_persistent_pty": true
+    }
+  },
+  "configuration": {
+    "main_model_preset": "glm52_high_32768",
+    "grounding_model_preset": "glm52_high_32768",
+    "model": "openai/glm-5.2",
+    "same_api_base": true,
+    "main_and_grounding_key_paths_different": true,
+    "main_and_grounding_key_contents_different": true,
+    "credential_sources": {
+      "main_agent": "file",
+      "grounding": "file",
+      "user_simulator": "file"
+    },
+    "grounding_updater": "llm",
+    "requirement_view": "active",
+    "prompt_view_injection_enabled": true,
+    "grounding_timeout_seconds": 300,
+    "grounding_max_tokens": 32768,
+    "grounding_max_calls_per_task": 2,
+    "grounding_provider_retry": 0,
+    "prompt_sha256": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9",
+    "grounding_provider_configuration_sha256": "3a6ab5d1de8eabd8100e7e1b39487f0095f8dde414765682995e8a09361570dd"
+  },
+  "health": {
+    "postgresql_docker_health": "healthy",
+    "postgresql_pg_isready": "accepting connections",
+    "http_rounds": 2,
+    "http_services": [
+      "db_environment:6102",
+      "user_simulator:6101",
+      "valibra_agent:6110"
+    ],
+    "all_http_status_200": true,
+    "valibra_variant": "P4.3c-LLM-Active",
+    "adk_available": true,
+    "configuration_valid": true
+  },
+  "result": {
+    "phase1_passed": false,
+    "phase2_passed": false,
+    "reward": 0.0,
+    "infrastructure_error": false,
+    "valibra_export_status": "succeeded",
+    "result_bytes": 15500897,
+    "result_sha256": "7e9530035ee701fb30707857cd3b10e3a4bdc605510bf63526d2ad29fedbfc50",
+    "valibra_block_bytes": 16605,
+    "valibra_block_sha256": "5eb19d0530f5f81545d75150b7d1b48b801e4ce41691538b6fb4d0066fbfd9eb"
+  },
+  "providers": {
+    "main_agent": {
+      "callback_calls": 13,
+      "provider_calls_with_reported_tokens": 12,
+      "input_tokens": 85817,
+      "output_tokens": 3329,
+      "reasoning_tokens": 2700,
+      "total_tokens": 89146,
+      "completed_provider_call_latency_ms": 65258.2,
+      "cost": null
+    },
+    "grounding": {
+      "provider_calls": 1,
+      "input_tokens": 602,
+      "output_tokens": 1218,
+      "reasoning_tokens": 1062,
+      "total_tokens": 1820,
+      "latency_ms": 10612.14361002203,
+      "cost": null
+    },
+    "user_simulator": {
+      "provider_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 0,
+      "cost": 0.0
+    },
+    "total_model_tokens": 90966,
+    "total_model_cost": null,
+    "reasoning_tokens_double_counted": false,
+    "task_wall_ms": 79038.5046005249
+  },
+  "bird_coin": {
+    "initial": 14.0,
+    "used": 14.0,
+    "remaining": 0,
+    "included_in_model_usage": false
+  },
+  "grounding": {
+    "revision": 11,
+    "phase": 1,
+    "slot_count": 3,
+    "slot_counts": {
+      "value": 0,
+      "schema": 2,
+      "operation": 1
+    },
+    "evidence_count": 11,
+    "ambiguity_count": 0,
+    "processed_observation_count": 16,
+    "pending_count": 0,
+    "runtime_json_roundtrip": true,
+    "private_audit_count": 1,
+    "private_audit_permissions_all_0600": true
+  },
+  "requirement_view": {
+    "injection_count": 13,
+    "maximum_blocks_per_model_request": 1,
+    "all_injections_nonempty": true
+  },
+  "trajectory": {
+    "tool_count": 15,
+    "official_tool_used": true,
+    "submit_sql_used": true,
+    "nine_tool_contract_preserved": true,
+    "cost_and_budget_contract_preserved": true,
+    "manifest_rebuilt_exactly": true,
+    "collection_counts": {
+      "prompt_flow": 13,
+      "tool_trajectory": 15,
+      "dialogue_history": 0,
+      "adk_events": 26,
+      "user_simulator_audit": 1,
+      "grounding_runtime": 1
+    },
+    "locations_present": {
+      "initial_user_query_grounding": true,
+      "tool_observation": true,
+      "requirement_view_model_call": true,
+      "final_frame": true,
+      "ask_user": false,
+      "phase2_follow_up": false
+    }
+  },
+  "cleanup": {
+    "status": "PASS",
+    "research_ports_released": true,
+    "service_pid_file_absent": true,
+    "research_container_absent": true,
+    "research_network_absent": true,
+    "research_named_volume_preserved": true,
+    "formal_ports_unchanged": true,
+    "formal_postgresql_unchanged": true,
+    "formal_results_unchanged": true,
+    "formal_results_count": 6196,
+    "formal_results_bytes": 243767845066,
+    "formal_results_fingerprint_sha256": "36b5b299f653f6a8c2d3896faa8c92218a1994a6c7ee435f13dedc803dca7293"
+  },
+  "security": {
+    "credential_value_leak": false,
+    "authorization_leak": false,
+    "ground_truth_or_test_case_in_grounding_runtime": false,
+    "complete_private_result_committed": false,
+    "complete_prompt_or_response_committed": false
+  },
+  "private_refs": {
+    "run_directory": "research-runtime/p6b_real_leaderboard_20260809T074033Z/",
+    "result": "research-runtime/p6b_real_leaderboard_20260809T074033Z/result.json",
+    "validation": "research-runtime/p6b_real_leaderboard_20260809T074033Z/private_validation.json",
+    "grounding_audit": "research-runtime/grounding-llm/grounding-20260809T075759097470Z-f1558c38908e-917b1e86.json"
+  },
+  "tests": {
+    "pip_check": "PASS",
+    "unit_tests": 253,
+    "unit_test_status": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS",
+    "real_orchestrator_runs": 1
+  }
+}
