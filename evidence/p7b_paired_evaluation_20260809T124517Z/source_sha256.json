@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-08-09T12:45:17Z",
+  "files": {
+    "configs/p7/p7_development_exclusions_v1.json": "56c6f7ad6e9e436052ccbcf95ac168fb454ae8496f5d82cf813127e4093f1761",
+    "configs/p7/p7_manifest_v1.json": "62d17c20097c81fa14351cd750f51babf567c6acd240aa51ff285a4a46fc8c2a",
+    "configs/p7/p7_protocol_v1.json": "bbbfe49cbd8804410427373e569fcb4f79fe5823c18a6ebb7a1a3d79d6f76cdb",
+    "scripts/analyze_p7_paired_results.py": "3184c8abf8ee9d59407a26c4276b1b3e8f0cb5a4a9a7876402458d67a61ede65",
+    "scripts/run_p7_paired_evaluation.py": "a43e900f112185ea426f573a3e852754d38211d7c96db767e5d53582f004fe94",
+    "tests/valibra/test_p7_paired_runner.py": "9f418e557aebf4efad2f266eda7542519a22cfbebbbbe6f2302d8565add3d929",
+    "tests/valibra/test_p7_protocol.py": "4549dc9749e957a47a24012cb1f89ad87f7e20ca6ecb5efe2bc0dcda55d9dbae"
+  },
+  "semantic_sha256": {
+    "protocol": "2fd5ed119362d17abe2c2d743faa96fb7a202adcb46e9d03a10293c32ae20fa9",
+    "common_configuration": "8561590af24a6610bdd4e71680b8ff9e1fc104bdcd5b7e7bad5ff8df16028904",
+    "b0_configuration": "b6fa78b17b00f3825b155cb43abcfd53663313f49dc3118ac697c139cc727b0c",
+    "valibra_configuration": "f5b3eaa3784e4d78475c4b6199900653a2ce3f58f691339e11e40de0d0b38f9b"
+  }
+}
