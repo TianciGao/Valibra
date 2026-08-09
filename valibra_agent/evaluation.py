@@ -27,6 +27,8 @@ from valibra_agent.requirement_grounding.models import (
 )
 from valibra_agent.requirement_grounding.reducer import validate_runtime
 from valibra_agent.requirement_grounding.telemetry import (
+    CombinedModelUsage,
+    ModelUsageLedger,
     summarize_model_usage_totals,
 )
 
@@ -69,6 +71,14 @@ def export_valibra_result(
             main_usage,
             runtime,
             main_agent_cost=_reported_main_agent_cost(prompt_flow),
+        )
+        model_usage = _with_complete_grounding_cost(
+            model_usage,
+            _complete_grounding_cost(
+                runtime,
+                prompt_flow=prompt_flow,
+                tool_trajectory=tool_trajectory,
+            ),
         )
         metrics = runtime.metrics.root
         frame = runtime.grounding_state.requirement_frame
@@ -326,6 +336,89 @@ def _reported_main_agent_cost(prompt_flow: Sequence[Any]) -> float | None:
             return None
         costs.append(float(value))
     return sum(costs)
+
+
+def _complete_grounding_cost(
+    runtime: RequirementGroundingRuntime,
+    *,
+    prompt_flow: Sequence[Any],
+    tool_trajectory: Sequence[Any],
+) -> float | None:
+    """Return cost only when every actual Grounding call reports one."""
+
+    actual_calls = _metric_int(runtime.metrics.root, "llm_updater_calls")
+    if actual_calls == 0:
+        return 0.0
+
+    audits = _attempted_grounding_audits(prompt_flow, tool_trajectory)
+    if len(audits) != actual_calls:
+        return None
+
+    costs = []
+    for audit in audits:
+        value = audit.get("cost")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            return None
+        costs.append(float(value))
+    return sum(costs)
+
+
+def _attempted_grounding_audits(
+    prompt_flow: Sequence[Any],
+    tool_trajectory: Sequence[Any],
+) -> list[Mapping[str, Any]]:
+    audits: list[Mapping[str, Any]] = []
+    for item in prompt_flow:
+        if not isinstance(item, Mapping):
+            continue
+        update = item.get(GROUNDING_UPDATE_AUDIT_KEY)
+        if isinstance(update, Mapping):
+            _append_attempted_audit(audits, update.get("llm"))
+    for item in tool_trajectory:
+        if not isinstance(item, Mapping):
+            continue
+        shadow = item.get(SHADOW_AUDIT_KEY)
+        if not isinstance(shadow, Mapping):
+            continue
+        _append_attempted_audit(audits, shadow.get("llm"))
+        _append_attempted_audit(audits, shadow.get("follow_up_llm"))
+    return audits
+
+
+def _append_attempted_audit(
+    audits: list[Mapping[str, Any]],
+    candidate: Any,
+) -> None:
+    if isinstance(candidate, Mapping) and candidate.get("attempted") is True:
+        audits.append(candidate)
+
+
+def _with_complete_grounding_cost(
+    usage: CombinedModelUsage,
+    grounding_cost: float | None,
+) -> CombinedModelUsage:
+    grounding = ModelUsageLedger.model_validate(
+        {
+            **usage.grounding.model_dump(mode="json"),
+            "cost": grounding_cost,
+        }
+    )
+    total_cost = (
+        usage.main_agent.cost + grounding_cost
+        if usage.main_agent.cost is not None and grounding_cost is not None
+        else None
+    )
+    return CombinedModelUsage(
+        main_agent=usage.main_agent,
+        grounding=grounding,
+        total_model_tokens=usage.total_model_tokens,
+        total_model_cost=total_cost,
+    )
 
 
 def _main_agent_latency_ms(prompt_flow: Sequence[Any]) -> float | None:

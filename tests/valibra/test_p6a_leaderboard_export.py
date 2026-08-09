@@ -178,6 +178,10 @@ def _state(*, include_cost=False):
                 "phase": 1,
                 "status": "processed",
                 "grounding_revision": 1,
+                "llm": {
+                    "attempted": True,
+                    "cost": 0.10 if include_cost else None,
+                },
             },
             grounding_callbacks.REQUIREMENT_VIEW_AUDIT_KEY: {
                 "effective_mode": "active",
@@ -200,6 +204,10 @@ def _state(*, include_cost=False):
                 "observation_type": "user_answer",
                 "tool_name": "ask_user",
                 "status": "processed",
+                "llm": {
+                    "attempted": True,
+                    "cost": 0.15 if include_cost else None,
+                },
             },
         },
         {
@@ -297,6 +305,52 @@ class EvaluationExportTests(unittest.TestCase):
         self.assertAlmostEqual(usage["grounding"]["cost"], 0.25)
         self.assertAlmostEqual(usage["total_model_cost"], 0.55)
         self.assertNotIn("bird_coin", usage)
+
+    def test_partial_grounding_cost_is_not_reported_as_complete(self):
+        state = _state(include_cost=True)
+        shadow = state["tool_trajectory"][0][
+            grounding_callbacks.SHADOW_AUDIT_KEY
+        ]
+        shadow["llm"]["cost"] = None
+        result = export_valibra_result(state)
+        usage = result["model_usage"]
+        self.assertAlmostEqual(usage["main_agent"]["cost"], 0.30)
+        self.assertIsNone(usage["grounding"]["cost"])
+        self.assertIsNone(usage["total_model_cost"])
+
+    def test_missing_grounding_call_audit_makes_cost_unknown(self):
+        state = _state(include_cost=True)
+        del state["tool_trajectory"][0][
+            grounding_callbacks.SHADOW_AUDIT_KEY
+        ]["llm"]
+        result = export_valibra_result(state)
+        self.assertIsNone(result["model_usage"]["grounding"]["cost"])
+        self.assertIsNone(result["model_usage"]["total_model_cost"])
+
+    def test_zero_grounding_calls_have_zero_cost(self):
+        state = _state(include_cost=True)
+        runtime = RequirementGroundingRuntime()
+        state[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime.model_dump(
+            mode="json"
+        )
+        for call in state["system_agent_llm_calls"]:
+            call.pop(grounding_callbacks.GROUNDING_UPDATE_AUDIT_KEY, None)
+        for event in state["tool_trajectory"]:
+            shadow = event.get(grounding_callbacks.SHADOW_AUDIT_KEY, {})
+            shadow.pop("llm", None)
+            shadow.pop("follow_up_llm", None)
+        result = export_valibra_result(state)
+        self.assertEqual(result["model_usage"]["grounding"]["cost"], 0.0)
+        self.assertAlmostEqual(result["model_usage"]["total_model_cost"], 0.30)
+
+    def test_main_agent_cost_requires_every_call_to_report(self):
+        state = _state(include_cost=True)
+        state["system_agent_llm_calls"][1]["usage"] = {"raw": {}}
+        result = export_valibra_result(state)
+        usage = result["model_usage"]
+        self.assertIsNone(usage["main_agent"]["cost"])
+        self.assertAlmostEqual(usage["grounding"]["cost"], 0.25)
+        self.assertIsNone(usage["total_model_cost"])
 
     def test_manifest_is_stable_and_changes_only_for_changed_collection(self):
         state = _state()
