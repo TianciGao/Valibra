@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "stage": "P7a paired experiment protocol and task manifest freeze",
+  "starting_head": "9bdcbf27112fe35679f46b2470c3afa8ac3ec330",
+  "git_preconditions": {
+    "branch": "research/main",
+    "local_upstream_remote_equal": true,
+    "p6_pass_target": "9bdcbf27112fe35679f46b2470c3afa8ac3ec330",
+    "working_tree_clean_before": true
+  },
+  "formal_b0": {
+    "read_only": true,
+    "fingerprinted_files": 68,
+    "fingerprint_before": "66fa2d56eb3a4004d186c79ee5b1a160be85594ad20c0c4624b0a469abbe70e0",
+    "fingerprint_after": "66fa2d56eb3a4004d186c79ee5b1a160be85594ad20c0c4624b0a469abbe70e0"
+  },
+  "frozen_inputs": {
+    "full_rows": 600,
+    "full_unique_task_ids": 600,
+    "full_input_sha256": "a051f7a78462d6c17e840c048ea15c4be65b9f8eed61aad3d2df1370561b10c0",
+    "grounding_prompt_sha256": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "grounding_form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration_sha256": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
+  },
+  "selection": {
+    "selection_seed": "351b533068dd5ee4c465ce329895ce8d4f5d160122939255bfb22804dfdde3c0",
+    "development_exclusions": [
+      "cross_border_15"
+    ],
+    "exclusion_source": "committed evidence only",
+    "task_count": 30,
+    "unique_task_ids": 30,
+    "database_count": 16,
+    "follow_up_tasks": 30,
+    "query_ambiguity_tasks": 29,
+    "knowledge_ambiguity_tasks": 21,
+    "b0_first": 15,
+    "valibra_first": 15,
+    "reseeded": false,
+    "manually_substituted": false,
+    "manifest_sha256": "62d17c20097c81fa14351cd750f51babf567c6acd240aa51ff285a4a46fc8c2a"
+  },
+  "protocol": {
+    "protocol_id": "valibra-p7-v1",
+    "protocol_sha256": "2fd5ed119362d17abe2c2d743faa96fb7a202adcb46e9d03a10293c32ae20fa9",
+    "protocol_file_sha256": "bbbfe49cbd8804410427373e569fcb4f79fe5823c18a6ebb7a1a3d79d6f76cdb",
+    "common_configuration_sha256": "8561590af24a6610bdd4e71680b8ff9e1fc104bdcd5b7e7bad5ff8df16028904",
+    "b0_configuration_sha256": "b6fa78b17b00f3825b155cb43abcfd53663313f49dc3118ac697c139cc727b0c",
+    "valibra_llm_configuration_sha256": "f5b3eaa3784e4d78475c4b6199900653a2ce3f58f691339e11e40de0d0b38f9b",
+    "pairs_required": 30,
+    "rows_required": 60,
+    "bootstrap_iterations": 10000,
+    "bootstrap_confidence_level": 0.95,
+    "decision_values": [
+      "GO",
+      "HOLD",
+      "NO-GO"
+    ],
+    "p7_complete": false,
+    "paired_run_authorized": false,
+    "p8_authorized": false
+  },
+  "analysis_contract": {
+    "strict_pairs_only": true,
+    "rejects_missing_duplicate_order_or_configuration_mismatch": true,
+    "main_latency_provider_calls_only": true,
+    "local_task_done_excluded": true,
+    "reasoning_tokens_not_double_counted": true,
+    "incomplete_cost_remains_null": true,
+    "raw_results_read_only": true,
+    "effect_summary_before_all_pairs": false,
+    "p_values_used_as_sole_conclusion": false
+  },
+  "validation": {
+    "pip_check": "PASS",
+    "unit_tests": "PASS",
+    "tests_passed": 274,
+    "tests_failed": 0,
+    "p7_specific_tests": 21,
+    "manifest_byte_reproduction": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "security": {
+    "selection_read_historical_results": false,
+    "selection_read_sql_or_scores": false,
+    "selection_read_gt_or_test_cases": false,
+    "selection_read_task_or_follow_up_body": false,
+    "credential_values_committed": false,
+    "absolute_credential_paths_committed": false,
+    "full_prompt_response_or_sql_committed": false
+  },
+  "external_calls": {
+    "services_started": 0,
+    "database_calls": 0,
+    "main_agent_provider_calls": 0,
+    "grounding_provider_calls": 0,
+    "user_simulator_calls": 0,
+    "benchmark_runs": 0,
+    "b0_runs": 0,
+    "valibra_runs": 0
+  },
+  "notion_context": {
+    "route_read": true,
+    "execution_log_read": true,
+    "official_reply_read": true,
+    "core_objects_read": true,
+    "core_objects_changed": false
+  }
+}

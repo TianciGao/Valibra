@@ -1,0 +1,13 @@
+{
+  "exclusions": [
+    {
+      "committed_evidence_refs": [
+        "evidence/p6b_real_leaderboard_integration_20260809T080211Z/README.md",
+        "evidence/p6b_real_leaderboard_integration_20260809T080211Z/summary.json"
+      ],
+      "reason": "real Full task used by the committed P6b development smoke",
+      "task_id": "cross_border_15"
+    }
+  ],
+  "schema_version": "1.0"
+}
