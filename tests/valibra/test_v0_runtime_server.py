@@ -167,7 +167,7 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["service"], "valibra_agent")
-        self.assertEqual(body["variant"], "P4.1-Rule-Shadow")
+        self.assertEqual(body["variant"], "P4.3c-Rule-Shadow")
         self.assertTrue(body["configuration_summary"]["grounding_enabled"])
         self.assertEqual(
             body["configuration_summary"]["grounding_mode"],
@@ -179,6 +179,9 @@ class HttpContractTests(unittest.TestCase):
         )
         self.assertFalse(
             body["configuration_summary"]["prompt_view_injected"]
+        )
+        self.assertFalse(
+            body["configuration_summary"]["prompt_view_injection_enabled"]
         )
         self.assertEqual(len(body["configuration_sha256"]), 64)
         self.assertTrue(

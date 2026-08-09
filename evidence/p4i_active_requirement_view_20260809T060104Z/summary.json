@@ -1,0 +1,79 @@
+{
+  "adk_contract": {
+    "append_instructions_signature": "(self, instructions: 'Union[list[str], types.Content]') -> 'list[types.Content]'",
+    "contents_unchanged": true,
+    "google_adk_version": "2.5.0",
+    "list_of_strings_appends_only_system_instruction": true,
+    "site_packages_modified": false
+  },
+  "diff_boundary": {
+    "allowed_paths": [
+      "valibra_agent/grounding_callbacks.py",
+      "valibra_agent/server.py",
+      "tests/valibra/",
+      "evidence/p4i_active_requirement_view_20260809T060104Z/"
+    ],
+    "dependencies_changed": false,
+    "forbidden_paths_changed": [],
+    "system_agent_changed": false
+  },
+  "external_calls": {
+    "benchmark_runs": 0,
+    "bird_coin_spent": 0.0,
+    "database_calls": 0,
+    "grounding_provider_calls": 0,
+    "system_agent_provider_calls": 0,
+    "tool_calls": 0,
+    "user_simulator_calls": 0
+  },
+  "frozen_contract_sha256": {
+    "form_schema": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9",
+    "grounding_prompt": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+  },
+  "gates": {
+    "compileall": "PASS",
+    "git_diff_check": "PASS",
+    "pip_check": "PASS",
+    "unit_tests": "237/237 PASS"
+  },
+  "mode_results": {
+    "active": {
+      "injected": true,
+      "request_sha256": "22fa8a83114710af5af2feaeb23e25812eb98d31e126efd5f29eccd879c4fc20"
+    },
+    "off": {
+      "injected": false,
+      "request_sha256": "b0d62607b4fb58cf510d5a8bf612da1aca15a9135322bb33117eb5a5c6a75849"
+    },
+    "shadow": {
+      "injected": false,
+      "request_sha256": "b0d62607b4fb58cf510d5a8bf612da1aca15a9135322bb33117eb5a5c6a75849"
+    }
+  },
+  "repository": {
+    "branch": "research/main",
+    "starting_head": "393924311295648a937a9266d891a215a46689b3"
+  },
+  "smoke": {
+    "active_block_count": 1,
+    "contents_sha256": "21f92511ad620e2d2e58eea12976e8479b6b82044772edc1f9059ecdf987ba98",
+    "fake_grounding_calls": 3,
+    "final_response_sha256": "951901c12a260636cb6d657f8530ecb2e6baa61ac6d790c18812892bdad7fc72",
+    "generation_config_sha256": "194926ba2f73919e3c8fe1be12f49d525f404543004806f0bba5a1297b1fdf81",
+    "injection_block_sha256": "db688d09ec327dbcc1645c9cc1268e869c201c8ee4cb30dd8cb157c27405750f",
+    "normalized_active_equals_off": true,
+    "normalized_active_request_sha256": "b0d62607b4fb58cf510d5a8bf612da1aca15a9135322bb33117eb5a5c6a75849",
+    "static_instruction_sha256": "846bfc90e88fbcc023239d76ee24d689b1283e52351f5c2d4a12c5f24d1142c8",
+    "tools_sha256": "678c4a6604c2dc5da1c6403b913da56a8655f9468c5d133eee5f935ed254d0c1",
+    "view_sha256": "582213ac858a000964ccbd17e680433dd2e00998ea81ff9d372e784b4d51a976"
+  },
+  "source_sha256": {
+    "tests/valibra/test_p4i_active_requirement_view.py": "506a3d1397722910e9fbaf4d23b1f8b8cfa66491320eb749839a5225ee5dc11d",
+    "tests/valibra/test_v0_runtime_server.py": "126615cab81fa9d8790d6168ad5618b124d77b33f4cbd9bc5fa2132d8ba7335e",
+    "valibra_agent/grounding_callbacks.py": "782b13a5409251aecd44a02ded161a02209440dca2720f9f1a2b82394d768477",
+    "valibra_agent/server.py": "694711747f73105d883472e7f4356ae20aa482ef1138ce711b13c5a9a557cb26"
+  },
+  "stage": "P4.3c",
+  "status": "PASS"
+}

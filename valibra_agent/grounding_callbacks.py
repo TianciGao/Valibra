@@ -1,11 +1,13 @@
-"""把可选的 Rule/LLM Shadow 包在 Baseline 回调外层。
+"""把可选的 Rule/LLM Grounding 包在 Baseline 回调外层。
 
-Shadow 只旁路记录有限的 Observation 和临时 Frame，不修改模型请求、工具协议
-或 Baseline 返回值；完整工具结果仍由 Baseline 轨迹保存。
+Grounding 记录有限的 Observation 和临时 Frame；仅 ``active`` View 模式会把
+有界 Requirement View 追加到当前模型请求的 system instruction。工具协议、
+Baseline 返回值和完整工具轨迹仍由冻结的 Baseline 独占管理。
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -15,6 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from shared.audit import to_jsonable
 from shared.config import PROJECT_ROOT
 from valibra_agent.requirement_grounding.evidence_bridge import (
     EVIDENCE_OBSERVATION_TYPES,
@@ -73,6 +76,10 @@ GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
 SHADOW_AUDIT_KEY = "valibra_shadow"
 REQUIREMENT_VIEW_AUDIT_KEY = "valibra_requirement_view"
 GROUNDING_UPDATER_MODE_ENV = "GROUNDING_UPDATER_MODE"
+GROUNDING_PROMPT_VIEW_MODE_ENV = "GROUNDING_PROMPT_VIEW_MODE"
+
+REQUIREMENT_VIEW_BEGIN = "[VALIBRA REQUIREMENT VIEW BEGIN]"
+REQUIREMENT_VIEW_END = "[VALIBRA REQUIREMENT VIEW END]"
 
 _MAX_ARGS_SUMMARY_CHARS = 768
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -181,6 +188,32 @@ def grounding_updater_status(
     }
 
 
+def grounding_prompt_view_status(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """解析独立 View 模式；不做 trim、大小写或隐式回退。"""
+
+    source = environment if environment is not None else os.environ
+    raw_mode = source.get(GROUNDING_PROMPT_VIEW_MODE_ENV)
+    if raw_mode is None or raw_mode == "":
+        mode = "shadow"
+    elif raw_mode in {"off", "shadow", "active"}:
+        mode = raw_mode
+    else:
+        return {
+            "requested_mode": "invalid",
+            "effective_mode": "invalid",
+            "configuration_valid": False,
+            "error_type": "InvalidPromptViewMode",
+        }
+    return {
+        "requested_mode": mode,
+        "effective_mode": mode,
+        "configuration_valid": True,
+        "error_type": None,
+    }
+
+
 @dataclass(slots=True)
 class _BoundTurnMessage:
     """当前异步任务绑定的用户消息，只允许消费一次。"""
@@ -215,45 +248,73 @@ async def before_model_callback(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> LlmResponse | None:
-    """生成审计用 Requirement View，再原样交给 Baseline 回调。"""
+    """按 off/shadow/active 模式处理当前 View，再调用 Baseline。"""
 
     state = getattr(callback_context, "state", None)
     model_call_count: int | None = None
-    view_audit: dict[str, Any] | None = None
+    view_status = grounding_prompt_view_status()
+    view_audit: dict[str, Any] = {
+        "mode": view_status["effective_mode"],
+        "requested_mode": view_status["requested_mode"],
+        "effective_mode": view_status["effective_mode"],
+        "injected": False,
+    }
     if state is not None:
         try:
             model_call_count = _model_call_count(state)
+            view_audit["request_sha256_before"] = _request_sha256(llm_request)
             await _consume_bound_user_message(state)
             runtime = _ensure_runtime(state)
-            view = render_prompt_view(runtime.grounding_state)
-            view_audit = {
-                "mode": "shadow",
-                "view": view,
-                "view_sha256": prompt_view_sha256(view),
-                "chars": len(view),
-                "tokens_cl100k": count_prompt_view_tokens(view),
-                "injected": False,
-            }
+            if not view_status["configuration_valid"]:
+                error = ValueError("invalid GROUNDING_PROMPT_VIEW_MODE")
+                _record_callback_failure(
+                    state,
+                    stage="service",
+                    exception=error,
+                    sequence=_current_sequence(state),
+                )
+                view_audit["error_type"] = view_status["error_type"]
+            elif view_status["effective_mode"] != "off":
+                view = render_prompt_view(runtime.grounding_state)
+                block = _requirement_view_block(view) if view else ""
+                view_audit.update(
+                    {
+                        "view": view,
+                        "view_sha256": prompt_view_sha256(view),
+                        "chars": len(view),
+                        "tokens_cl100k": count_prompt_view_tokens(view),
+                        "injection_block_sha256": (
+                            _sha256_text(block) if block else None
+                        ),
+                    }
+                )
+                if view_status["effective_mode"] == "active" and block:
+                    _inject_requirement_view(llm_request, block)
+                    view_audit["injected"] = True
+            view_audit["request_sha256_after"] = _request_sha256(llm_request)
         except Exception as exc:
-            # Grounding 初始化失败只能记日志，不能打断 Baseline。
+            # Grounding/View 失败只能记有界诊断，不能打断 Baseline。
             _record_callback_failure(
                 state,
                 stage="observation",
                 exception=exc,
                 sequence=_current_sequence(state),
             )
-            view_audit = {
-                "mode": "shadow",
-                "injected": False,
-                "error_type": type(exc).__name__[:128],
-            }
+            view_audit["injected"] = False
+            view_audit["error_type"] = type(exc).__name__[:128]
+            try:
+                view_audit["request_sha256_after"] = _request_sha256(
+                    llm_request
+                )
+            except Exception:
+                pass
     from system_agent import callbacks as baseline_callbacks
 
     baseline_result = await baseline_callbacks.before_model_callback(
         callback_context,
         llm_request,
     )
-    if state is not None and view_audit is not None:
+    if state is not None:
         try:
             model_call_index = _new_model_call_index(state, model_call_count)
             if model_call_index is not None:
@@ -944,6 +1005,93 @@ def _new_model_call_index(state: Any, before: int | None) -> int | None:
     if len(calls) != before + 1 or active != before:
         return None
     return before
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _request_sha256(llm_request: Any) -> str:
+    """Hash the current JSON-safe model request without retaining its body."""
+
+    payload = json.dumps(
+        to_jsonable(llm_request),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _requirement_view_block(view: str) -> str:
+    return f"{REQUIREMENT_VIEW_BEGIN}\n{view}\n{REQUIREMENT_VIEW_END}"
+
+
+def _strip_requirement_view_blocks(value: str) -> str:
+    """Remove complete Valibra blocks while preserving all other instruction text."""
+
+    result = value
+    while True:
+        begin = result.find(REQUIREMENT_VIEW_BEGIN)
+        if begin < 0:
+            return result
+        end = result.find(REQUIREMENT_VIEW_END, begin + len(REQUIREMENT_VIEW_BEGIN))
+        if end < 0:
+            raise ValueError("incomplete Valibra Requirement View block")
+        end += len(REQUIREMENT_VIEW_END)
+        removal_start = begin
+        if result[max(0, begin - 2) : begin] == "\n\n":
+            removal_start = begin - 2
+        result = result[:removal_start] + result[end:]
+
+
+def _inject_requirement_view(llm_request: Any, block: str) -> None:
+    """Atomically leave exactly one current View block in system_instruction."""
+
+    append = getattr(llm_request, "append_instructions", None)
+    config = getattr(llm_request, "config", None)
+    if not callable(append) or config is None:
+        raise TypeError("LlmRequest.append_instructions is required")
+    system_instruction = getattr(config, "system_instruction", None)
+    if system_instruction is not None and not isinstance(system_instruction, str):
+        raise TypeError("LlmRequest system_instruction must be a string")
+
+    original_config = copy.deepcopy(config)
+    original_contents = copy.deepcopy(getattr(llm_request, "contents", None))
+    try:
+        current = system_instruction or ""
+        if (
+            current.count(REQUIREMENT_VIEW_BEGIN) == 1
+            and current.count(REQUIREMENT_VIEW_END) == 1
+            and block in current
+        ):
+            return
+        base_instruction = _strip_requirement_view_blocks(current)
+        config.system_instruction = base_instruction or None
+        returned_contents = append([block])
+        if returned_contents:
+            raise RuntimeError(
+                "append_instructions returned unexpected user contents"
+            )
+        if getattr(llm_request, "contents", None) != original_contents:
+            raise RuntimeError("append_instructions modified request contents")
+        final_instruction = getattr(config, "system_instruction", None)
+        if not isinstance(final_instruction, str):
+            raise RuntimeError("append_instructions produced no string instruction")
+        if (
+            final_instruction.count(REQUIREMENT_VIEW_BEGIN) != 1
+            or final_instruction.count(REQUIREMENT_VIEW_END) != 1
+            or block not in final_instruction
+            or _strip_requirement_view_blocks(final_instruction)
+            != base_instruction
+        ):
+            raise RuntimeError("Requirement View injection was not atomic")
+    except BaseException:
+        llm_request.config = original_config
+        if hasattr(llm_request, "contents"):
+            llm_request.contents = original_contents
+        raise
 
 
 def _attach_requirement_view_audit(
