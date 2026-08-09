@@ -1,0 +1,123 @@
+{
+  "result": "PASS",
+  "stage": "P6 leaderboard contract and result-ledger offline wiring",
+  "starting_head": "f8124b2e9af68a66ec63c0fa1f6e31d5232362b8",
+  "formal_b0": {
+    "path": "/home/user/code/BIRD-Interact/BIRD-Interact-ADK",
+    "fingerprint_before": "66fa2d56eb3a4004d186c79ee5b1a160be85594ad20c0c4624b0a469abbe70e0",
+    "fingerprint_after": "66fa2d56eb3a4004d186c79ee5b1a160be85594ad20c0c4624b0a469abbe70e0",
+    "fingerprinted_files": 68,
+    "unchanged": true
+  },
+  "semantic_contract": {
+    "equal": true,
+    "isolated_python_subprocesses": true,
+    "tool_count": 9,
+    "tool_names_and_order_equal": true,
+    "tool_signatures_equal": true,
+    "tool_costs_equal": true,
+    "fixed_budget_results": [12.0, 14.0, 16.0, 22.0],
+    "submit_sql_signature_equal": true,
+    "http_routes_equal": true,
+    "request_schemas_equal_after_description_only_normalization": true,
+    "non_behavioral_differences_ignored": [
+      "Pydantic schema description text"
+    ]
+  },
+  "orchestrator_http_contract": {
+    "mocked_call_count": 6,
+    "order_unchanged": true,
+    "urls_unchanged": true,
+    "payloads_unchanged": true,
+    "timeouts_unchanged": true,
+    "cleanup_unchanged": true,
+    "additional_http_calls": 0
+  },
+  "additive_result_schema": {
+    "new_top_level_key": "valibra",
+    "fields": [
+      "export_status",
+      "runtime",
+      "grounding_summary",
+      "model_usage",
+      "latency",
+      "bird_coin",
+      "trajectory_manifest"
+    ],
+    "legacy_fields_and_values_unchanged": true,
+    "legacy_combined_token_semantics_unchanged": true,
+    "fail_open": true
+  },
+  "synthetic_ledgers": {
+    "main_agent_total_tokens": 280,
+    "grounding_total_tokens": 140,
+    "grounding_reasoning_tokens": 20,
+    "total_model_tokens": 420,
+    "reasoning_double_counted": false,
+    "main_agent_latency_ms": 300.0,
+    "grounding_latency_ms": 1250.0,
+    "missing_costs": null,
+    "reported_main_agent_cost": 0.3,
+    "reported_grounding_cost": 0.25,
+    "reported_total_model_cost": 0.55,
+    "bird_coin_in_model_ledger": false
+  },
+  "trajectory_manifest": {
+    "canonical_json_sha256": true,
+    "stable_for_identical_input": true,
+    "counts_recorded": true,
+    "initial_user_query_locatable": true,
+    "ask_user_answer_locatable": true,
+    "phase2_follow_up_locatable": true,
+    "tool_observations_locatable": true,
+    "requirement_view_calls_locatable": true,
+    "final_frame_locatable": true,
+    "provider_raw_audit_copied": false
+  },
+  "initial_grounding_audit": {
+    "field": "valibra_grounding_update",
+    "exact_model_call_pairing": true,
+    "one_turn_consumed_once": true,
+    "bounded": true,
+    "full_prompt_saved": false,
+    "full_response_saved": false,
+    "llm_request_changed": false,
+    "fail_open": true
+  },
+  "frozen_contract_sha256": {
+    "prompt": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+    "form_schema": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+    "grounding_configuration": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
+  },
+  "source_sha256": {
+    "orchestrator/ainteract.py": "b06e22be02be9ebf64e78bb0710b78ad150bb1d02b2f27ee754758fe7f050652",
+    "valibra_agent/grounding_callbacks.py": "419a9b52aeffb54d48cc8008496f5ce067428161c79ee9af23c64125d365f925",
+    "valibra_agent/evaluation.py": "9679e6e739edfed3274ab46b5b2d5e79e9b6ef05cbe4a776592778a0e1e05b87",
+    "tests/valibra/test_p6a_leaderboard_export.py": "fc4597e833f561209c506c0518f7377c7e0e68f10c189e8360531de142752a4a"
+  },
+  "validation": {
+    "pip_check": "PASS",
+    "unittest": "PASS",
+    "tests_passed": 249,
+    "tests_failed": 0,
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "frozen_boundaries": {
+    "system_agent_diff": 0,
+    "db_environment_diff": 0,
+    "user_simulator_diff": 0,
+    "orchestrator_runner_diff": 0,
+    "evaluator_report_diff": 0,
+    "requirement_grounding_core_diff": 0,
+    "dependency_diff": 0,
+    "p4_pass_target": "f8124b2e9af68a66ec63c0fa1f6e31d5232362b8"
+  },
+  "external_calls": {
+    "real_provider_calls": 0,
+    "database_calls": 0,
+    "user_simulator_calls": 0,
+    "benchmark_runs": 0,
+    "services_started": 0
+  }
+}

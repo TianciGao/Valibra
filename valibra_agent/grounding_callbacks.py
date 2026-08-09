@@ -75,6 +75,7 @@ GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
 GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
 SHADOW_AUDIT_KEY = "valibra_shadow"
 REQUIREMENT_VIEW_AUDIT_KEY = "valibra_requirement_view"
+GROUNDING_UPDATE_AUDIT_KEY = "valibra_grounding_update"
 GROUNDING_UPDATER_MODE_ENV = "GROUNDING_UPDATER_MODE"
 GROUNDING_PROMPT_VIEW_MODE_ENV = "GROUNDING_PROMPT_VIEW_MODE"
 
@@ -252,6 +253,7 @@ async def before_model_callback(
 
     state = getattr(callback_context, "state", None)
     model_call_count: int | None = None
+    grounding_update_audit: dict[str, Any] | None = None
     view_status = grounding_prompt_view_status()
     view_audit: dict[str, Any] = {
         "mode": view_status["effective_mode"],
@@ -263,7 +265,7 @@ async def before_model_callback(
         try:
             model_call_count = _model_call_count(state)
             view_audit["request_sha256_before"] = _request_sha256(llm_request)
-            await _consume_bound_user_message(state)
+            grounding_update_audit = await _consume_bound_user_message(state)
             runtime = _ensure_runtime(state)
             if not view_status["configuration_valid"]:
                 error = ValueError("invalid GROUNDING_PROMPT_VIEW_MODE")
@@ -318,11 +320,26 @@ async def before_model_callback(
         try:
             model_call_index = _new_model_call_index(state, model_call_count)
             if model_call_index is not None:
-                _attach_requirement_view_audit(
-                    state,
-                    model_call_index,
-                    view_audit,
-                )
+                for key, metadata in (
+                    (REQUIREMENT_VIEW_AUDIT_KEY, view_audit),
+                    (GROUNDING_UPDATE_AUDIT_KEY, grounding_update_audit),
+                ):
+                    if metadata is None:
+                        continue
+                    try:
+                        _attach_model_call_audit(
+                            state,
+                            model_call_index,
+                            key,
+                            metadata,
+                        )
+                    except Exception as exc:
+                        _record_callback_failure(
+                            state,
+                            stage="service",
+                            exception=exc,
+                            sequence=_current_sequence(state),
+                        )
         except Exception as exc:
             _record_callback_failure(
                 state,
@@ -692,12 +709,14 @@ def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
     return runtime
 
 
-async def _consume_bound_user_message(state: Any) -> None:
+async def _consume_bound_user_message(
+    state: Any,
+) -> dict[str, Any] | None:
     """把本轮用户消息转成一次 Observation，并交给所选 Shadow。"""
 
     bound = _ACTIVE_TURN_MESSAGE.get()
     if bound is None or bound.consumed or bound.mode != "a-interact":
-        return
+        return None
     # 先标记已消费：即使处理失败，同一轮多次 before_model 也不会重复记账。
     bound.consumed = True
     if _task_id(state) != bound.task_id:
@@ -712,11 +731,21 @@ async def _consume_bound_user_message(state: Any) -> None:
         raw=bound.message,
         summary=_user_message_summary(bound.message),
     )
-    runtime, _, _ = await _process_shadow_observation(
+    runtime, status, llm_audit = await _process_shadow_observation(
         _ensure_runtime(state),
         observation,
     )
     _store_runtime(state, runtime)
+    audit = {
+        "observation_id": observation.observation_id,
+        "observation_type": observation.observation_type,
+        "phase": observation.phase,
+        "status": status,
+        "grounding_revision": runtime.grounding_revision,
+    }
+    if llm_audit is not None:
+        audit["llm"] = llm_audit
+    return audit
 
 
 async def _process_shadow_observation(
@@ -1101,6 +1130,22 @@ def _attach_requirement_view_audit(
 ) -> None:
     """Attach one bounded Shadow View to its exact Baseline model call."""
 
+    _attach_model_call_audit(
+        state,
+        index,
+        REQUIREMENT_VIEW_AUDIT_KEY,
+        metadata,
+    )
+
+
+def _attach_model_call_audit(
+    state: Any,
+    index: int,
+    key: str,
+    metadata: dict[str, Any],
+) -> None:
+    """Attach one bounded Valibra summary to an exact Baseline model call."""
+
     calls = state.get("system_agent_llm_calls", [])
     if not isinstance(calls, list) or not 0 <= index < len(calls):
         return
@@ -1115,10 +1160,10 @@ def _attach_requirement_view_audit(
         allow_nan=False,
     ).encode("utf-8")
     if len(encoded) > 4096:
-        raise ValueError("Requirement View audit exceeds bounded size")
+        raise ValueError("Valibra model-call audit exceeds bounded size")
     updated = list(calls)
     updated_call = dict(call)
-    updated_call[REQUIREMENT_VIEW_AUDIT_KEY] = metadata
+    updated_call[key] = metadata
     updated[index] = updated_call
     state["system_agent_llm_calls"] = updated
 
