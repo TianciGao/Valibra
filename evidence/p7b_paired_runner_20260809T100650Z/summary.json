@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "status": "PASS",
+  "stage": "P7b frozen paired runner offline gate",
+  "head_before_runner_commit": "225574fa9f7fc83f93441931a64f6549441e35a5",
+  "frozen": {
+    "full_input_sha256": "a051f7a78462d6c17e840c048ea15c4be65b9f8eed61aad3d2df1370561b10c0",
+    "manifest_sha256": "62d17c20097c81fa14351cd750f51babf567c6acd240aa51ff285a4a46fc8c2a",
+    "protocol_semantic_sha256": "2fd5ed119362d17abe2c2d743faa96fb7a202adcb46e9d03a10293c32ae20fa9",
+    "common_configuration_sha256": "8561590af24a6610bdd4e71680b8ff9e1fc104bdcd5b7e7bad5ff8df16028904",
+    "b0_configuration_sha256": "b6fa78b17b00f3825b155cb43abcfd53663313f49dc3118ac697c139cc727b0c",
+    "valibra_configuration_sha256": "f5b3eaa3784e4d78475c4b6199900653a2ce3f58f691339e11e40de0d0b38f9b",
+    "formal_b0_source_files": 68,
+    "formal_b0_source_sha256": "66fa2d56eb3a4004d186c79ee5b1a160be85594ad20c0c4624b0a469abbe70e0"
+  },
+  "runner_contract": {
+    "pairs": 30,
+    "variant_runs": 60,
+    "b0_first_pairs": 15,
+    "valibra_first_pairs": 15,
+    "score_source": "bird_interact_official",
+    "score_fields_copied": [
+      "total_reward",
+      "phase1_passed",
+      "phase2_passed"
+    ],
+    "score_provenance_has_raw_sha256_and_json_pointers": true,
+    "sql_rescoring_present": false,
+    "reward_formula_present": false,
+    "interim_effect_analysis_present": false,
+    "task_substitution_allowed": false,
+    "post_provider_rerun_allowed": false
+  },
+  "tests": {
+    "pip_check": "PASS",
+    "unit_tests": 296,
+    "unit_tests_status": "PASS",
+    "p7b_runner_tests": 22,
+    "compileall": "PASS",
+    "git_diff_check": "PASS",
+    "validate_only": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "system_agent": 0,
+    "grounding": 0,
+    "user_simulator": 0,
+    "db_environment": 0,
+    "benchmark": 0
+  },
+  "real_p7b_status": "not_started"
+}
