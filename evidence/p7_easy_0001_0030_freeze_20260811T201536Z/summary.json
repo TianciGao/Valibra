@@ -1,0 +1,39 @@
+{
+  "status": "PASS",
+  "scope": "Full original-order 1-30 paired diagnostic freeze",
+  "full_input_sha256": "a051f7a78462d6c17e840c048ea15c4be65b9f8eed61aad3d2df1370561b10c0",
+  "base_p7_protocol_sha256": "2fd5ed119362d17abe2c2d743faa96fb7a202adcb46e9d03a10293c32ae20fa9",
+  "protocol_semantic_sha256": "790c2e80e5907fe9faec3c60b45feaab76a87c98f98f9850a8e800ab5e4e506c",
+  "protocol_file_sha256": "ba3eb9cfb2139c43987418688c434c070733819a9619152296f8f9433762ac83",
+  "manifest_sha256": "b00b51773a8c4236a6d53eca12afd601ffac819c8772d800d6d4480214e9ec9f",
+  "selection": {
+    "python_slice": "records[0:30]",
+    "global_index_range_1_based": [1, 30],
+    "pairs": 30,
+    "unique_task_ids": 30,
+    "b0_first": 15,
+    "valibra_first": 15,
+    "database_count": 1,
+    "selected_database": "solar_panel"
+  },
+  "validation": {
+    "pip_check": "PASS",
+    "unittest_passed": 308,
+    "unittest_failed": 0,
+    "compileall": "PASS",
+    "manifest_byte_reproduction": "PASS",
+    "validate_only": "PASS",
+    "git_diff_check": "PASS",
+    "external_calls": 0
+  },
+  "source_sha256": {
+    "scripts/build_p7_easy_0001_0030_manifest.py": "029d82df3d3bb9bcd94be357771a365b0258206f6bebef296bc34d362773bbc6",
+    "scripts/run_p7_easy_0001_0030_evaluation.py": "69d231a0a913b4391fb15ad00e82a3a9bcc1178c1a83a577c831ac2b823bca33",
+    "scripts/analyze_p7_easy_0001_0030_results.py": "8f26f0864d10723824407415954fd0b1a964af9a38b8191c7009d7fccddb3077",
+    "scripts/run_p7_paired_evaluation.py": "077da569e4da21873263b079b3c00a05afa2adfbc698d5c06c613988611b3270",
+    "tests/valibra/test_p7_easy_0001_0030.py": "315ac9c0fc5c11041bd76a71b1fef645808a9b9f36b0b11598325964753a766f"
+  },
+  "original_p7_status": "NO-GO retained unchanged",
+  "p8_authorized": false,
+  "contains_sensitive_content": false
+}

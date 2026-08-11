@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "protocol_id": "valibra-p7-easy-0001-0030-v1",
+  "purpose": "Independent paired diagnostic over Full original-order rows 1-30; it does not replace the original P7 result or authorize P8.",
+  "base_p7": {
+    "protocol_path": "configs/p7/p7_protocol_v1.json",
+    "protocol_sha256": "2fd5ed119362d17abe2c2d743faa96fb7a202adcb46e9d03a10293c32ae20fa9",
+    "protocol_file_sha256": "bbbfe49cbd8804410427373e569fcb4f79fe5823c18a6ebb7a1a3d79d6f76cdb",
+    "result_status": "NO-GO retained unchanged"
+  },
+  "frozen_inputs": {
+    "full_input_path": "bird-interact-full/bird_interact_data.jsonl",
+    "full_input_rows": 600,
+    "full_input_sha256": "a051f7a78462d6c17e840c048ea15c4be65b9f8eed61aad3d2df1370561b10c0"
+  },
+  "selection": {
+    "global_index_range_1_based": [1, 30],
+    "python_slice": "records[0:30]",
+    "selected_count": 30,
+    "task_order": "original Full input order",
+    "selection_seed_formula": "sha256('valibra-p7-easy-0001-0030-v1' + full_input_sha256 + base_p7_protocol_sha256)",
+    "selection_seed": "6f94382d71c6ddd51e99bbcdebfdaf59d1c64d55de8ac4620280144ec605853e",
+    "selection_hash_formula": "sha256(selection_seed + '\u0000' + instance_id)",
+    "order_hash_formula": "sha256(selection_seed + '\u0000order\u0000' + instance_id)",
+    "run_order_assignment": "rank the fixed 30 tasks by order hash; lowest 15 B0-first and remaining 15 Valibra-first while manifest task order stays global_index 1-30",
+    "score_blind": true,
+    "manual_substitution": false,
+    "reseed": false
+  },
+  "execution": {
+    "variant_runs": 60,
+    "pair_adjacency": true,
+    "concurrency": 1,
+    "configuration_identity": "exactly configs/p7/p7_protocol_v1.json",
+    "cleanup_between_variants": true,
+    "post_provider_rerun": false,
+    "effect_summary_before_completion": false,
+    "raw_results_read_only": true
+  },
+  "interpretation": {
+    "scope": "Full original-order 1-30 paired diagnostic only",
+    "difficulty_label": "user-designated easiest group; not asserted by task metadata",
+    "overwrites_original_p7": false,
+    "changes_original_p7_no_go": false,
+    "authorizes_p8": false
+  },
+  "protocol_sha256": "790c2e80e5907fe9faec3c60b45feaab76a87c98f98f9850a8e800ab5e4e506c"
+}

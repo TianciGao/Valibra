@@ -887,11 +887,12 @@ async def run_paired_evaluation(
     analyzer_runner: AnalyzerRunner,
     environment_summary: Mapping[str, Any],
     project_root: Path = PROJECT_ROOT,
+    expected_manifest_sha256: str = EXPECTED_MANIFEST_SHA256,
 ) -> Path:
     if validate_protocol(protocol) != EXPECTED_PROTOCOL_SHA256:
         raise P7RunnerError("runtime protocol differs from frozen P7 protocol")
     manifest_sha = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
-    if manifest_sha != EXPECTED_MANIFEST_SHA256:
+    if manifest_sha != expected_manifest_sha256:
         raise P7RunnerError("runtime manifest differs from frozen P7 manifest")
     if runtime_dir.exists() and any(runtime_dir.iterdir()):
         raise P7RunnerError("runtime directory must be new and empty")
@@ -906,7 +907,7 @@ async def run_paired_evaluation(
         {
             "created_at": _utc_now(),
             "protocol_sha256": EXPECTED_PROTOCOL_SHA256,
-            "manifest_sha256": EXPECTED_MANIFEST_SHA256,
+            "manifest_sha256": expected_manifest_sha256,
             "common_configuration_sha256": EXPECTED_COMMON_CONFIG_SHA256,
             "variant_configuration_sha256": EXPECTED_VARIANT_CONFIG_SHA256,
             "environment": dict(environment_summary),
