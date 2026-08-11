@@ -1,4 +1,40 @@
-"""三种 Updater：空操作、确定性规则，以及可离线测试的 LLM 版本。"""
+"""Requirement Grounding 的 Updater 与 LLM 固定表单入口。
+
+本模块提供三种 Updater：空操作、确定性规则，以及严格受约束的 LLM
+版本。理解 LLM 路径时，可以按下面的数据流阅读：
+
+``Observation``
+    -> ``LLMUpdater.propose``
+    -> ``LLMFrameProposal``（模型只能填写的固定表单）
+    -> ``_parse_llm_frame_response``（严格 JSON、Pydantic 和原文锚定）
+    -> ``_llm_patch_from_proposal``（转换为正式 Slot 与原子 Patch）
+    -> ``reducer.apply_patch``（唯一的业务状态写入入口）。
+
+其中，``LLMFrameProposal`` 只是 Provider 响应的入口合同，不是最终保存
+在 Session State 中的 Requirement Frame。正式的 ``ValueSlot``、
+``SchemaSlot``、``OperationSlot``、``RequirementFrame`` 和 Runtime 定义在
+``requirement_grounding/models.py``。初始 ``user_query`` 生成 Slot；
+``user_answer`` 和 Phase 2 follow-up 则由 ``_llm_reconciled_patch`` 按
+``slot_kind + slot_role`` 与现有活动 Slot 做确定性匹配和更新。Updater
+只提出 ``RequirementGroundingPatch``，绝不直接修改 Runtime；最终是否
+落盘、revision 是否递增以及原子校验均由 ``requirement_grounding/reducer.py``
+负责。
+
+Frame 进入真实 Agent 生命周期后的相关入口位于：
+
+* ``requirement_grounding/prompt_view.py`` 的公开渲染入口：把当前活动 Slot
+  渲染成有界的 Agent-facing Requirement View；
+* ``valibra_agent/grounding_callbacks.py::before_model_callback``：消费本轮
+  用户消息，生成/更新 Frame，并按模式渲染或注入 View；
+* ``valibra_agent/grounding_callbacks.py::after_tool_callback``：把工具结果
+  和合法的 ``ask_user`` 回答转换成 Observation；
+* ``valibra_agent/grounding_callbacks.py::_process_shadow_observation``：根据
+  Observation 类型选择 LLM、Rule、NoOp 或 Evidence Bridge。
+
+这些职责边界用于保证：模型输出必须先通过固定表单，本模块不能绕过
+Reducer 写状态，Grounding 失败也不能改变 Baseline Agent 的工具、预算或
+响应协议。
+"""
 
 from __future__ import annotations
 
