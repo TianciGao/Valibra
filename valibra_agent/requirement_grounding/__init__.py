@@ -45,6 +45,10 @@ from valibra_agent.requirement_grounding.reducer import (
     apply_patch,
     validate_runtime,
 )
+from valibra_agent.requirement_grounding.semantic_projection import (
+    requirement_semantic_projection,
+    requirement_semantic_sha256,
+)
 from valibra_agent.requirement_grounding.service import (
     GroundingControlError,
     GroundingServiceResult,
@@ -155,6 +159,8 @@ __all__ = [
     "process_phase_transition",
     "record_failure",
     "render_prompt_view",
+    "requirement_semantic_projection",
+    "requirement_semantic_sha256",
     "remove_pending_tool_call",
     "set_last_error",
     "load_grounding_llm_config",

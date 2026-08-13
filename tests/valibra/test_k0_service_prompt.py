@@ -36,6 +36,7 @@ class NoOpAndTelemetryTests(unittest.TestCase):
         updated = apply_patch(runtime, patch)
         self.assertEqual(updated.grounding_state, state_before)
         self.assertEqual(updated.grounding_revision, 0)
+        self.assertEqual(updated.requirement_revision, 0)
         self.assertEqual(
             updated.processed_observation_ids,
             (observation.observation_id,),
@@ -52,6 +53,8 @@ class NoOpAndTelemetryTests(unittest.TestCase):
         )
         self.assertEqual(with_metrics.grounding_revision, 0)
         self.assertEqual(with_error.grounding_revision, 0)
+        self.assertEqual(with_metrics.requirement_revision, 0)
+        self.assertEqual(with_error.requirement_revision, 0)
         self.assertEqual(with_error.grounding_state, runtime.grounding_state)
         self.assertNotIn("top-secret-token", with_error.model_dump_json())
         self.assertIn("<redacted>", with_error.last_error.message_preview)

@@ -425,6 +425,8 @@ def _assert_revision_unchanged(
 
     if before.grounding_revision != after.grounding_revision:
         raise AssertionError("telemetry cannot change grounding_revision")
+    if before.requirement_revision != after.requirement_revision:
+        raise AssertionError("telemetry cannot change requirement_revision")
 
 
 def _is_finite(value: float) -> bool:

@@ -547,3 +547,7 @@ def _assert_revision_unchanged(
 
     if before.grounding_revision != after.grounding_revision:
         raise AssertionError("runtime-control changes cannot increment revision")
+    if before.requirement_revision != after.requirement_revision:
+        raise AssertionError(
+            "runtime-control changes cannot increment requirement revision"
+        )

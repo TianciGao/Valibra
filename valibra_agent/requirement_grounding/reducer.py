@@ -18,6 +18,9 @@ from valibra_agent.requirement_grounding.models import (
     SchemaSlot,
     ValueSlot,
 )
+from valibra_agent.requirement_grounding.semantic_projection import (
+    requirement_semantic_sha256,
+)
 
 MAX_SLOTS = 512
 MAX_AMBIGUITIES = 256
@@ -64,16 +67,24 @@ def apply_patch(
     )
     _validate_state(candidate_state, set(next_processed))
 
+    requirement_changed = (
+        requirement_semantic_sha256(candidate_state)
+        != requirement_semantic_sha256(runtime.grounding_state)
+    )
     business_changed = (
         candidate_state != runtime.grounding_state
         or candidate_phase != runtime.phase
     )
     next_revision = runtime.grounding_revision + int(business_changed)
+    next_requirement_revision = (
+        runtime.requirement_revision + int(requirement_changed)
+    )
     candidate_runtime = _validated_runtime_copy(
         runtime,
         grounding_state=candidate_state,
         phase=candidate_phase,
         grounding_revision=next_revision,
+        requirement_revision=next_requirement_revision,
         processed_observation_ids=next_processed,
     )
     validate_runtime(candidate_runtime)

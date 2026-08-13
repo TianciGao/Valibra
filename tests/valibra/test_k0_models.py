@@ -40,6 +40,7 @@ class K0ModelTests(unittest.TestCase):
             {
                 "schema_version": "1.0",
                 "grounding_revision": 0,
+                "requirement_revision": 0,
                 "phase": 1,
                 "grounding_state": {
                     "requirement_frame": {
@@ -62,6 +63,19 @@ class K0ModelTests(unittest.TestCase):
             runtime.model_dump_json()
         )
         self.assertEqual(restored, runtime)
+
+    def test_v1_runtime_without_requirement_revision_loads_compatibly(self):
+        payload = RequirementGroundingRuntime().model_dump(mode="json")
+        del payload["requirement_revision"]
+        restored = RequirementGroundingRuntime.model_validate(payload)
+        self.assertEqual(restored.requirement_revision, 0)
+
+    def test_requirement_revision_cannot_exceed_technical_revision(self):
+        with self.assertRaises(ValidationError):
+            RequirementGroundingRuntime(
+                grounding_revision=0,
+                requirement_revision=1,
+            )
 
     def test_populated_runtime_json_round_trip(self):
         runtime = RequirementGroundingRuntime()

@@ -26,6 +26,9 @@ from valibra_agent.requirement_grounding.models import (
     RequirementGroundingRuntime,
 )
 from valibra_agent.requirement_grounding.reducer import validate_runtime
+from valibra_agent.requirement_grounding.semantic_projection import (
+    requirement_semantic_sha256,
+)
 from valibra_agent.requirement_grounding.telemetry import (
     CombinedModelUsage,
     ModelUsageLedger,
@@ -95,6 +98,10 @@ def export_valibra_result(
             "runtime": runtime_json,
             "grounding_summary": {
                 "grounding_revision": runtime.grounding_revision,
+                "requirement_revision": runtime.requirement_revision,
+                "requirement_semantic_sha256": (
+                    requirement_semantic_sha256(runtime.grounding_state)
+                ),
                 "phase": runtime.phase,
                 "slots": {
                     "value": len(frame.value_slots),

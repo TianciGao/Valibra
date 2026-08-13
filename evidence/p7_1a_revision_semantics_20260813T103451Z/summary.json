@@ -1,0 +1,62 @@
+{
+  "baseline_head": "177ac84828f9e3224a64244eac28bccd6e2767a7",
+  "compileall": "passed",
+  "empty_requirement_semantic_sha256": "cc9c601ba71fe4fa4555380f79631a0a88c8f384c47128d05b612b6174aa66e6",
+  "generated_at_utc": "2026-08-13T10:34:51Z",
+  "git_diff_check": "passed",
+  "network_or_runtime_calls": {
+    "benchmark": 0,
+    "database": 0,
+    "http_services": 0,
+    "model_provider": 0,
+    "user_simulator": 0
+  },
+  "pip_check": "passed",
+  "result": "PASS",
+  "revision_matrix": {
+    "evidence_only": {
+      "grounding_revision_delta": 1,
+      "requirement_revision_delta": 0
+    },
+    "initial_nonempty_frame": {
+      "grounding_revision_delta": 1,
+      "requirement_revision_delta": 1
+    },
+    "metrics_or_error": {
+      "grounding_revision_delta": 0,
+      "requirement_revision_delta": 0
+    },
+    "phase_only": {
+      "grounding_revision_delta": 1,
+      "requirement_revision_delta": 0
+    },
+    "phase_with_slot_supersede": {
+      "grounding_revision_delta": 1,
+      "requirement_revision_delta": 1
+    },
+    "slot_evidence_refs_only": {
+      "grounding_revision_delta": 1,
+      "requirement_revision_delta": 0
+    },
+    "slot_semantic_change": {
+      "grounding_revision_delta": 1,
+      "requirement_revision_delta": 1
+    }
+  },
+  "rollback_tag": "p7-v1-baseline",
+  "schema_version": "1.0",
+  "source_sha256": {
+    "evaluation.py": "b239405f521ab7d43fe3b24520b154b06b78aefe1e8d8f9029c6f89ad48d298d",
+    "grounding_callbacks.py": "3e0c0ab0b529b487ff42d20d2ea8e7fc9959f60a30ddc2f6243f1417f6088716",
+    "models.py": "f71e2cac13df0c4945968d86cf57be978c38f1765114ddcfbc9a1dd211ca84f1",
+    "reducer.py": "5238e2f6c51bf544183011440b38ae33e3dbddfb87144f815191f364ff85c87a",
+    "semantic_projection.py": "4df87f7b76df2b59330d4a97266e07fc518c720e6a601199017a3e4168ce7580",
+    "test_p71a_revision_semantics.py": "c25cc07fcb08f4d81d5cbf2c7d4e61d0ad16fd8943f2ad3207563d81d60e181e"
+  },
+  "tests": {
+    "complete_passed": 332,
+    "complete_total": 332,
+    "focused_passed": 22,
+    "focused_total": 22
+  }
+}

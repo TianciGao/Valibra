@@ -469,6 +469,8 @@ class RequirementGroundingRuntime(KernelModel):
 
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
     grounding_revision: Annotated[int, Field(ge=0)] = 0
+    # Requirement 的语义版本；不参与 Patch CAS，也不随纯 Evidence/Phase 变化。
+    requirement_revision: Annotated[int, Field(ge=0)] = 0
     phase: Phase = 1
     grounding_state: RequirementGroundingState = Field(
         default_factory=RequirementGroundingState
@@ -487,6 +489,10 @@ class RequirementGroundingRuntime(KernelModel):
 
     @model_validator(mode="after")
     def validate_pending_keys(self) -> "RequirementGroundingRuntime":
+        if self.requirement_revision > self.grounding_revision:
+            raise ValueError(
+                "requirement_revision cannot exceed grounding_revision"
+            )
         for key, pending in self.pending_tool_calls.items():
             if key != pending.function_call_id:
                 raise ValueError("pending_tool_calls key must match function_call_id")

@@ -41,6 +41,9 @@ from valibra_agent.requirement_grounding.prompt_view import (
     render_prompt_view,
 )
 from valibra_agent.requirement_grounding.reducer import validate_runtime
+from valibra_agent.requirement_grounding.semantic_projection import (
+    requirement_semantic_sha256,
+)
 from valibra_agent.requirement_grounding.service import (
     add_pending_tool_call,
     process_observation,
@@ -267,6 +270,15 @@ async def before_model_callback(
             view_audit["request_sha256_before"] = _request_sha256(llm_request)
             grounding_update_audit = await _consume_bound_user_message(state)
             runtime = _ensure_runtime(state)
+            view_audit.update(
+                {
+                    "grounding_revision": runtime.grounding_revision,
+                    "requirement_revision": runtime.requirement_revision,
+                    "requirement_semantic_sha256": (
+                        requirement_semantic_sha256(runtime.grounding_state)
+                    ),
+                }
+            )
             if not view_status["configuration_valid"]:
                 error = ValueError("invalid GROUNDING_PROMPT_VIEW_MODE")
                 _record_callback_failure(
@@ -590,6 +602,10 @@ async def after_tool_callback(
             "raw_log_ref": raw_log_ref,
             "summary": observation.summary,
             "grounding_revision": runtime.grounding_revision,
+            "requirement_revision": runtime.requirement_revision,
+            "requirement_semantic_sha256": requirement_semantic_sha256(
+                runtime.grounding_state
+            ),
             "runtime_bytes": _runtime_bytes(runtime),
         }
         if llm_audit is not None:
@@ -614,6 +630,10 @@ async def after_tool_callback(
             "raw_log_ref": raw_log_ref,
             "error_type": type(exc).__name__[:128],
             "grounding_revision": runtime.grounding_revision,
+            "requirement_revision": runtime.requirement_revision,
+            "requirement_semantic_sha256": requirement_semantic_sha256(
+                runtime.grounding_state
+            ),
             "runtime_bytes": _runtime_bytes(runtime),
         }
     finally:
@@ -742,6 +762,10 @@ async def _consume_bound_user_message(
         "phase": observation.phase,
         "status": status,
         "grounding_revision": runtime.grounding_revision,
+        "requirement_revision": runtime.requirement_revision,
+        "requirement_semantic_sha256": requirement_semantic_sha256(
+            runtime.grounding_state
+        ),
     }
     if llm_audit is not None:
         audit["llm"] = llm_audit

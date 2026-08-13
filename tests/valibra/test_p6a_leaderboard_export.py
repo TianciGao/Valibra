@@ -178,6 +178,7 @@ def _state(*, include_cost=False):
                 "phase": 1,
                 "status": "processed",
                 "grounding_revision": 1,
+                "requirement_revision": 1,
                 "llm": {
                     "attempted": True,
                     "cost": 0.10 if include_cost else None,
@@ -270,6 +271,8 @@ class EvaluationExportTests(unittest.TestCase):
         self.assertEqual(restored.model_dump(mode="json"), result["runtime"])
         summary = result["grounding_summary"]
         self.assertEqual(summary["grounding_revision"], 1)
+        self.assertEqual(summary["requirement_revision"], 1)
+        self.assertRegex(summary["requirement_semantic_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(summary["slots"]["total"], 1)
         self.assertEqual(summary["evidence_count"], 1)
         self.assertEqual(summary["ambiguity_count"], 1)
@@ -480,6 +483,8 @@ class InitialGroundingAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["phase"], 1)
         self.assertEqual(audit["status"], "processed")
         self.assertGreater(audit["grounding_revision"], 0)
+        self.assertGreater(audit["requirement_revision"], 0)
+        self.assertRegex(audit["requirement_semantic_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(audit["llm"]["input_tokens"], 12)
         self.assertEqual(audit["llm"]["output_tokens"], 9)
         self.assertEqual(audit["llm"]["reasoning_tokens"], 4)
