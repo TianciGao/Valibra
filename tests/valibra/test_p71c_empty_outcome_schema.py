@@ -231,7 +231,7 @@ class ProposalOutcomeFormTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     _parse(payload)
 
-    def test_old_form_nonempty_ambiguity_fence_and_duplicate_key_stay_rejected(self):
+    def test_old_form_nonempty_ambiguity_and_duplicate_key_stay_rejected(self):
         old_v1 = _proposal("populated", value_slots=[_value_slot()])
         del old_v1["proposal_outcome"]
         with self.assertRaises(ValidationError):
@@ -244,14 +244,6 @@ class ProposalOutcomeFormTests(unittest.TestCase):
         )
         with self.assertRaises(ValidationError):
             _parse(ambiguity)
-
-        valid = _content("populated", populated=True)
-        with self.assertRaises(LLMFrameUpdateError) as fenced:
-            updater_module._parse_llm_frame_response(
-                f"```json\n{valid}\n```",
-                observation_text=QUESTION,
-            )
-        self.assertEqual(fenced.exception.reason, "json_invalid")
 
         duplicate = (
             '{"proposal_outcome":"populated",'

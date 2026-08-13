@@ -173,6 +173,9 @@ LLM_FRAME_PROMPT_SHA256 = hashlib.sha256(
 MAX_LLM_FRAME_INPUT_CHARS = 262_144
 MAX_LLM_FRAME_RESPONSE_CHARS = 65_536
 MAX_LLM_FRAME_SLOTS = 64
+_SINGLE_JSON_FENCE_RE = re.compile(
+    r"\A```(?P<label>[A-Za-z]*)\r?\n(?P<body>[\s\S]*?)\r?\n```\Z"
+)
 LLMFrameProposalOutcome = Literal[
     "populated",
     "insufficient_information",
@@ -1417,15 +1420,16 @@ def _parse_llm_frame_response(
     *,
     observation_text: str,
 ) -> LLMFrameProposal:
-    """严格解析模型 JSON：拒绝重复键、NaN 和多余字段。"""
+    """极窄标准化传输外壳后，严格解析模型固定表单。"""
 
     if not isinstance(content, str):
         raise LLMFrameUpdateError("transport_format_invalid")
     if len(content) > MAX_LLM_FRAME_RESPONSE_CHARS:
         raise LLMFrameUpdateError("transport_format_invalid")
+    payload, _ = _normalize_llm_frame_transport(content)
     try:
         raw = json.loads(
-            content,
+            payload,
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_json_constant,
         )
@@ -1440,6 +1444,62 @@ def _parse_llm_frame_response(
     proposal = LLMFrameProposal.model_validate(raw)
     _validate_verbatim_mentions(proposal, observation_text)
     return proposal
+
+
+def _normalize_llm_frame_transport(
+    content: str,
+) -> tuple[str, Literal["none", "single_json_fence"]]:
+    """只剥离完整且唯一的 JSON/无标签 Markdown fence。
+
+    裸 JSON 原样返回。只要响应以 fence 开始，就必须由一个完整外层
+    fence 构成；标签只能是大小写不敏感的 ``json`` 或空。发现 fence
+    标记但既不是合法裸 JSON、也不是该唯一外壳时，按传输格式失败。
+    """
+
+    stripped = content.strip()
+    if "```" not in stripped:
+        return content, "none"
+
+    if not stripped.startswith("```"):
+        # JSON 字符串值里的反引号只是正文；字符串之外出现 fence marker
+        # 才表示“prose + fence”等非法传输包装。裸 JSON 始终交给原 parser。
+        if re.search(r"(?m)^[ \t]*```", stripped) or (
+            _contains_unquoted_fence_marker(stripped)
+        ):
+            raise LLMFrameUpdateError("transport_format_invalid")
+        return content, "none"
+
+    match = _SINGLE_JSON_FENCE_RE.fullmatch(stripped)
+    fence_lines = re.findall(r"(?m)^[ \t]*```", stripped)
+    if match is None or len(fence_lines) != 2:
+        raise LLMFrameUpdateError("transport_format_invalid")
+    label = match.group("label")
+    if label and label.lower() != "json":
+        raise LLMFrameUpdateError("transport_format_invalid")
+    return match.group("body"), "single_json_fence"
+
+
+def _contains_unquoted_fence_marker(text: str) -> bool:
+    """只识别 JSON 字符串之外的三个反引号，不尝试修复或解析 JSON。"""
+
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        elif text.startswith("```", index):
+            return True
+        index += 1
+    return False
 
 
 def _validate_verbatim_mentions(

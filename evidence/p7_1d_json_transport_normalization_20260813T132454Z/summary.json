@@ -1,0 +1,64 @@
+{
+  "stage": "P7.1d",
+  "status": "PASS",
+  "recorded_at_utc": "2026-08-13T13:24:54Z",
+  "starting_head": "86c8d6caf9ad7a4a31b68d2419e8d55c2787b42a",
+  "rollback_tag": "p7.1c-pass",
+  "normalization": {
+    "accepted": [
+      "none",
+      "single_json_fence"
+    ],
+    "allowed_fence_labels": [
+      "",
+      "json_case_insensitive"
+    ],
+    "payload_repair": false,
+    "runtime_field_added": false,
+    "revision_added": false
+  },
+  "failure_classification": {
+    "invalid_fence_wrapper": "transport_format_invalid",
+    "valid_fence_invalid_json_or_nan": "json_invalid",
+    "valid_fence_duplicate_key": "duplicate_json_key"
+  },
+  "frozen_contract": {
+    "schema_version": "1.1",
+    "prompt_sha256": "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4",
+    "form_schema_sha256": "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1",
+    "grounding_configuration_sha256": "2ec2accb786a1f1e4d35027affe52c0402957861f59a93832583ac4094066dce"
+  },
+  "tests": {
+    "focused_passed": 8,
+    "focused_total": 8,
+    "full_passed": 376,
+    "full_total": 376,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "user_simulator": 0,
+    "http_services": 0,
+    "benchmark": 0
+  },
+  "source_sha256": {
+    "updater.py": "1478e8e2473a8e1a68d9c5abd2ca56fa1385c9ce5ac307ba69c4dc3e18a9e2a6",
+    "test_p71c_empty_outcome_schema.py": "cab7184c267110647e57d6e178c19c28f6f6b269b298bcc136b4a1a9c71bf7e2",
+    "test_p71d_json_transport_normalization.py": "b63eb12e22fd8236af5be6e9ab712050436da7f2010d7cdd962e0cd05cc563c8"
+  },
+  "boundaries": {
+    "prompt_changed": false,
+    "form_schema_changed": false,
+    "grounding_config_changed": false,
+    "runtime_contract_changed": false,
+    "semantic_projection_changed": false,
+    "retry_added": false,
+    "ambiguity_enabled": false,
+    "evidence_to_frame": false,
+    "phase2_optimization": false,
+    "p8_started": false
+  }
+}
