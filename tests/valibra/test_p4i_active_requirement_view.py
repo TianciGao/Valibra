@@ -39,12 +39,21 @@ from tests.valibra.test_p4h_agent_requirement_view_shadow import _semantic_state
 
 
 EXPECTED_PROMPT_SHA256 = (
-    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+    "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4"
 )
 EXPECTED_FORM_SHA256 = (
-    "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
+    "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1"
 )
 EXPECTED_CONFIG_SHA256 = (
+    "2ec2accb786a1f1e4d35027affe52c0402957861f59a93832583ac4094066dce"
+)
+PRE_P71C_PROMPT_SHA256 = (
+    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+)
+PRE_P71C_FORM_SHA256 = (
+    "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
+)
+PRE_P71C_CONFIG_SHA256 = (
     "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
 )
 FIXED_RESPONSE = "LOCAL_P4I_MAIN_STUB_RESPONSE"
@@ -761,13 +770,14 @@ class RealAdkLifecycleSmokeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FrozenBoundaryTests(unittest.TestCase):
-    def test_frozen_contracts_and_static_instruction_are_unchanged(self):
+    def test_p71c_refreezes_hashes_without_static_instruction_changes(self):
         self.assertEqual(LLM_FRAME_PROMPT_SHA256, EXPECTED_PROMPT_SHA256)
         self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, EXPECTED_FORM_SHA256)
-        self.assertEqual(
-            _llm_config(timeout="300", max_calls="2").configuration_sha256,
-            EXPECTED_CONFIG_SHA256,
-        )
+        config_sha = _llm_config(timeout="300", max_calls="2").configuration_sha256
+        self.assertEqual(config_sha, EXPECTED_CONFIG_SHA256)
+        self.assertNotEqual(LLM_FRAME_PROMPT_SHA256, PRE_P71C_PROMPT_SHA256)
+        self.assertNotEqual(LLM_FRAME_FORM_SCHEMA_SHA256, PRE_P71C_FORM_SHA256)
+        self.assertNotEqual(config_sha, PRE_P71C_CONFIG_SHA256)
         self.assertNotIn(
             grounding_callbacks.REQUIREMENT_VIEW_BEGIN,
             AINTERACT_INSTRUCTION,

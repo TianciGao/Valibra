@@ -127,8 +127,18 @@ LLM_FRAME_PROMPT = """Fill the fixed Valibra requirement-frame form from bounded
 You are filling a form, not designing a data structure. Return exactly one JSON
 object and no Markdown, prose, comments, or additional fields.
 
-The top-level fields must be exactly: value_slots, schema_slots,
-operation_slots, ambiguities. ambiguities must always be an empty array.
+The top-level fields must be exactly: proposal_outcome, value_slots,
+schema_slots, operation_slots, ambiguities. proposal_outcome must be exactly one
+of populated, insufficient_information, or no_extractable_requirement.
+ambiguities must always be an empty array.
+
+Use populated if and only if at least one value, schema, or operation slot is
+present. Use insufficient_information only when observation_text expresses a
+requirement but the bounded supplied input does not contain enough information
+to fill even one safe slot. Use no_extractable_requirement only when
+observation_text contains no requirement expressible as a value, schema, or
+operation slot. Both empty outcomes require all three slot arrays to be empty;
+never use an empty outcome when any slot is present.
 
 Each value slot must contain exactly: slot_role, mention, interpretation,
 value_type. Each schema slot must contain exactly: slot_role, mention,
@@ -153,10 +163,9 @@ case-sensitive substring of observation_text. Put any paraphrase or explanation
 only in interpretation. Never rewrite a mention.
 
 Only use observation_text, the supplied Observation, and current bounded State.
-All output is provisional/hypothesized. If evidence is insufficient, return
-empty arrays. Never infer from ground truth, test cases, hidden follow-up,
-schema contents, prompt history, audit logs, tools, network resources, or
-outside knowledge."""
+All output is provisional/hypothesized. Never infer from ground truth, test
+cases, hidden follow-up, schema contents, prompt history, audit logs, tools,
+network resources, or outside knowledge."""
 LLM_FRAME_PROMPT_SHA256 = hashlib.sha256(
     LLM_FRAME_PROMPT.encode("utf-8")
 ).hexdigest()
@@ -164,6 +173,11 @@ LLM_FRAME_PROMPT_SHA256 = hashlib.sha256(
 MAX_LLM_FRAME_INPUT_CHARS = 262_144
 MAX_LLM_FRAME_RESPONSE_CHARS = 65_536
 MAX_LLM_FRAME_SLOTS = 64
+LLMFrameProposalOutcome = Literal[
+    "populated",
+    "insufficient_information",
+    "no_extractable_requirement",
+]
 
 
 class _StrictLLMModel(KernelModel):
@@ -494,16 +508,21 @@ class LLMOperationSlotProposal(_StrictLLMModel):
 class LLMFrameProposal(_StrictLLMModel):
     """模型输出的完整临时 Frame；当前明确禁止生成歧义。"""
 
+    proposal_outcome: LLMFrameProposalOutcome
     value_slots: list[LLMValueSlotProposal] = Field(max_length=MAX_LLM_FRAME_SLOTS)
     schema_slots: list[LLMSchemaSlotProposal] = Field(max_length=MAX_LLM_FRAME_SLOTS)
     operation_slots: list[LLMOperationSlotProposal] = Field(max_length=MAX_LLM_FRAME_SLOTS)
     ambiguities: list[dict[str, JsonValue]] = Field(max_length=0)
 
     @model_validator(mode="after")
-    def validate_total_slot_limit(self) -> "LLMFrameProposal":
+    def validate_outcome_and_total_slot_limit(self) -> "LLMFrameProposal":
         total = len(self.value_slots) + len(self.schema_slots) + len(self.operation_slots)
         if total > MAX_LLM_FRAME_SLOTS:
             raise ValueError("LLM Frame proposal exceeds total slot limit")
+        if self.proposal_outcome == "populated" and total == 0:
+            raise ValueError("populated LLM Frame proposal requires at least one Slot")
+        if self.proposal_outcome != "populated" and total != 0:
+            raise ValueError("empty LLM Frame proposal outcome requires zero Slots")
         return self
 
 
@@ -513,6 +532,13 @@ LLM_FRAME_FORM_SCHEMA_JSON = preset_canonical_json(LLM_FRAME_FORM_SCHEMA)
 LLM_FRAME_FORM_SCHEMA_SHA256 = hashlib.sha256(
     LLM_FRAME_FORM_SCHEMA_JSON.encode("utf-8")
 ).hexdigest()
+
+
+class LLMUpdaterResult(_StrictLLMModel):
+    """一次有效模型提案及其原子 Patch；outcome 不写入业务状态。"""
+
+    proposal_outcome: LLMFrameProposalOutcome
+    patch: RequirementGroundingPatch
 
 
 class LLMUpdater:
@@ -540,7 +566,25 @@ class LLMUpdater:
         base_revision: int,
         telemetry: LLMCallTelemetryRecorder,
     ) -> RequirementGroundingPatch:
-        """把一条用户 Observation 转成 LLM Patch 提案。"""
+        """兼容入口：只返回 Patch，保留 P4.2a 的公开合同。"""
+
+        result = await self.propose_result(
+            observation,
+            state,
+            base_revision=base_revision,
+            telemetry=telemetry,
+        )
+        return result.patch
+
+    async def propose_result(
+        self,
+        observation: Observation,
+        state: RequirementGroundingState,
+        *,
+        base_revision: int,
+        telemetry: LLMCallTelemetryRecorder,
+    ) -> LLMUpdaterResult:
+        """把模型的有限 outcome 与 Patch 作为瞬态类型化结果返回。"""
 
         if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
             raise ValueError(
@@ -593,11 +637,15 @@ class LLMUpdater:
         except ValidationError as exc:
             raise LLMFrameUpdateError("form_validation_failed") from exc
         try:
-            return _llm_patch_from_proposal(
+            patch = _llm_patch_from_proposal(
                 detached_observation,
                 detached_state,
                 proposal,
                 base_revision=base_revision,
+            )
+            return LLMUpdaterResult(
+                proposal_outcome=proposal.proposal_outcome,
+                patch=patch,
             )
         except LLMFrameUpdateError:
             raise

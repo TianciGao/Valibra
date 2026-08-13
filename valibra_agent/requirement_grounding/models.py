@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import (
@@ -19,7 +20,14 @@ from pydantic import (
     model_validator,
 )
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+_LEGACY_SCHEMA_VERSION = "1.0"
+_RUNTIME_HISTORY_FIELDS = (
+    "requirement_revision",
+    "frame_initialization_status",
+    "frame_initialization_reason",
+    "frame_initialization_observation_id",
+)
 
 MAX_ID_CHARS = 128
 MAX_MENTION_CHARS = 256
@@ -531,6 +539,20 @@ class RequirementGroundingRuntime(KernelModel):
     def validate_processed_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _unique(value, "processed_observation_ids")
 
+    @model_validator(mode="before")
+    @classmethod
+    def require_explicit_current_history_fields(cls, data: Any) -> Any:
+        """拒绝显式 V1.1 payload 通过默认值伪造历史。"""
+
+        if isinstance(data, Mapping) and data.get("schema_version") == SCHEMA_VERSION:
+            missing = [name for name in _RUNTIME_HISTORY_FIELDS if name not in data]
+            if missing:
+                raise ValueError(
+                    "schema 1.1 Runtime requires explicit history fields: "
+                    + ", ".join(missing)
+                )
+        return data
+
     @model_validator(mode="after")
     def validate_pending_keys(self) -> "RequirementGroundingRuntime":
         if self.requirement_revision > self.grounding_revision:
@@ -564,6 +586,60 @@ class RequirementGroundingRuntime(KernelModel):
                     "failed initialization requires a failure reason and observation"
                 )
         return self
+
+
+class RuntimeMigrationResult(KernelModel):
+    """显式 Runtime 加载/单向迁移的结果及不可推断历史标记。"""
+
+    runtime: RequirementGroundingRuntime
+    legacy_unknown_history: bool
+
+
+def migrate_requirement_grounding_runtime(
+    payload: Mapping[str, Any] | RequirementGroundingRuntime,
+) -> RuntimeMigrationResult:
+    """显式加载 V1.1，或把 V1.0 payload 单向迁移到 V1.1。
+
+    旧 payload 缺少 P7.1a/P7.1b 历史字段时，只补序列化形状；返回的
+    ``legacy_unknown_history`` 保留“历史未知”事实，调用方不得把补出的
+    ``0``/``not_attempted`` 当作真实历史。
+    """
+
+    if isinstance(payload, RequirementGroundingRuntime):
+        return RuntimeMigrationResult(
+            runtime=payload,
+            legacy_unknown_history=False,
+        )
+    if not isinstance(payload, Mapping):
+        raise TypeError("Runtime payload must be a mapping")
+
+    data = dict(payload)
+    version = data.get("schema_version")
+    if version not in {_LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        raise ValueError("Runtime schema_version must be exactly '1.0' or '1.1'")
+
+    missing = [name for name in _RUNTIME_HISTORY_FIELDS if name not in data]
+    if version == SCHEMA_VERSION:
+        if missing:
+            raise ValueError(
+                "schema 1.1 Runtime requires explicit history fields: "
+                + ", ".join(missing)
+            )
+        return RuntimeMigrationResult(
+            runtime=RequirementGroundingRuntime.model_validate(data),
+            legacy_unknown_history=False,
+        )
+
+    legacy_unknown_history = bool(missing)
+    data["schema_version"] = SCHEMA_VERSION
+    data.setdefault("requirement_revision", 0)
+    data.setdefault("frame_initialization_status", "not_attempted")
+    data.setdefault("frame_initialization_reason", None)
+    data.setdefault("frame_initialization_observation_id", None)
+    return RuntimeMigrationResult(
+        runtime=RequirementGroundingRuntime.model_validate(data),
+        legacy_unknown_history=legacy_unknown_history,
+    )
 
 
 # 短别名只方便调用；序列化仍以完整类名对应的结构为准。

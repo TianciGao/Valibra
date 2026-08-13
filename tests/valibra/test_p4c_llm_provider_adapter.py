@@ -37,6 +37,7 @@ SYNTHETIC_QUESTION = (
 )
 VALID_CONTENT = json.dumps(
     {
+        "proposal_outcome": "populated",
         "value_slots": [
             {
                 "slot_role": "time_constraint",
@@ -453,6 +454,7 @@ class ObservationEligibilityAndLedgerTests(unittest.IsolatedAsyncioTestCase):
                 return {
                     "content": json.dumps(
                         {
+                            "proposal_outcome": "no_extractable_requirement",
                             "value_slots": [],
                             "schema_slots": [],
                             "operation_slots": [],

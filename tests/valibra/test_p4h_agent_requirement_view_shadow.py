@@ -34,9 +34,15 @@ from valibra_agent.requirement_grounding.updater import (
 
 
 EXPECTED_PROMPT_SHA256 = (
-    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+    "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4"
 )
 EXPECTED_FORM_SHA256 = (
+    "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1"
+)
+PRE_P71C_PROMPT_SHA256 = (
+    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+)
+PRE_P71C_FORM_SHA256 = (
     "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
 )
 
@@ -584,9 +590,11 @@ class AgentRequirementViewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["error_type"], "RuntimeError")
         self.assertNotIn("secret text", json.dumps(audit))
 
-    def test_frozen_grounding_contract_hashes_are_unchanged(self):
+    def test_p71c_refreezes_grounding_hashes_without_view_changes(self):
         self.assertEqual(LLM_FRAME_PROMPT_SHA256, EXPECTED_PROMPT_SHA256)
         self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, EXPECTED_FORM_SHA256)
+        self.assertNotEqual(LLM_FRAME_PROMPT_SHA256, PRE_P71C_PROMPT_SHA256)
+        self.assertNotEqual(LLM_FRAME_FORM_SCHEMA_SHA256, PRE_P71C_FORM_SHA256)
 
 
 if __name__ == "__main__":

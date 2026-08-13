@@ -562,16 +562,28 @@ class RevisionSafetyTests(unittest.TestCase):
         self.assertEqual(restored.requirement_revision, 1)
         validate_runtime(restored)
 
-    def test_legacy_payload_without_requirement_revision_defaults_to_zero(self):
+    def test_legacy_payload_without_history_fields_migrates_as_unknown(self):
+        from valibra_agent.requirement_grounding.models import (
+            migrate_requirement_grounding_runtime,
+        )
+
         payload = RequirementGroundingRuntime(
             grounding_revision=3,
         ).model_dump(mode="json")
-        payload.pop("requirement_revision")
+        payload["schema_version"] = "1.0"
+        for field in (
+            "requirement_revision",
+            "frame_initialization_status",
+            "frame_initialization_reason",
+            "frame_initialization_observation_id",
+        ):
+            payload.pop(field)
 
-        restored = RequirementGroundingRuntime.model_validate_json(
-            json.dumps(payload)
-        )
+        migrated = migrate_requirement_grounding_runtime(json.loads(json.dumps(payload)))
+        restored = migrated.runtime
 
+        self.assertTrue(migrated.legacy_unknown_history)
+        self.assertEqual(restored.schema_version, "1.1")
         self.assertEqual(restored.grounding_revision, 3)
         self.assertEqual(restored.requirement_revision, 0)
 

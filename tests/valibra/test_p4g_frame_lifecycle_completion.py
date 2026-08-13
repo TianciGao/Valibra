@@ -48,6 +48,9 @@ from tests.valibra.test_p4d_llm_callback_shadow import (
 
 
 EXPECTED_CONFIG_SHA256 = (
+    "2ec2accb786a1f1e4d35027affe52c0402957861f59a93832583ac4094066dce"
+)
+PRE_P71C_CONFIG_SHA256 = (
     "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
 )
 ANSWER = "Use 2023 instead."
@@ -55,11 +58,19 @@ FOLLOW_UP = "For phase 2, sort ascending and include limit 10."
 
 
 def _frame(*, values=(), schemas=(), operations=()):
+    values = list(values)
+    schemas = list(schemas)
+    operations = list(operations)
     return json.dumps(
         {
-            "value_slots": list(values),
-            "schema_slots": list(schemas),
-            "operation_slots": list(operations),
+            "proposal_outcome": (
+                "populated"
+                if values or schemas or operations
+                else "no_extractable_requirement"
+            ),
+            "value_slots": values,
+            "schema_slots": schemas,
+            "operation_slots": operations,
             "ambiguities": [],
         },
         sort_keys=True,
@@ -609,8 +620,9 @@ class FullSyntheticLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FrozenContractTests(unittest.TestCase):
-    def test_p42_hashes_remain_frozen(self):
+    def test_p71c_refreezes_hashes_without_changing_lifecycle_contract(self):
         config = _llm_config(timeout="300", max_calls="2")
         self.assertEqual(LLM_FRAME_PROMPT_SHA256, EXPECTED_PROMPT_SHA256)
         self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, EXPECTED_FORM_SHA256)
         self.assertEqual(config.configuration_sha256, EXPECTED_CONFIG_SHA256)
+        self.assertNotEqual(config.configuration_sha256, PRE_P71C_CONFIG_SHA256)

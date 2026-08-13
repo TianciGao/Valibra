@@ -1,0 +1,50 @@
+{
+  "stage": "P7.1c",
+  "status": "PASS",
+  "recorded_at_utc": "2026-08-13T12:45:29Z",
+  "starting_head": "1903b2ec0db37018fa050f7e71918bea8298a548",
+  "rollback_tag": "p7.1b-pass",
+  "schema_version": "1.1",
+  "proposal_outcomes": [
+    "populated",
+    "insufficient_information",
+    "no_extractable_requirement"
+  ],
+  "prompt_sha256": "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4",
+  "form_schema_sha256": "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1",
+  "grounding_configuration_sha256": "2ec2accb786a1f1e4d35027affe52c0402957861f59a93832583ac4094066dce",
+  "tests": {
+    "focused_passed": 11,
+    "focused_total": 11,
+    "full_passed": 368,
+    "full_total": 368,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "user_simulator": 0,
+    "http_services": 0,
+    "benchmark": 0
+  },
+  "source_sha256": {
+    "requirement_grounding/__init__.py": "aeb3a5c3940c3c393b79083f5c060ab94b593c89aa2dad8538d0c467100167ee",
+    "models.py": "c2d38a33a0ef662c96401c42eceac38443db08cea1dce2e2aa724d82f228f3c6",
+    "updater.py": "10e388339a2bc4e4a28c5e3e39768eea83e9eee6952cd7a86567b7bba1d54a3c",
+    "service.py": "73efa7f8552f1a6b9caca2d5462ab97814a273883063720484e9e16fbf46d351",
+    "grounding_callbacks.py": "fdf5a5158d84caa10ed39ba7ed450e6899945a16f2c809844c9f43e23653b43e",
+    "evaluation.py": "1e78792ff80956230179b34d2c039594a2ca3f44aa3548c7915d3711f1f01ccc",
+    "test_p71c_empty_outcome_schema.py": "7ac8a81e7e5d53185be66aed9ff978e320e2175ff296a82618e2d51d5ab69c31"
+  },
+  "boundaries": {
+    "markdown_fence_normalization": false,
+    "retry_added": false,
+    "ambiguity_enabled": false,
+    "evidence_to_frame": false,
+    "phase2_optimization": false,
+    "p7_1d_started": false,
+    "p8_started": false
+  }
+}

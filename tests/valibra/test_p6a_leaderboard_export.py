@@ -40,12 +40,21 @@ from valibra_agent.requirement_grounding.updater import (
 RESEARCH_ROOT = Path(__file__).resolve().parents[2]
 B0_ROOT = Path("/home/user/code/BIRD-Interact/BIRD-Interact-ADK")
 EXPECTED_PROMPT_SHA256 = (
-    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+    "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4"
 )
 EXPECTED_FORM_SHA256 = (
-    "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
+    "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1"
 )
 EXPECTED_CONFIG_SHA256 = (
+    "2ec2accb786a1f1e4d35027affe52c0402957861f59a93832583ac4094066dce"
+)
+PRE_P71C_PROMPT_SHA256 = (
+    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+)
+PRE_P71C_FORM_SHA256 = (
+    "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
+)
+PRE_P71C_CONFIG_SHA256 = (
     "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
 )
 
@@ -272,6 +281,7 @@ class EvaluationExportTests(unittest.TestCase):
         summary = result["grounding_summary"]
         self.assertEqual(summary["grounding_revision"], 1)
         self.assertEqual(summary["requirement_revision"], 1)
+        self.assertFalse(summary["legacy_unknown_history"])
         self.assertRegex(summary["requirement_semantic_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(summary["slots"]["total"], 1)
         self.assertEqual(summary["evidence_count"], 1)
@@ -300,6 +310,35 @@ class EvaluationExportTests(unittest.TestCase):
         self.assertEqual(len(locations["tool_observations"]), 2)
         self.assertEqual(len(locations["requirement_view_model_calls"]), 1)
 
+    def test_legacy_v1_export_marks_initialization_history_unknown(self):
+        legacy = RequirementGroundingRuntime().model_dump(mode="json")
+        legacy["schema_version"] = "1.0"
+        for field in (
+            "requirement_revision",
+            "frame_initialization_status",
+            "frame_initialization_reason",
+            "frame_initialization_observation_id",
+        ):
+            legacy.pop(field)
+        state = {
+            grounding_callbacks.GROUNDING_RUNTIME_KEY: legacy,
+            "system_agent_token_usage": {},
+            "system_agent_llm_calls": [],
+            "tool_trajectory": [],
+            "dialogue_history": [],
+            "adk_events": [],
+        }
+
+        result = export_valibra_result(state)
+
+        self.assertEqual(result["export_status"], "succeeded")
+        self.assertEqual(result["runtime"]["schema_version"], "1.1")
+        self.assertTrue(result["grounding_summary"]["legacy_unknown_history"])
+        # Compatibility defaults are never evidence about the historical run.
+        self.assertEqual(
+            result["grounding_summary"]["frame_initialization_status"],
+            "not_attempted",
+        )
     def test_reasoning_is_not_double_counted_and_reported_costs_sum(self):
         result = export_valibra_result(_state(include_cost=True))
         usage = result["model_usage"]
@@ -388,7 +427,7 @@ class EvaluationExportTests(unittest.TestCase):
             {grounding_callbacks.GROUNDING_RUNTIME_KEY: {"secret": "not exported"}}
         )
         self.assertEqual(invalid["export_status"], "failed")
-        self.assertEqual(invalid["error_type"], "ValidationError")
+        self.assertEqual(invalid["error_type"], "ValueError")
         self.assertNotIn("secret", json.dumps(invalid))
 
     def test_main_latency_is_null_without_reliable_complete_timestamps(self):
@@ -411,13 +450,14 @@ class EvaluationExportTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
-    def test_frozen_grounding_contracts_are_unchanged(self):
+    def test_p71c_refreezes_grounding_contract_hashes(self):
         self.assertEqual(LLM_FRAME_PROMPT_SHA256, EXPECTED_PROMPT_SHA256)
         self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, EXPECTED_FORM_SHA256)
-        self.assertEqual(
-            _llm_config(timeout="300", max_calls="2").configuration_sha256,
-            EXPECTED_CONFIG_SHA256,
-        )
+        config_sha = _llm_config(timeout="300", max_calls="2").configuration_sha256
+        self.assertEqual(config_sha, EXPECTED_CONFIG_SHA256)
+        self.assertNotEqual(LLM_FRAME_PROMPT_SHA256, PRE_P71C_PROMPT_SHA256)
+        self.assertNotEqual(LLM_FRAME_FORM_SCHEMA_SHA256, PRE_P71C_FORM_SHA256)
+        self.assertNotEqual(config_sha, PRE_P71C_CONFIG_SHA256)
 
 
 class InitialGroundingAuditTests(unittest.IsolatedAsyncioTestCase):

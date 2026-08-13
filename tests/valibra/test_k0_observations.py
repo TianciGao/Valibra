@@ -126,7 +126,7 @@ class K0ObservationTests(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.strip(), "1.0")
+        self.assertEqual(completed.stdout.strip(), "1.1")
 
 
 if __name__ == "__main__":

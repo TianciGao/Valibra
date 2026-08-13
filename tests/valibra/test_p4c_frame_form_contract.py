@@ -55,6 +55,7 @@ def _observation():
 
 def _frame(*, operation_type="order", mention="sorted by total descending"):
     return {
+        "proposal_outcome": "populated",
         "value_slots": [
             {
                 "slot_role": "time_constraint",
@@ -130,7 +131,13 @@ class FixedFormSchemaTests(unittest.TestCase):
         self.assertFalse(LLM_FRAME_FORM_SCHEMA["additionalProperties"])
         self.assertEqual(
             LLM_FRAME_FORM_SCHEMA["required"],
-            ["value_slots", "schema_slots", "operation_slots", "ambiguities"],
+            [
+                "proposal_outcome",
+                "value_slots",
+                "schema_slots",
+                "operation_slots",
+                "ambiguities",
+            ],
         )
 
     def test_schema_fixes_all_fields_enum_scalars_and_empty_ambiguity(self):

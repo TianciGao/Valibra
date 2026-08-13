@@ -76,10 +76,18 @@ def _proposal_content(
     ambiguities=None,
     extra=None,
 ):
+    value_slots = value_slots or []
+    schema_slots = schema_slots or []
+    operation_slots = operation_slots or []
     value = {
-        "value_slots": value_slots or [],
-        "schema_slots": schema_slots or [],
-        "operation_slots": operation_slots or [],
+        "proposal_outcome": (
+            "populated"
+            if value_slots or schema_slots or operation_slots
+            else "no_extractable_requirement"
+        ),
+        "value_slots": value_slots,
+        "schema_slots": schema_slots,
+        "operation_slots": operation_slots,
         "ambiguities": ambiguities or [],
     }
     if extra:
@@ -358,11 +366,13 @@ class LLMUpdaterContractTests(unittest.IsolatedAsyncioTestCase):
                 ]
             ),
             "duplicate_key": (
-                '{"value_slots":[],"value_slots":[],"schema_slots":[],'
+                '{"proposal_outcome":"no_extractable_requirement",'
+                '"value_slots":[],"value_slots":[],"schema_slots":[],'
                 '"operation_slots":[],"ambiguities":[]}'
             ),
             "non_finite_json": (
-                '{"value_slots":[],"schema_slots":[],"operation_slots":['
+                '{"proposal_outcome":"populated","value_slots":[],'
+                '"schema_slots":[],"operation_slots":['
                 '{"slot_role":"filter","mention":"x","interpretation":"x",'
                 '"operation_type":"filter","parameters":{"x":NaN}}],'
                 '"ambiguities":[]}'

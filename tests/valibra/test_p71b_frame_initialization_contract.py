@@ -33,6 +33,7 @@ from valibra_agent.requirement_grounding.models import (
     Observation,
     RequirementGroundingPatch,
     RequirementGroundingRuntime,
+    migrate_requirement_grounding_runtime,
 )
 from valibra_agent.requirement_grounding.observations import build_observation
 from valibra_agent.requirement_grounding.reducer import apply_patch
@@ -114,15 +115,19 @@ class FrameInitializationModelContractTests(unittest.TestCase):
 
     def test_legacy_v1_runtime_without_initialization_fields_is_compatible(self):
         payload = RequirementGroundingRuntime().model_dump(mode="json")
+        payload["schema_version"] = "1.0"
         payload.pop("requirement_revision")
         payload.pop("frame_initialization_status")
         payload.pop("frame_initialization_reason")
         payload.pop("frame_initialization_observation_id")
 
-        restored = RequirementGroundingRuntime.model_validate(payload)
+        migration = migrate_requirement_grounding_runtime(payload)
+        restored = migration.runtime
 
         # Compatibility defaults are unknown historical metadata, not proof
         # that a historical V1 session never attempted initialization.
+        self.assertTrue(migration.legacy_unknown_history)
+        self.assertEqual(restored.schema_version, "1.1")
         self.assertEqual(restored.requirement_revision, 0)
         self.assertEqual(restored.frame_initialization_status, "not_attempted")
         self.assertIsNone(restored.frame_initialization_reason)
@@ -462,11 +467,13 @@ class TypedLLMFailureClassificationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_duplicate_form_and_mention_failures_are_typed(self):
         duplicate = (
-            '{"value_slots":[],"value_slots":[],"schema_slots":[],'
+            '{"proposal_outcome":"no_extractable_requirement",'
+            '"value_slots":[],"value_slots":[],"schema_slots":[],'
             '"operation_slots":[],"ambiguities":[]}'
         )
         form_invalid = json.dumps(
             {
+                "proposal_outcome": "populated",
                 "value_slots": [],
                 "schema_slots": [],
                 "operation_slots": [
@@ -791,6 +798,7 @@ class FrameInitializationCallbackLifecycleTests(
     async def test_legacy_v1_runtime_remains_unknown_without_backfill(self):
         state = _state("task-p71b-legacy-unknown")
         legacy = RequirementGroundingRuntime().model_dump(mode="json")
+        legacy["schema_version"] = "1.0"
         legacy.pop("requirement_revision")
         legacy.pop("frame_initialization_status")
         legacy.pop("frame_initialization_reason")

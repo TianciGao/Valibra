@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Literal, Protocol
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from valibra_agent.requirement_grounding.models import (
     FAILED_FRAME_INITIALIZATION_REASONS,
@@ -34,6 +34,7 @@ from valibra_agent.requirement_grounding.telemetry import (
 from valibra_agent.requirement_grounding.updater import (
     GROUNDING_LLM_OBSERVATION_TYPES,
     GroundingProviderError,
+    LLMFrameProposalOutcome,
     LLMFrameUpdateError,
     LLMUpdater,
     NoOpUpdater,
@@ -75,6 +76,17 @@ class LLMGroundingServiceResult(KernelModel):
     patch_id: str | None = Field(default=None, max_length=128)
     llm_audit: LLMCallAudit
     failure_reason: FrameInitializationReason | None = None
+    proposal_outcome: LLMFrameProposalOutcome | None = None
+
+    @model_validator(mode="after")
+    def validate_typed_outcome(self) -> "LLMGroundingServiceResult":
+        """只让成功处理的 LLM 提案携带有限 outcome。"""
+
+        if self.status == "processed" and self.proposal_outcome is None:
+            raise ValueError("processed LLM result requires proposal_outcome")
+        if self.status != "processed" and self.proposal_outcome is not None:
+            raise ValueError("non-processed LLM result cannot retain proposal_outcome")
+        return self
 
 
 class GroundingControlError(ValueError):
@@ -397,8 +409,8 @@ async def process_observation_with_llm(
     started = monotonic()
     counted = increment_metrics(runtime, observations_seen=1)
     try:
-        patch = await asyncio.wait_for(
-            updater.propose(
+        update = await asyncio.wait_for(
+            updater.propose_result(
                 observation,
                 working.grounding_state,
                 base_revision=working.grounding_revision,
@@ -475,6 +487,7 @@ async def process_observation_with_llm(
     latency_ms = _elapsed_ms(monotonic, started)
     try:
         # 只有 Provider 返回、响应解析和 Reducer 全部成功，Patch 才会落地。
+        patch = update.patch
         reduced = reducer(working, patch)
         reduced = increment_metrics(
             reduced,
@@ -492,6 +505,7 @@ async def process_observation_with_llm(
             status="processed",
             runtime=reduced,
             patch_id=patch.patch_id,
+            proposal_outcome=update.proposal_outcome,
             llm_audit=_llm_audit(
                 updater,
                 status="succeeded",

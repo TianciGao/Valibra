@@ -17,6 +17,7 @@ from typing import Any
 
 from shared.audit import to_jsonable
 from valibra_agent.grounding_callbacks import (
+    GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY,
     GROUNDING_RUNTIME_KEY,
     GROUNDING_UPDATE_AUDIT_KEY,
     REQUIREMENT_VIEW_AUDIT_KEY,
@@ -24,6 +25,7 @@ from valibra_agent.grounding_callbacks import (
 )
 from valibra_agent.requirement_grounding.models import (
     RequirementGroundingRuntime,
+    migrate_requirement_grounding_runtime,
 )
 from valibra_agent.requirement_grounding.reducer import validate_runtime
 from valibra_agent.requirement_grounding.semantic_projection import (
@@ -58,7 +60,11 @@ def export_valibra_result(
         raw_runtime = state.get(GROUNDING_RUNTIME_KEY)
         if raw_runtime is None:
             raise MissingGroundingRuntime("Grounding Runtime is missing")
-        runtime = RequirementGroundingRuntime.model_validate(raw_runtime)
+        migration = migrate_requirement_grounding_runtime(raw_runtime)
+        runtime = migration.runtime
+        legacy_unknown_history = migration.legacy_unknown_history or bool(
+            state.get(GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY, False)
+        )
         validate_runtime(runtime)
         runtime_json = runtime.model_dump(mode="json")
 
@@ -111,6 +117,7 @@ def export_valibra_result(
                 "frame_initialization_observation_id": (
                     runtime.frame_initialization_observation_id
                 ),
+                "legacy_unknown_history": legacy_unknown_history,
                 "phase": runtime.phase,
                 "slots": {
                     "value": len(frame.value_slots),

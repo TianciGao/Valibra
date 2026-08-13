@@ -27,9 +27,15 @@ from valibra_agent.requirement_grounding.updater import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PROMPT_SHA256 = (
-    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+    "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4"
 )
 EXPECTED_FORM_SHA256 = (
+    "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1"
+)
+PRE_P71C_PROMPT_SHA256 = (
+    "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
+)
+PRE_P71C_FORM_SHA256 = (
     "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
 )
 
@@ -87,6 +93,11 @@ def _content(
         )
     return json.dumps(
         {
+            "proposal_outcome": (
+                "populated"
+                if value_slots or schema_slots or operation_slots
+                else "no_extractable_requirement"
+            ),
             "value_slots": value_slots,
             "schema_slots": schema_slots,
             "operation_slots": operation_slots,
@@ -759,9 +770,11 @@ class ModeAndBoundaryTests(unittest.TestCase):
         self.assertFalse(status["configuration_valid"])
         self.assertEqual(status["error_type"], "ValueError")
 
-    def test_frozen_contract_and_shadow_source_boundaries_are_unchanged(self):
+    def test_p71c_refreezes_contract_without_changing_shadow_boundaries(self):
         self.assertEqual(LLM_FRAME_PROMPT_SHA256, EXPECTED_PROMPT_SHA256)
         self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, EXPECTED_FORM_SHA256)
+        self.assertNotEqual(LLM_FRAME_PROMPT_SHA256, PRE_P71C_PROMPT_SHA256)
+        self.assertNotEqual(LLM_FRAME_FORM_SCHEMA_SHA256, PRE_P71C_FORM_SHA256)
         source = inspect.getsource(grounding_callbacks)
         self.assertNotIn("create_task", source)
         self.assertNotIn("activate_model_preset", source)

@@ -27,6 +27,7 @@ from valibra_agent.requirement_grounding.models import (
     SchemaSlot,
     ValibraError,
     ValueSlot,
+    migrate_requirement_grounding_runtime,
 )
 from valibra_agent.requirement_grounding.observations import build_observation
 from valibra_agent.requirement_grounding.reducer import apply_patch
@@ -38,7 +39,7 @@ class K0ModelTests(unittest.TestCase):
         self.assertEqual(
             runtime.model_dump(mode="json"),
             {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "grounding_revision": 0,
                 "requirement_revision": 0,
                 "frame_initialization_status": "not_attempted",
@@ -67,11 +68,20 @@ class K0ModelTests(unittest.TestCase):
         )
         self.assertEqual(restored, runtime)
 
-    def test_v1_runtime_without_requirement_revision_loads_compatibly(self):
+    def test_v1_runtime_without_history_fields_uses_explicit_migration(self):
         payload = RequirementGroundingRuntime().model_dump(mode="json")
-        del payload["requirement_revision"]
-        restored = RequirementGroundingRuntime.model_validate(payload)
-        self.assertEqual(restored.requirement_revision, 0)
+        payload["schema_version"] = "1.0"
+        for field in (
+            "requirement_revision",
+            "frame_initialization_status",
+            "frame_initialization_reason",
+            "frame_initialization_observation_id",
+        ):
+            del payload[field]
+        migrated = migrate_requirement_grounding_runtime(payload)
+        self.assertTrue(migrated.legacy_unknown_history)
+        self.assertEqual(migrated.runtime.schema_version, "1.1")
+        self.assertEqual(migrated.runtime.requirement_revision, 0)
 
     def test_requirement_revision_cannot_exceed_technical_revision(self):
         with self.assertRaises(ValidationError):

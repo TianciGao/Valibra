@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from shared.audit import to_jsonable
 from shared.config import PROJECT_ROOT
@@ -28,6 +28,7 @@ from valibra_agent.requirement_grounding.models import (
     Observation,
     PendingToolCall,
     RequirementGroundingRuntime,
+    migrate_requirement_grounding_runtime,
 )
 from valibra_agent.requirement_grounding.observations import (
     ObservationNormalizationError,
@@ -56,6 +57,7 @@ from valibra_agent.requirement_grounding.service import (
 from valibra_agent.requirement_grounding.telemetry import record_failure
 from valibra_agent.requirement_grounding.updater import (
     GROUNDING_LLM_OBSERVATION_TYPES,
+    LLMFrameProposalOutcome,
     LLMUpdater,
     LiteLLMGroundingClient,
     NoOpUpdater,
@@ -231,6 +233,17 @@ class _BoundTurnMessage:
     mode: str
     message: str
     consumed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ShadowObservationResult:
+    """Grounding 内部处理结果；用命名字段避免 outcome 与 reason 混位。"""
+
+    runtime: RequirementGroundingRuntime
+    status: Literal["processed", "duplicate", "failed", "skipped"]
+    llm_audit: dict[str, Any] | None = None
+    failure_reason: FrameInitializationReason | None = None
+    proposal_outcome: LLMFrameProposalOutcome | None = None
 
 
 _ACTIVE_TURN_MESSAGE: ContextVar[_BoundTurnMessage | None] = ContextVar(
@@ -504,10 +517,11 @@ async def after_tool_callback(
             invocation_id=_valid_invocation_id(tool_context),
             tool_name=tool_name,
         )
-        runtime, result_status, llm_audit, _ = await _process_shadow_observation(
-            runtime,
-            observation,
-        )
+        shadow_result = await _process_shadow_observation(runtime, observation)
+        runtime = shadow_result.runtime
+        result_status = shadow_result.status
+        llm_audit = shadow_result.llm_audit
+        proposal_outcome = shadow_result.proposal_outcome
         if observation_type == "tool_error":
             runtime = record_failure(
                 runtime,
@@ -524,6 +538,7 @@ async def after_tool_callback(
         follow_up_observation_id: str | None = None
         follow_up_status: str | None = None
         follow_up_llm_audit: dict[str, Any] | None = None
+        follow_up_proposal_outcome: LLMFrameProposalOutcome | None = None
         phase_after = _phase(state.get("current_phase", pending.phase_before))
         if (
             tool_name == "submit_sql"
@@ -573,11 +588,15 @@ async def after_tool_callback(
                         invocation_id=_valid_invocation_id(tool_context),
                         tool_name=tool_name,
                     )
-                    runtime, follow_up_status, follow_up_llm_audit, _ = (
-                        await _process_shadow_observation(
-                            runtime,
-                            follow_up_observation,
-                        )
+                    follow_up_result = await _process_shadow_observation(
+                        runtime,
+                        follow_up_observation,
+                    )
+                    runtime = follow_up_result.runtime
+                    follow_up_status = follow_up_result.status
+                    follow_up_llm_audit = follow_up_result.llm_audit
+                    follow_up_proposal_outcome = (
+                        follow_up_result.proposal_outcome
                     )
                     follow_up_observation_id = follow_up_observation.observation_id
                 except ObservationNormalizationError as exc:
@@ -601,9 +620,11 @@ async def after_tool_callback(
             "phase_after": phase_after,
             "observation_id": observation.observation_id,
             "observation_type": observation.observation_type,
+            "proposal_outcome": proposal_outcome,
             "transition_observation_id": transition_observation_id,
             "follow_up_observation_id": follow_up_observation_id,
             "follow_up_status": follow_up_status,
+            "follow_up_proposal_outcome": follow_up_proposal_outcome,
             "raw_digest": observation.raw_digest,
             "raw_log_ref": raw_log_ref,
             "summary": observation.summary,
@@ -689,7 +710,9 @@ async def on_tool_error_callback(
             invocation_id=_valid_invocation_id(tool_context),
             tool_name=tool_name,
         )
-        runtime, _, _, _ = await _process_shadow_observation(runtime, observation)
+        runtime = (
+            await _process_shadow_observation(runtime, observation)
+        ).runtime
         runtime = record_failure(
             runtime,
             stage="service",
@@ -710,17 +733,23 @@ async def on_tool_error_callback(
 
 
 def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
-    """读取并校验 Runtime；坏数据回退为空状态，始终不阻断主流程。"""
+    """读取当前 Runtime 或显式单向迁移 V1；坏数据保持 fail-open。"""
 
     try:
         raw = state.get(GROUNDING_RUNTIME_KEY)
-        runtime = (
-            RequirementGroundingRuntime()
-            if raw is None
-            else RequirementGroundingRuntime.model_validate(raw)
-        )
+        if raw is None:
+            runtime = RequirementGroundingRuntime()
+        else:
+            migration = migrate_requirement_grounding_runtime(raw)
+            runtime = migration.runtime
+            if migration.legacy_unknown_history:
+                # 控制标记不进入 Runtime/Frame/Prompt；跨轮保留历史未知。
+                state[GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY] = True
         validate_runtime(runtime)
     except Exception as exc:
+        if raw is not None:
+            # 无法验证的已有 Runtime 也不能被重建后的默认值冒充为可信历史。
+            state[GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY] = True
         runtime = RequirementGroundingRuntime()
         try:
             runtime = record_failure(
@@ -759,15 +788,10 @@ async def _consume_bound_user_message(
         raw=bound.message,
         summary=_user_message_summary(bound.message),
     )
-    raw_runtime = state.get(GROUNDING_RUNTIME_KEY)
-    if _runtime_lacks_initialization_contract(raw_runtime):
-        # 这是 Session 控制标记，不进入 Runtime/Frame/Prompt。必须跨轮保留，
-        # 防止旧 V1 默认字段写回后把第二条消息伪装成“首次初始化”。
-        state[GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY] = True
+    original_runtime = _ensure_runtime(state)
     initialization_contract_known = not bool(
         state.get(GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY, False)
     )
-    original_runtime = _ensure_runtime(state)
     initialization_pending = (
         observation.phase == 1
         and initialization_contract_known
@@ -775,12 +799,15 @@ async def _consume_bound_user_message(
     )
     updater_mode = _requested_updater_mode()
     try:
-        runtime, status, llm_audit, failure_reason = (
-            await _process_shadow_observation(
-                original_runtime,
-                observation,
-            )
+        shadow_result = await _process_shadow_observation(
+            original_runtime,
+            observation,
         )
+        runtime = shadow_result.runtime
+        status = shadow_result.status
+        llm_audit = shadow_result.llm_audit
+        failure_reason = shadow_result.failure_reason
+        proposal_outcome = shadow_result.proposal_outcome
     except Exception as exc:
         runtime = record_failure(
             original_runtime,
@@ -793,20 +820,33 @@ async def _consume_bound_user_message(
         status = "failed"
         llm_audit = None
         failure_reason = "unexpected_error"
+        proposal_outcome = None
     if initialization_pending and status in {"processed", "failed"}:
         slot_count = _frame_slot_count(runtime)
-        if status == "processed" and slot_count > 0:
+        if status == "processed" and updater_mode == "llm":
+            if proposal_outcome == "populated" and slot_count > 0:
+                initialization_status = "ready"
+                initialization_reason = None
+            elif (
+                proposal_outcome
+                in {"insufficient_information", "no_extractable_requirement"}
+                and slot_count == 0
+            ):
+                initialization_status = "empty"
+                initialization_reason = proposal_outcome
+            else:
+                # Form/Reducer 已确保正常路径不会矛盾；若扩展代码破坏合同，
+                # 仍按技术失败处理，绝不从 slot_count 猜 empty 原因。
+                initialization_status = "failed"
+                initialization_reason = "unexpected_error"
+                status = "failed"
+        elif status == "processed" and slot_count > 0:
             initialization_status = "ready"
             initialization_reason = None
         elif status == "processed":
-            # P7.1b 仍使用 V1 Form，零 Slot 没有显式 proposal_outcome。
-            # 因此不能猜成 empty；P7.1c 才会让两个 empty 原因可达。
+            # Rule 路径没有 LLM 的显式 outcome，仍不能猜 empty 原因。
             initialization_status = "failed"
-            initialization_reason = (
-                "form_validation_failed"
-                if updater_mode == "llm"
-                else "unexpected_error"
-            )
+            initialization_reason = "unexpected_error"
             status = "failed"
         else:
             initialization_status = "failed"
@@ -823,6 +863,7 @@ async def _consume_bound_user_message(
         "observation_type": observation.observation_type,
         "phase": observation.phase,
         "status": status,
+        "proposal_outcome": proposal_outcome,
         "grounding_revision": runtime.grounding_revision,
         "requirement_revision": runtime.requirement_revision,
         "requirement_semantic_sha256": requirement_semantic_sha256(
@@ -838,12 +879,7 @@ async def _consume_bound_user_message(
 async def _process_shadow_observation(
     runtime: RequirementGroundingRuntime,
     observation: Observation,
-) -> tuple[
-    RequirementGroundingRuntime,
-    str,
-    dict[str, Any] | None,
-    FrameInitializationReason | None,
-]:
+) -> _ShadowObservationResult:
     """按精确模式处理 Observation；错误只写有限 telemetry，不降级到 Rule。"""
 
     if observation.observation_type in EVIDENCE_OBSERVATION_TYPES:
@@ -852,7 +888,11 @@ async def _process_shadow_observation(
             observation,
             updater=_EVIDENCE_UPDATER,
         )
-        return result.runtime, result.status, None, result.failure_reason
+        return _ShadowObservationResult(
+            runtime=result.runtime,
+            status=result.status,
+            failure_reason=result.failure_reason,
+        )
 
     if observation.observation_type == "tool_error":
         result = process_observation(
@@ -860,7 +900,11 @@ async def _process_shadow_observation(
             observation,
             updater=_NOOP_UPDATER,
         )
-        return result.runtime, result.status, None, result.failure_reason
+        return _ShadowObservationResult(
+            runtime=result.runtime,
+            status=result.status,
+            failure_reason=result.failure_reason,
+        )
 
     mode = _requested_updater_mode()
     if mode == "rule":
@@ -869,7 +913,11 @@ async def _process_shadow_observation(
             observation,
             updater=_RULE_UPDATER,
         )
-        return result.runtime, result.status, None, result.failure_reason
+        return _ShadowObservationResult(
+            runtime=result.runtime,
+            status=result.status,
+            failure_reason=result.failure_reason,
+        )
 
     if mode == "invalid":
         failed = record_failure(
@@ -881,7 +929,11 @@ async def _process_shadow_observation(
             function_call_id=observation.function_call_id,
             metric_namespace="llm",
         )
-        return failed, "failed", None, "configuration_error"
+        return _ShadowObservationResult(
+            runtime=failed,
+            status="failed",
+            failure_reason="configuration_error",
+        )
 
     if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
         # 非用户 Observation 只记生命周期，不调用模型也不消耗 LLM call budget。
@@ -890,7 +942,11 @@ async def _process_shadow_observation(
             observation,
             updater=_NOOP_UPDATER,
         )
-        return result.runtime, result.status, None, result.failure_reason
+        return _ShadowObservationResult(
+            runtime=result.runtime,
+            status=result.status,
+            failure_reason=result.failure_reason,
+        )
 
     try:
         updater = _build_llm_updater()
@@ -904,18 +960,23 @@ async def _process_shadow_observation(
             function_call_id=observation.function_call_id,
             metric_namespace="llm",
         )
-        return failed, "failed", None, "configuration_error"
+        return _ShadowObservationResult(
+            runtime=failed,
+            status="failed",
+            failure_reason="configuration_error",
+        )
 
     result = await process_observation_with_llm(
         runtime,
         observation,
         updater=updater,
     )
-    return (
-        result.runtime,
-        result.status,
-        _bounded_llm_audit(result.llm_audit),
-        result.failure_reason,
+    return _ShadowObservationResult(
+        runtime=result.runtime,
+        status=result.status,
+        llm_audit=_bounded_llm_audit(result.llm_audit),
+        failure_reason=result.failure_reason,
+        proposal_outcome=result.proposal_outcome,
     )
 
 
@@ -925,23 +986,6 @@ def _frame_slot_count(runtime: RequirementGroundingRuntime) -> int:
         len(frame.value_slots)
         + len(frame.schema_slots)
         + len(frame.operation_slots)
-    )
-
-
-def _runtime_lacks_initialization_contract(raw_runtime: Any) -> bool:
-    """识别旧 V1 shape；None 表示本版本新建 Session，不属于 legacy。"""
-
-    if raw_runtime is None or isinstance(raw_runtime, RequirementGroundingRuntime):
-        return False
-    if not isinstance(raw_runtime, Mapping):
-        return True
-    return not all(
-        name in raw_runtime
-        for name in (
-            "frame_initialization_status",
-            "frame_initialization_reason",
-            "frame_initialization_observation_id",
-        )
     )
 
 

@@ -22,17 +22,26 @@ from valibra_agent.requirement_grounding.updater import (
 OLD_PROMPT_SHA256 = (
     "b5c55caa8dd06d8d8e9c54670e118bae1f2e5753ed48a9a1329f1d89ff812e00"
 )
-NEW_PROMPT_SHA256 = (
+PARAMETER_OBJECT_PROMPT_SHA256 = (
     "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d"
 )
-FORM_SCHEMA_SHA256 = (
+PARAMETER_OBJECT_FORM_SCHEMA_SHA256 = (
     "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2"
 )
 OLD_CONFIGURATION_SHA256 = (
     "d6ec85e73d6061bdfc8b4eb23196595ed9086a05b622fb75ccfbaaedc4d154b4"
 )
-NEW_CONFIGURATION_SHA256 = (
+PARAMETER_OBJECT_CONFIGURATION_SHA256 = (
     "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9"
+)
+P71C_PROMPT_SHA256 = (
+    "ddaaa23fd3c824a704ea1e17a769b4c8b1af5c998949fccfe8d564b18f78f7c4"
+)
+P71C_FORM_SCHEMA_SHA256 = (
+    "f7409a7267b3fddcb40d69574e6187320884951ad4e96980bb590ee0058c38d1"
+)
+P71C_CONFIGURATION_SHA256 = (
+    "2ec2accb786a1f1e4d35027affe52c0402957861f59a93832583ac4094066dce"
 )
 QUESTION = "Show the top 5 customer names from 2024 sorted by total descending."
 
@@ -54,6 +63,7 @@ def _config():
 
 def _frame(parameters):
     return {
+        "proposal_outcome": "populated",
         "value_slots": [],
         "schema_slots": [
             {
@@ -136,17 +146,29 @@ class ParameterObjectPromptTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, LLM_FRAME_PROMPT)
 
-    def test_prompt_and_configuration_sha_change_but_form_sha_is_frozen(self):
-        self.assertEqual(LLM_FRAME_PROMPT_SHA256, NEW_PROMPT_SHA256)
+    def test_p71c_refreezes_prompt_form_and_configuration_hashes(self):
+        self.assertEqual(LLM_FRAME_PROMPT_SHA256, P71C_PROMPT_SHA256)
         self.assertNotEqual(LLM_FRAME_PROMPT_SHA256, OLD_PROMPT_SHA256)
-        self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, FORM_SCHEMA_SHA256)
+        self.assertNotEqual(
+            LLM_FRAME_PROMPT_SHA256,
+            PARAMETER_OBJECT_PROMPT_SHA256,
+        )
+        self.assertEqual(LLM_FRAME_FORM_SCHEMA_SHA256, P71C_FORM_SCHEMA_SHA256)
+        self.assertNotEqual(
+            LLM_FRAME_FORM_SCHEMA_SHA256,
+            PARAMETER_OBJECT_FORM_SCHEMA_SHA256,
+        )
         config = _config()
-        self.assertEqual(config.prompt_sha256, NEW_PROMPT_SHA256)
-        self.assertEqual(config.form_schema_sha256, FORM_SCHEMA_SHA256)
-        self.assertEqual(config.configuration_sha256, NEW_CONFIGURATION_SHA256)
+        self.assertEqual(config.prompt_sha256, P71C_PROMPT_SHA256)
+        self.assertEqual(config.form_schema_sha256, P71C_FORM_SCHEMA_SHA256)
+        self.assertEqual(config.configuration_sha256, P71C_CONFIGURATION_SHA256)
         self.assertNotEqual(
             config.configuration_sha256,
             OLD_CONFIGURATION_SHA256,
+        )
+        self.assertNotEqual(
+            config.configuration_sha256,
+            PARAMETER_OBJECT_CONFIGURATION_SHA256,
         )
 
     def test_operation_enum_is_unchanged(self):
