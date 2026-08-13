@@ -102,6 +102,15 @@ def export_valibra_result(
                 "requirement_semantic_sha256": (
                     requirement_semantic_sha256(runtime.grounding_state)
                 ),
+                "frame_initialization_status": (
+                    runtime.frame_initialization_status
+                ),
+                "frame_initialization_reason": (
+                    runtime.frame_initialization_reason
+                ),
+                "frame_initialization_observation_id": (
+                    runtime.frame_initialization_observation_id
+                ),
                 "phase": runtime.phase,
                 "slots": {
                     "value": len(frame.value_slots),

@@ -1,0 +1,64 @@
+{
+  "baseline_head": "3812b90e68630a0e768f818b13bab8f6e4a61786",
+  "compileall": "passed",
+  "form_schema_sha256": "441a59c410a99ef0db53b8e974aeeeaea1bcd1735aabdc3cb51f59e0b6e069a2",
+  "generated_at_utc": "2026-08-13T11:25:19Z",
+  "git_diff_check": "passed",
+  "grounding_configuration_sha256": "83ba93c060b110a0e48485f8d5083052d96a67c8a79892ab77024be3c4b5ccd9",
+  "initialization_contract": {
+    "empty_reasons": [
+      "insufficient_information",
+      "no_extractable_requirement"
+    ],
+    "failed_reasons": [
+      "configuration_error",
+      "provider_error",
+      "timeout",
+      "transport_format_invalid",
+      "json_invalid",
+      "duplicate_json_key",
+      "form_validation_failed",
+      "mention_validation_failed",
+      "patch_rejected",
+      "reducer_rejected",
+      "unexpected_error"
+    ],
+    "legacy_v1_interpretation": "unknown_history",
+    "revisions_changed_by_metadata": false,
+    "statuses": [
+      "not_attempted",
+      "ready",
+      "empty",
+      "failed"
+    ],
+    "v1_zero_slot_llm_result": "failed/form_validation_failed"
+  },
+  "network_or_runtime_calls": {
+    "benchmark": 0,
+    "database": 0,
+    "http_services": 0,
+    "model_provider": 0,
+    "user_simulator": 0
+  },
+  "pip_check": "passed",
+  "prompt_sha256": "5ce6c8061509990d5c42e7e71b7ddfe9c96230eddb00e9c50dff6e591c0d928d",
+  "result": "PASS",
+  "rollback_tag": "p7.1a-pass",
+  "schema_version": "1.0",
+  "source_sha256": {
+    "evaluation.py": "e987b90a5613098f9638f251b787200a9aa0d8027faecbe5c4ee410c2b271f77",
+    "grounding_callbacks.py": "9ac8e04f2a7de9ef57855de26e3027fd804ce81042ade2462048701d34785372",
+    "requirement_grounding/__init__.py": "662736587e42eaccfd56824c77e602ee3efd7500696d08f2b5d5e31b551a6101",
+    "requirement_grounding/models.py": "27e2379e7edb10bfcb6edb1bc8de8e1c78b5ab82ded1d13fe04150e7b4f151f8",
+    "requirement_grounding/service.py": "219ed7207f5a4485fcebe919c04a7d2e669f9c1d9c645e3ec322145c8a204b4c",
+    "requirement_grounding/updater.py": "1e71e5939623c3cb9cceca0ee68448f7e2e58f22b1ddb2a2c38e4c1c79466ce3",
+    "test_k0_models.py": "bd084848b3ae4cea7bc28d4aca4b9b91870c8a915c080712a58e6a3cea8187f8",
+    "test_p71b_frame_initialization_contract.py": "47c3f322c44dd6db9e091afae35ba30b4927c421a3f88cb6cf714e3eeaf8c786"
+  },
+  "tests": {
+    "complete_passed": 356,
+    "complete_total": 356,
+    "focused_passed": 24,
+    "focused_total": 24
+  }
+}

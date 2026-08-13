@@ -51,7 +51,14 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
-from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from shared.model_presets import (
     canonical_json as preset_canonical_json,
@@ -64,6 +71,8 @@ from valibra_agent.requirement_grounding.linguistic_hints import (
     extract_linguistic_hints,
 )
 from valibra_agent.requirement_grounding.models import (
+    FAILED_FRAME_INITIALIZATION_REASONS,
+    FrameInitializationReason,
     GroundingEvidence,
     GroundingSlot,
     KernelModel,
@@ -312,6 +321,16 @@ class GroundingProviderError(RuntimeError):
     """已脱敏的 Provider 错误，不包含响应正文或密钥。"""
 
 
+class LLMFrameUpdateError(ValueError):
+    """LLM Frame 边界的有限失败类型；不依赖异常正文做分类。"""
+
+    def __init__(self, reason: FrameInitializationReason) -> None:
+        if reason not in FAILED_FRAME_INITIALIZATION_REASONS:
+            raise ValueError("LLM Frame update error requires a failure reason")
+        self.reason = reason
+        super().__init__(reason)
+
+
 class AsyncGroundingLLMClient(Protocol):
     """可替换的异步客户端边界，测试时可注入 fake client。"""
 
@@ -542,7 +561,10 @@ class LLMUpdater:
         # 从这里起请求可能已产生费用，因此先标记 attempted。
         telemetry.mark_provider_attempted()
         raw_response = await self.client.complete(request)
-        response = GroundingLLMResponse.model_validate(raw_response)
+        try:
+            response = GroundingLLMResponse.model_validate(raw_response)
+        except ValidationError as exc:
+            raise LLMFrameUpdateError("transport_format_invalid") from exc
         telemetry.capture_usage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
@@ -561,16 +583,26 @@ class LLMUpdater:
             response_sha256=response.response_sha256,
             raw_audit_ref=response.raw_audit_ref,
         )
-        proposal = _parse_llm_frame_response(
-            response.content,
-            observation_text=_observation_text(detached_observation),
-        )
-        return _llm_patch_from_proposal(
-            detached_observation,
-            detached_state,
-            proposal,
-            base_revision=base_revision,
-        )
+        try:
+            proposal = _parse_llm_frame_response(
+                response.content,
+                observation_text=_observation_text(detached_observation),
+            )
+        except LLMFrameUpdateError:
+            raise
+        except ValidationError as exc:
+            raise LLMFrameUpdateError("form_validation_failed") from exc
+        try:
+            return _llm_patch_from_proposal(
+                detached_observation,
+                detached_state,
+                proposal,
+                base_revision=base_revision,
+            )
+        except LLMFrameUpdateError:
+            raise
+        except Exception as exc:
+            raise LLMFrameUpdateError("patch_rejected") from exc
 
 
 def load_grounding_llm_config(
@@ -1340,19 +1372,23 @@ def _parse_llm_frame_response(
     """严格解析模型 JSON：拒绝重复键、NaN 和多余字段。"""
 
     if not isinstance(content, str):
-        raise TypeError("LLM Frame response content must be a string")
+        raise LLMFrameUpdateError("transport_format_invalid")
     if len(content) > MAX_LLM_FRAME_RESPONSE_CHARS:
-        raise ValueError("LLM Frame response exceeds character limit")
+        raise LLMFrameUpdateError("transport_format_invalid")
     try:
         raw = json.loads(
             content,
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_json_constant,
         )
+    except LLMFrameUpdateError:
+        raise
     except json.JSONDecodeError as exc:
-        raise ValueError("LLM Frame response must be strict JSON") from exc
+        raise LLMFrameUpdateError("json_invalid") from exc
+    except ValueError as exc:
+        raise LLMFrameUpdateError("json_invalid") from exc
     if not isinstance(raw, dict):
-        raise ValueError("LLM Frame response root must be an object")
+        raise LLMFrameUpdateError("form_validation_failed")
     proposal = LLMFrameProposal.model_validate(raw)
     _validate_verbatim_mentions(proposal, observation_text)
     return proposal
@@ -1373,9 +1409,9 @@ def _validate_verbatim_mentions(
     )
     for slot in slots:
         if not slot.mention or not slot.mention.strip():
-            raise ValueError("LLM Frame mention must be non-empty")
+            raise LLMFrameUpdateError("mention_validation_failed")
         if slot.mention not in observation_text:
-            raise ValueError("LLM Frame mention is not verbatim Observation text")
+            raise LLMFrameUpdateError("mention_validation_failed")
 
 
 def _reject_duplicate_json_keys(
@@ -1386,7 +1422,7 @@ def _reject_duplicate_json_keys(
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
+            raise LLMFrameUpdateError("duplicate_json_key")
         result[key] = value
     return result
 

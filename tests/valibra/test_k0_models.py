@@ -41,6 +41,9 @@ class K0ModelTests(unittest.TestCase):
                 "schema_version": "1.0",
                 "grounding_revision": 0,
                 "requirement_revision": 0,
+                "frame_initialization_status": "not_attempted",
+                "frame_initialization_reason": None,
+                "frame_initialization_observation_id": None,
                 "phase": 1,
                 "grounding_state": {
                     "requirement_frame": {

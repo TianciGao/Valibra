@@ -39,6 +39,45 @@ Identifier = Annotated[
 ]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Phase = Literal[1, 2]
+FrameInitializationStatus = Literal[
+    "not_attempted",
+    "ready",
+    "empty",
+    "failed",
+]
+FrameInitializationReason = Literal[
+    "insufficient_information",
+    "no_extractable_requirement",
+    "configuration_error",
+    "provider_error",
+    "timeout",
+    "transport_format_invalid",
+    "json_invalid",
+    "duplicate_json_key",
+    "form_validation_failed",
+    "mention_validation_failed",
+    "patch_rejected",
+    "reducer_rejected",
+    "unexpected_error",
+]
+EMPTY_FRAME_INITIALIZATION_REASONS = frozenset(
+    {"insufficient_information", "no_extractable_requirement"}
+)
+FAILED_FRAME_INITIALIZATION_REASONS = frozenset(
+    {
+        "configuration_error",
+        "provider_error",
+        "timeout",
+        "transport_format_invalid",
+        "json_invalid",
+        "duplicate_json_key",
+        "form_validation_failed",
+        "mention_validation_failed",
+        "patch_rejected",
+        "reducer_rejected",
+        "unexpected_error",
+    }
+)
 GroundingStatus = Literal[
     "missing",
     "hypothesized",
@@ -471,6 +510,11 @@ class RequirementGroundingRuntime(KernelModel):
     grounding_revision: Annotated[int, Field(ge=0)] = 0
     # Requirement 的语义版本；不参与 Patch CAS，也不随纯 Evidence/Phase 变化。
     requirement_revision: Annotated[int, Field(ge=0)] = 0
+    # P7.1b 只记录第一次 Phase-1 user_query 的历史结果。旧 V1 缺失字段
+    # 时的默认值仅表示历史未知，不能解释成“从未尝试”。
+    frame_initialization_status: FrameInitializationStatus = "not_attempted"
+    frame_initialization_reason: FrameInitializationReason | None = None
+    frame_initialization_observation_id: Digest | None = None
     phase: Phase = 1
     grounding_state: RequirementGroundingState = Field(
         default_factory=RequirementGroundingState
@@ -496,6 +540,29 @@ class RequirementGroundingRuntime(KernelModel):
         for key, pending in self.pending_tool_calls.items():
             if key != pending.function_call_id:
                 raise ValueError("pending_tool_calls key must match function_call_id")
+        status = self.frame_initialization_status
+        reason = self.frame_initialization_reason
+        observation_id = self.frame_initialization_observation_id
+        if status == "not_attempted":
+            if reason is not None or observation_id is not None:
+                raise ValueError(
+                    "not_attempted initialization cannot have reason or observation"
+                )
+        elif status == "ready":
+            if reason is not None or observation_id is None:
+                raise ValueError(
+                    "ready initialization requires observation and no reason"
+                )
+        elif status == "empty":
+            if reason not in EMPTY_FRAME_INITIALIZATION_REASONS or observation_id is None:
+                raise ValueError(
+                    "empty initialization requires an empty reason and observation"
+                )
+        elif status == "failed":
+            if reason not in FAILED_FRAME_INITIALIZATION_REASONS or observation_id is None:
+                raise ValueError(
+                    "failed initialization requires a failure reason and observation"
+                )
         return self
 
 

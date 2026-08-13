@@ -24,6 +24,7 @@ from valibra_agent.requirement_grounding.evidence_bridge import (
     EvidenceBridgeUpdater,
 )
 from valibra_agent.requirement_grounding.models import (
+    FrameInitializationReason,
     Observation,
     PendingToolCall,
     RequirementGroundingRuntime,
@@ -50,6 +51,7 @@ from valibra_agent.requirement_grounding.service import (
     process_observation_with_llm,
     process_phase_transition,
     remove_pending_tool_call,
+    set_frame_initialization_result,
 )
 from valibra_agent.requirement_grounding.telemetry import record_failure
 from valibra_agent.requirement_grounding.updater import (
@@ -76,6 +78,9 @@ else:
 
 GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
 GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
+GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY = (
+    "valibra:frame_initialization_legacy_unknown"
+)
 SHADOW_AUDIT_KEY = "valibra_shadow"
 REQUIREMENT_VIEW_AUDIT_KEY = "valibra_requirement_view"
 GROUNDING_UPDATE_AUDIT_KEY = "valibra_grounding_update"
@@ -277,6 +282,7 @@ async def before_model_callback(
                     "requirement_semantic_sha256": (
                         requirement_semantic_sha256(runtime.grounding_state)
                     ),
+                    **_frame_initialization_summary(runtime),
                 }
             )
             if not view_status["configuration_valid"]:
@@ -498,7 +504,7 @@ async def after_tool_callback(
             invocation_id=_valid_invocation_id(tool_context),
             tool_name=tool_name,
         )
-        runtime, result_status, llm_audit = await _process_shadow_observation(
+        runtime, result_status, llm_audit, _ = await _process_shadow_observation(
             runtime,
             observation,
         )
@@ -567,7 +573,7 @@ async def after_tool_callback(
                         invocation_id=_valid_invocation_id(tool_context),
                         tool_name=tool_name,
                     )
-                    runtime, follow_up_status, follow_up_llm_audit = (
+                    runtime, follow_up_status, follow_up_llm_audit, _ = (
                         await _process_shadow_observation(
                             runtime,
                             follow_up_observation,
@@ -606,6 +612,7 @@ async def after_tool_callback(
             "requirement_semantic_sha256": requirement_semantic_sha256(
                 runtime.grounding_state
             ),
+            **_frame_initialization_summary(runtime),
             "runtime_bytes": _runtime_bytes(runtime),
         }
         if llm_audit is not None:
@@ -634,6 +641,7 @@ async def after_tool_callback(
             "requirement_semantic_sha256": requirement_semantic_sha256(
                 runtime.grounding_state
             ),
+            **_frame_initialization_summary(runtime),
             "runtime_bytes": _runtime_bytes(runtime),
         }
     finally:
@@ -681,7 +689,7 @@ async def on_tool_error_callback(
             invocation_id=_valid_invocation_id(tool_context),
             tool_name=tool_name,
         )
-        runtime, _, _ = await _process_shadow_observation(runtime, observation)
+        runtime, _, _, _ = await _process_shadow_observation(runtime, observation)
         runtime = record_failure(
             runtime,
             stage="service",
@@ -751,10 +759,64 @@ async def _consume_bound_user_message(
         raw=bound.message,
         summary=_user_message_summary(bound.message),
     )
-    runtime, status, llm_audit = await _process_shadow_observation(
-        _ensure_runtime(state),
-        observation,
+    raw_runtime = state.get(GROUNDING_RUNTIME_KEY)
+    if _runtime_lacks_initialization_contract(raw_runtime):
+        # 这是 Session 控制标记，不进入 Runtime/Frame/Prompt。必须跨轮保留，
+        # 防止旧 V1 默认字段写回后把第二条消息伪装成“首次初始化”。
+        state[GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY] = True
+    initialization_contract_known = not bool(
+        state.get(GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY, False)
     )
+    original_runtime = _ensure_runtime(state)
+    initialization_pending = (
+        observation.phase == 1
+        and initialization_contract_known
+        and original_runtime.frame_initialization_status == "not_attempted"
+    )
+    updater_mode = _requested_updater_mode()
+    try:
+        runtime, status, llm_audit, failure_reason = (
+            await _process_shadow_observation(
+                original_runtime,
+                observation,
+            )
+        )
+    except Exception as exc:
+        runtime = record_failure(
+            original_runtime,
+            stage="service",
+            exception=exc,
+            sequence=observation.sequence,
+            observation_id=observation.observation_id,
+            metric_namespace=("llm" if updater_mode == "llm" else "generic"),
+        )
+        status = "failed"
+        llm_audit = None
+        failure_reason = "unexpected_error"
+    if initialization_pending and status in {"processed", "failed"}:
+        slot_count = _frame_slot_count(runtime)
+        if status == "processed" and slot_count > 0:
+            initialization_status = "ready"
+            initialization_reason = None
+        elif status == "processed":
+            # P7.1b 仍使用 V1 Form，零 Slot 没有显式 proposal_outcome。
+            # 因此不能猜成 empty；P7.1c 才会让两个 empty 原因可达。
+            initialization_status = "failed"
+            initialization_reason = (
+                "form_validation_failed"
+                if updater_mode == "llm"
+                else "unexpected_error"
+            )
+            status = "failed"
+        else:
+            initialization_status = "failed"
+            initialization_reason = failure_reason or "unexpected_error"
+        runtime = set_frame_initialization_result(
+            runtime,
+            status=initialization_status,
+            reason=initialization_reason,
+            observation=observation,
+        )
     _store_runtime(state, runtime)
     audit = {
         "observation_id": observation.observation_id,
@@ -766,6 +828,7 @@ async def _consume_bound_user_message(
         "requirement_semantic_sha256": requirement_semantic_sha256(
             runtime.grounding_state
         ),
+        **_frame_initialization_summary(runtime),
     }
     if llm_audit is not None:
         audit["llm"] = llm_audit
@@ -775,7 +838,12 @@ async def _consume_bound_user_message(
 async def _process_shadow_observation(
     runtime: RequirementGroundingRuntime,
     observation: Observation,
-) -> tuple[RequirementGroundingRuntime, str, dict[str, Any] | None]:
+) -> tuple[
+    RequirementGroundingRuntime,
+    str,
+    dict[str, Any] | None,
+    FrameInitializationReason | None,
+]:
     """按精确模式处理 Observation；错误只写有限 telemetry，不降级到 Rule。"""
 
     if observation.observation_type in EVIDENCE_OBSERVATION_TYPES:
@@ -784,7 +852,7 @@ async def _process_shadow_observation(
             observation,
             updater=_EVIDENCE_UPDATER,
         )
-        return result.runtime, result.status, None
+        return result.runtime, result.status, None, result.failure_reason
 
     if observation.observation_type == "tool_error":
         result = process_observation(
@@ -792,7 +860,7 @@ async def _process_shadow_observation(
             observation,
             updater=_NOOP_UPDATER,
         )
-        return result.runtime, result.status, None
+        return result.runtime, result.status, None, result.failure_reason
 
     mode = _requested_updater_mode()
     if mode == "rule":
@@ -801,7 +869,7 @@ async def _process_shadow_observation(
             observation,
             updater=_RULE_UPDATER,
         )
-        return result.runtime, result.status, None
+        return result.runtime, result.status, None, result.failure_reason
 
     if mode == "invalid":
         failed = record_failure(
@@ -813,7 +881,7 @@ async def _process_shadow_observation(
             function_call_id=observation.function_call_id,
             metric_namespace="llm",
         )
-        return failed, "failed", None
+        return failed, "failed", None, "configuration_error"
 
     if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
         # 非用户 Observation 只记生命周期，不调用模型也不消耗 LLM call budget。
@@ -822,7 +890,7 @@ async def _process_shadow_observation(
             observation,
             updater=_NOOP_UPDATER,
         )
-        return result.runtime, result.status, None
+        return result.runtime, result.status, None, result.failure_reason
 
     try:
         updater = _build_llm_updater()
@@ -836,7 +904,7 @@ async def _process_shadow_observation(
             function_call_id=observation.function_call_id,
             metric_namespace="llm",
         )
-        return failed, "failed", None
+        return failed, "failed", None, "configuration_error"
 
     result = await process_observation_with_llm(
         runtime,
@@ -847,7 +915,48 @@ async def _process_shadow_observation(
         result.runtime,
         result.status,
         _bounded_llm_audit(result.llm_audit),
+        result.failure_reason,
     )
+
+
+def _frame_slot_count(runtime: RequirementGroundingRuntime) -> int:
+    frame = runtime.grounding_state.requirement_frame
+    return (
+        len(frame.value_slots)
+        + len(frame.schema_slots)
+        + len(frame.operation_slots)
+    )
+
+
+def _runtime_lacks_initialization_contract(raw_runtime: Any) -> bool:
+    """识别旧 V1 shape；None 表示本版本新建 Session，不属于 legacy。"""
+
+    if raw_runtime is None or isinstance(raw_runtime, RequirementGroundingRuntime):
+        return False
+    if not isinstance(raw_runtime, Mapping):
+        return True
+    return not all(
+        name in raw_runtime
+        for name in (
+            "frame_initialization_status",
+            "frame_initialization_reason",
+            "frame_initialization_observation_id",
+        )
+    )
+
+
+def _frame_initialization_summary(
+    runtime: RequirementGroundingRuntime,
+) -> dict[str, Any]:
+    """返回有界初始化历史；不包含 Observation 或 Provider 正文。"""
+
+    return {
+        "frame_initialization_status": runtime.frame_initialization_status,
+        "frame_initialization_reason": runtime.frame_initialization_reason,
+        "frame_initialization_observation_id": (
+            runtime.frame_initialization_observation_id
+        ),
+    }
 
 
 def _bounded_llm_audit(audit: Any) -> dict[str, Any]:

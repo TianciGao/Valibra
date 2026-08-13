@@ -11,6 +11,9 @@ from typing import Literal, Protocol
 from pydantic import Field
 
 from valibra_agent.requirement_grounding.models import (
+    FAILED_FRAME_INITIALIZATION_REASONS,
+    FrameInitializationReason,
+    FrameInitializationStatus,
     KernelModel,
     Observation,
     PendingToolCall,
@@ -30,6 +33,8 @@ from valibra_agent.requirement_grounding.telemetry import (
 )
 from valibra_agent.requirement_grounding.updater import (
     GROUNDING_LLM_OBSERVATION_TYPES,
+    GroundingProviderError,
+    LLMFrameUpdateError,
     LLMUpdater,
     NoOpUpdater,
 )
@@ -59,6 +64,7 @@ class GroundingServiceResult(KernelModel):
     status: Literal["processed", "duplicate", "failed"]
     runtime: RequirementGroundingRuntime
     patch_id: str | None = Field(default=None, max_length=128)
+    failure_reason: FrameInitializationReason | None = None
 
 
 class LLMGroundingServiceResult(KernelModel):
@@ -68,10 +74,68 @@ class LLMGroundingServiceResult(KernelModel):
     runtime: RequirementGroundingRuntime
     patch_id: str | None = Field(default=None, max_length=128)
     llm_audit: LLMCallAudit
+    failure_reason: FrameInitializationReason | None = None
 
 
 class GroundingControlError(ValueError):
     """Pending 等运行控制状态的修改不合法。"""
+
+
+def set_frame_initialization_result(
+    runtime: RequirementGroundingRuntime,
+    *,
+    status: FrameInitializationStatus,
+    reason: FrameInitializationReason | None,
+    observation: Observation,
+) -> RequirementGroundingRuntime:
+    """原子记录第一次 Phase-1 user_query 的终态，不推动两个 revision。"""
+
+    if observation.observation_type != "user_query" or observation.phase != 1:
+        raise GroundingControlError(
+            "frame initialization requires a Phase-1 user_query Observation"
+        )
+    observation_id = observation.observation_id
+
+    current = (
+        runtime.frame_initialization_status,
+        runtime.frame_initialization_reason,
+        runtime.frame_initialization_observation_id,
+    )
+    requested = (status, reason, observation_id)
+    if current[0] != "not_attempted":
+        if current == requested:
+            return runtime
+        raise GroundingControlError("frame initialization result is already terminal")
+    if status == "not_attempted":
+        raise GroundingControlError("frame initialization must enter a terminal state")
+
+    frame = runtime.grounding_state.requirement_frame
+    slot_count = (
+        len(frame.value_slots)
+        + len(frame.schema_slots)
+        + len(frame.operation_slots)
+    )
+    if status == "ready" and slot_count == 0:
+        raise GroundingControlError("ready initialization requires at least one Slot")
+    if status in {"empty", "failed"} and slot_count != 0:
+        raise GroundingControlError(
+            f"{status} initialization cannot retain an initial Slot"
+        )
+    if status == "failed" and reason not in FAILED_FRAME_INITIALIZATION_REASONS:
+        raise GroundingControlError("failed initialization requires a failure reason")
+
+    try:
+        result = _validated_runtime_copy(
+            runtime,
+            frame_initialization_status=status,
+            frame_initialization_reason=reason,
+            frame_initialization_observation_id=observation_id,
+        )
+    except Exception as exc:
+        raise GroundingControlError("invalid frame initialization result") from exc
+    _assert_revision_unchanged(runtime, result)
+    validate_runtime(result)
+    return result
 
 
 def add_pending_tool_call(
@@ -178,6 +242,7 @@ def process_phase_transition(
             status="failed",
             runtime=failed,
             patch_id=patch.patch_id,
+            failure_reason="reducer_rejected",
         )
 
 
@@ -223,7 +288,11 @@ def process_observation(
             observation_id=observation.observation_id,
             function_call_id=observation.function_call_id,
         )
-        return GroundingServiceResult(status="failed", runtime=failed)
+        return GroundingServiceResult(
+            status="failed",
+            runtime=failed,
+            failure_reason="unexpected_error",
+        )
 
     try:
         reduced = reducer(working, patch)
@@ -252,6 +321,7 @@ def process_observation(
             status="failed",
             runtime=failed,
             patch_id=patch.patch_id,
+            failure_reason="reducer_rejected",
         )
 
 
@@ -310,6 +380,7 @@ async def process_observation_with_llm(
         return LLMGroundingServiceResult(
             status="failed",
             runtime=failed,
+            failure_reason="configuration_error",
             llm_audit=_llm_audit(
                 updater,
                 status="limit_rejected",
@@ -358,6 +429,7 @@ async def process_observation_with_llm(
         return LLMGroundingServiceResult(
             status="failed",
             runtime=failed,
+            failure_reason="timeout",
             llm_audit=_llm_audit(
                 updater,
                 status="timed_out",
@@ -370,6 +442,7 @@ async def process_observation_with_llm(
         )
     except Exception as exc:
         latency_ms = _elapsed_ms(monotonic, started)
+        failure_reason = _llm_failure_reason(exc)
         failed = increment_llm_call_metrics(
             counted,
             recorder,
@@ -388,6 +461,7 @@ async def process_observation_with_llm(
         return LLMGroundingServiceResult(
             status="failed",
             runtime=failed,
+            failure_reason=failure_reason,
             llm_audit=_llm_audit(
                 updater,
                 status="failed",
@@ -446,6 +520,7 @@ async def process_observation_with_llm(
             status="failed",
             runtime=failed,
             patch_id=patch.patch_id,
+            failure_reason="reducer_rejected",
             llm_audit=_llm_audit(
                 updater,
                 status="failed",
@@ -455,6 +530,16 @@ async def process_observation_with_llm(
                 error=exc,
             ),
         )
+
+
+def _llm_failure_reason(exc: BaseException) -> FrameInitializationReason:
+    """按异常类型映射有限原因；禁止从错误消息文本猜测。"""
+
+    if isinstance(exc, GroundingProviderError):
+        return "provider_error"
+    if isinstance(exc, LLMFrameUpdateError):
+        return exc.reason
+    return "unexpected_error"
 
 
 def _elapsed_ms(monotonic: Callable[[], float], started: float) -> float:
