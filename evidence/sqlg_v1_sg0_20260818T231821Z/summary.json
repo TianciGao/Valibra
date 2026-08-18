@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG0",
+  "status": "PASS",
+  "base": {
+    "branch": "research/main",
+    "head": "22dbf71de443843ec2945fc929022e79f50a3d2e",
+    "rollback_tag": "p7.1d-pass",
+    "remote": "https://github.com/TianciGao/Valibra.git"
+  },
+  "development_branch": "research/sql-grounding-v1",
+  "migration_boundary": {
+    "old_runtime_key": "valibra:grounding_runtime",
+    "new_runtime_key": "valibra:sql_grounding_runtime",
+    "automatic_migration": false,
+    "old_requirement_grounding_read_only": true,
+    "sql_grounding_business_code_created": false
+  },
+  "checks": {
+    "pip_check": "PASS",
+    "unittest": {
+      "passed": 376,
+      "total": 376
+    },
+    "compileall": "PASS",
+    "git_diff_check": "PASS",
+    "system_agent_diff": false,
+    "requirement_grounding_diff": false,
+    "sensitive_information_findings": 0,
+    "large_file_findings": 0,
+    "unrelated_diff_findings": 0
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http_services": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "source_sha256": {
+    "AGENTS.md": "68741955b87226efa18809bc08b9df19f76d9485c5ca37994aae5680d36ff9b5",
+    "valibra_agent/requirement_grounding/models.py": "c2d38a33a0ef662c96401c42eceac38443db08cea1dce2e2aa724d82f228f3c6",
+    "valibra_agent/grounding_callbacks.py": "fdf5a5158d84caa10ed39ba7ed450e6899945a16f2c809844c9f43e23653b43e",
+    "system_agent/tools.py": "a1d7c79b4bbdad4d4ff8bfd718a511b7cb5ecabdb824ecc1074fb76c14a1c760"
+  },
+  "generated_at_utc": "2026-08-18T23:18:21Z"
+}
