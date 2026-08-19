@@ -12,6 +12,7 @@ from valibra_agent.sql_grounding import (
     FIELD_EXPRESSION_FUNCTION_WHITELIST,
     LEGACY_GROUNDING_RUNTIME_KEY,
     RELATION_EXPRESSION_AST_WHITELIST,
+    SAME_TABLE_MULTI_RECORD_AST_WHITELIST,
     SQLGLOT_VERSION,
     SQL_GROUNDING_RUNTIME_KEY,
     ColumnMapping,
@@ -55,6 +56,7 @@ def validation_context() -> ValidationContext:
             "encounters",
             "patients",
             "planets",
+            "orbital_characteristics",
         }
     )
     columns = frozenset(
@@ -79,7 +81,8 @@ def validation_context() -> ValidationContext:
             "prediction_events.estimated_subscription_date",
             "audits.REMED_DUE",
             "month_targets.audit_month",
-            "stars.rn",
+            "orbital_characteristics.orbitalref",
+            "orbital_characteristics.period",
             "encounters.time_mark",
             "encounters.pat_ref",
             "patients.pat_key",
@@ -216,7 +219,7 @@ class ExpressionContractTests(unittest.TestCase):
             with self.subTest(expression=expression):
                 self.assertEqual(canonicalize_field_expression(expression), expression)
 
-    def test_equal_normalized_range_temporal_and_ordinal_relations(self) -> None:
+    def test_equal_normalized_range_and_temporal_relations(self) -> None:
         examples = (
             "plants.sitekey = plant_record.sitetie",
             "LOWER(robot_details.mfgnameval) = predictive_models.mfgnameval_lower",
@@ -225,7 +228,6 @@ class ExpressionContractTests(unittest.TestCase):
             "score_bands.score < score_rules.max_exclusive OR (score_rules.include_max AND score_bands.score <= score_rules.max_exclusive)",
             "incidents.time_mark < prediction_events.estimated_subscription_date",
             "TO_CHAR(audits.REMED_DUE, 'YYYY-MM') = month_targets.audit_month",
-            "stars.rn = stars.rn - 1",
         )
         for expression in examples:
             with self.subTest(expression=expression):
@@ -304,6 +306,20 @@ class ExpressionContractTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
+            SAME_TABLE_MULTI_RECORD_AST_WHITELIST,
+            frozenset(
+                {
+                    "Column",
+                    "Identifier",
+                    "Lag",
+                    "NEQ",
+                    "Order",
+                    "Ordered",
+                    "Window",
+                }
+            ),
+        )
+        self.assertEqual(
             ALLOWED_CAST_TYPES,
             frozenset(
                 {
@@ -345,6 +361,58 @@ class ExpressionContractTests(unittest.TestCase):
                 SQLGroundingValidationError
             ):
                 canonicalize_relation_expression(expression)
+
+    def test_audited_same_table_adjacent_record_relation_is_self_contained(
+        self,
+    ) -> None:
+        audited = (
+            "LAG(orbital_characteristics.orbitalref) OVER (PARTITION BY planets.hostlink ORDER BY orbital_characteristics.period) <> orbital_characteristics.orbitalref"
+        )
+        self.assertEqual(canonicalize_relation_expression(audited), audited)
+        state = SQLGroundingState(
+            tables=("orbital_characteristics", "planets"),
+            join_keys=(audited,),
+        )
+        self.assertIs(validate_sql_grounding_state(state, validation_context()), state)
+
+    def test_same_row_and_unbounded_same_table_forms_are_rejected(self) -> None:
+        rejected = (
+            "stars.rn = stars.rn - 1",
+            "ROW_NUMBER() OVER (PARTITION BY planets.hostlink ORDER BY orbital_characteristics.period) <> orbital_characteristics.orbitalref",
+            "LAG(orbital_characteristics.orbitalref, 2) OVER (PARTITION BY planets.hostlink ORDER BY orbital_characteristics.period) <> orbital_characteristics.orbitalref",
+            "LAG(orbital_characteristics.orbitalref) OVER (PARTITION BY planets.hostlink ORDER BY orbital_characteristics.period DESC) <> orbital_characteristics.orbitalref",
+            "LAG(orbital_characteristics.orbitalref) OVER (PARTITION BY planets.hostlink ORDER BY orbital_characteristics.period, orbital_characteristics.orbitalref) <> orbital_characteristics.orbitalref",
+            "EXISTS(SELECT 1 FROM orbital_characteristics AS earlier_record CROSS JOIN orbital_characteristics AS later_record WHERE earlier_record.orbitalref <> later_record.orbitalref)",
+        )
+        for expression in rejected:
+            with self.subTest(expression=expression), self.assertRaises(
+                SQLGroundingValidationError
+            ):
+                canonicalize_relation_expression(expression)
+
+        with self.assertRaisesRegex(ValidationError, "absent from"):
+            SQLGroundingState(
+                tables=("orbital_characteristics", "planets"),
+                join_keys=("p1.rnum = p2.rnum - 1",),
+            )
+
+        hidden_alias_state = SQLGroundingState(
+            tables=("p1", "p2"),
+            join_keys=("p1.rnum = p2.rnum - 1",),
+        )
+        with self.assertRaisesRegex(SQLGroundingValidationError, "unknown table p1"):
+            validate_sql_grounding_state(hidden_alias_state, validation_context())
+
+        with self.assertRaisesRegex(ValidationError, "planets"):
+            SQLGroundingState(
+                tables=("orbital_characteristics",),
+                join_keys=(
+                    "LAG(orbital_characteristics.orbitalref) OVER "
+                    "(PARTITION BY planets.hostlink ORDER BY "
+                    "orbital_characteristics.period) <> "
+                    "orbital_characteristics.orbitalref",
+                ),
+            )
 
 
 class SelfContainedAndCrossDimensionTests(unittest.TestCase):
@@ -735,8 +803,9 @@ class StateDiffAuthorizationTests(unittest.TestCase):
 
 class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
     def test_initial_response_cannot_focus_none_while_dimension_is_null(self) -> None:
+        partial_state = SQLGroundingState(tables=("plants",))
         response = GroundingLLMResponse(
-            sql_grounding_state=SQLGroundingState(tables=("plants",)),
+            sql_grounding_state=partial_state,
             next_focus_dimension="none",
         )
         with self.assertRaisesRegex(SQLGroundingValidationError, "dimension is null"):
@@ -745,6 +814,39 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
                 stage="INITIAL_GROUNDING",
                 context=validation_context(),
             )
+        with self.assertRaisesRegex(ValidationError, "cannot focus none"):
+            GroundingRuntime(
+                stage="INITIAL_GROUNDING",
+                focus_dimension="none",
+                grounding_state=partial_state,
+            )
+        for focus in (
+            "tables",
+            "join_keys",
+            "column_mapping",
+            "domain_knowledge",
+        ):
+            with self.subTest(focus=focus):
+                candidate = GroundingLLMResponse(
+                    sql_grounding_state=partial_state,
+                    next_focus_dimension=focus,
+                )
+                self.assertIs(
+                    validate_grounding_llm_response(
+                        candidate,
+                        stage="INITIAL_GROUNDING",
+                        context=validation_context(),
+                    ),
+                    candidate,
+                )
+                self.assertEqual(
+                    GroundingRuntime(
+                        stage="INITIAL_GROUNDING",
+                        focus_dimension=focus,
+                        grounding_state=partial_state,
+                    ).focus_dimension,
+                    focus,
+                )
 
     def test_initial_complete_and_repair_focus_contracts(self) -> None:
         context = validation_context()
@@ -760,6 +862,30 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
             ),
             initial,
         )
+        with self.assertRaisesRegex(
+            SQLGroundingValidationError,
+            "must return none after all dimensions are evaluated",
+        ):
+            validate_grounding_llm_response(
+                initial.model_copy(update={"next_focus_dimension": "tables"}),
+                stage="INITIAL_GROUNDING",
+                context=context,
+            )
+        with self.assertRaisesRegex(
+            ValidationError,
+            "must focus none after all dimensions are evaluated",
+        ):
+            GroundingRuntime(
+                stage="INITIAL_GROUNDING",
+                focus_dimension="tables",
+                grounding_state=complete_state(),
+            )
+        completed_runtime = GroundingRuntime(
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=complete_state(),
+        )
+        self.assertEqual(completed_runtime.focus_dimension, "none")
         repair = GroundingLLMResponse(
             sql_grounding_state=complete_state(),
             next_focus_dimension="join_keys",

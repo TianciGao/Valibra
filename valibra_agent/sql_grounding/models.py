@@ -171,6 +171,17 @@ CORRELATED_RELATION_AST_WHITELIST = frozenset(
         "Where",
     }
 )
+SAME_TABLE_MULTI_RECORD_AST_WHITELIST = frozenset(
+    {
+        "Column",
+        "Identifier",
+        "Lag",
+        "NEQ",
+        "Order",
+        "Ordered",
+        "Window",
+    }
+)
 _RELATION_ROOTS = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between, exp.And, exp.Or)
 
 
@@ -393,14 +404,21 @@ class GroundingRuntime(ContractModel):
 
     @model_validator(mode="after")
     def validate_initial_focus(self) -> "GroundingRuntime":
-        if (
-            self.stage == "INITIAL_GROUNDING"
-            and not self.grounding_state.all_dimensions_evaluated
-            and self.focus_dimension == "none"
-        ):
-            raise ValueError(
-                "INITIAL_GROUNDING cannot focus none while a dimension is null"
-            )
+        if self.stage == "INITIAL_GROUNDING":
+            if (
+                not self.grounding_state.all_dimensions_evaluated
+                and self.focus_dimension == "none"
+            ):
+                raise ValueError(
+                    "INITIAL_GROUNDING cannot focus none while a dimension is null"
+                )
+            if (
+                self.grounding_state.all_dimensions_evaluated
+                and self.focus_dimension != "none"
+            ):
+                raise ValueError(
+                    "INITIAL_GROUNDING must focus none after all dimensions are evaluated"
+                )
         return self
 
 
@@ -738,23 +756,104 @@ def _require_correlated_relation_shape(
     )
 
 
-def _is_audited_ordinal_self_relation(expression: exp.Expression) -> bool:
-    if not isinstance(expression, exp.EQ):
-        return False
-    left = expression.left
-    right = expression.right
-    if not isinstance(left, exp.Column) or not isinstance(right, exp.Sub):
-        return False
-    if not isinstance(right.left, exp.Column) or not isinstance(
-        right.right, exp.Literal
+def _require_same_table_multi_record_shape(
+    expression: exp.Expression,
+) -> None:
+    """Accept only the audited adjacent-record window relation.
+
+    Full-600 audit cases ``planets_data_11`` and ``planets_data_M_9`` pair
+    adjacent rows within one host partition after ordering by orbital period.
+    ``LAG`` makes the previous record instance explicit without a hidden alias,
+    SELECT, JOIN fragment, or derived ``rn`` identifier in persisted State.
+    """
+
+    if not isinstance(expression, exp.NEQ):
+        raise SQLGroundingValidationError(
+            "same-table multi-record relation must compare LAG(record_id) "
+            "with the current record_id"
+        )
+    if not isinstance(expression.left, exp.Window) or not isinstance(
+        expression.right, exp.Column
     ):
-        return False
-    return (
-        right.right.is_number
-        and right.right.this == "1"
-        and _qualified_column_table(left) == _qualified_column_table(right.left)
-        and left.name == right.left.name
-    )
+        raise SQLGroundingValidationError(
+            "same-table multi-record relation must be "
+            "LAG(table.record_id) OVER (...) <> table.record_id"
+        )
+
+    window = expression.left
+    if len(list(expression.find_all(exp.Window))) != 1 or len(
+        list(expression.find_all(exp.Lag))
+    ) != 1:
+        raise SQLGroundingValidationError(
+            "same-table multi-record relation must contain exactly one LAG window"
+        )
+    if any(
+        value not in (None, [], False, "OVER")
+        for key, value in window.args.items()
+        if key not in {"this", "partition_by", "order", "over"}
+    ):
+        raise SQLGroundingValidationError(
+            "same-table multi-record window contains an unapproved clause"
+        )
+
+    lag = window.this
+    if not isinstance(lag, exp.Lag) or not isinstance(lag.this, exp.Column):
+        raise SQLGroundingValidationError(
+            "same-table multi-record window must apply LAG to one record identifier"
+        )
+    if any(
+        value not in (None, [], False)
+        for key, value in lag.args.items()
+        if key != "this"
+    ):
+        raise SQLGroundingValidationError(
+            "same-table multi-record LAG cannot use offset or default arguments"
+        )
+    previous_record_id = lag.this
+    current_record_id = expression.right
+    if previous_record_id.sql(dialect="postgres") != current_record_id.sql(
+        dialect="postgres"
+    ):
+        raise SQLGroundingValidationError(
+            "LAG and current record must use the same real record identifier"
+        )
+
+    partition_by = window.args.get("partition_by")
+    if not isinstance(partition_by, list) or len(partition_by) != 1 or not isinstance(
+        partition_by[0], exp.Column
+    ):
+        raise SQLGroundingValidationError(
+            "same-table multi-record window requires exactly one partition column"
+        )
+    order = window.args.get("order")
+    if not isinstance(order, exp.Order) or len(order.expressions) != 1:
+        raise SQLGroundingValidationError(
+            "same-table multi-record window requires exactly one order column"
+        )
+    ordered = order.expressions[0]
+    if not isinstance(ordered, exp.Ordered) or not isinstance(
+        ordered.this, exp.Column
+    ):
+        raise SQLGroundingValidationError(
+            "same-table multi-record window order must be one real column"
+        )
+    if ordered.args.get("desc") not in (None, False) or ordered.args.get(
+        "nulls_first"
+    ) not in (None, False):
+        raise SQLGroundingValidationError(
+            "same-table multi-record window must use canonical ascending order"
+        )
+
+    record_table = _qualified_column_table(previous_record_id)
+    if _qualified_column_table(current_record_id) != record_table:
+        raise SQLGroundingValidationError(
+            "LAG and current record must belong to the same real table"
+        )
+    if _qualified_column_table(ordered.this) != record_table:
+        raise SQLGroundingValidationError(
+            "adjacent-record ordering must use the same real record table"
+        )
+    _qualified_column_table(partition_by[0])
 
 
 def _field_real_table_references(value: str) -> frozenset[str]:
@@ -824,6 +923,14 @@ def canonicalize_relation_expression(value: str) -> str:
         )
         _require_correlated_relation_shape(expression)
         return _require_canonical(value, expression, label="relation expression")
+    if any(expression.find_all(exp.Window)) or any(expression.find_all(exp.Lag)):
+        _validate_ast(
+            expression,
+            allowed_nodes=SAME_TABLE_MULTI_RECORD_AST_WHITELIST,
+            label="same-table multi-record relation expression",
+        )
+        _require_same_table_multi_record_shape(expression)
+        return _require_canonical(value, expression, label="relation expression")
     if not isinstance(expression, _RELATION_ROOTS):
         raise SQLGroundingValidationError(
             "relation expression must be a comparison or bounded boolean relation"
@@ -838,7 +945,7 @@ def canonicalize_relation_expression(value: str) -> str:
         _qualified_column_table(column)
         for column in expression.find_all(exp.Column)
     }
-    if len(qualifiers) < 2 and not _is_audited_ordinal_self_relation(expression):
+    if len(qualifiers) < 2:
         raise SQLGroundingValidationError(
             "relation expression must relate at least two real qualified tables"
         )
@@ -855,9 +962,7 @@ def canonicalize_relation_expression(value: str) -> str:
             _qualified_column_table(column)
             for column in comparison.find_all(exp.Column)
         }
-        if len(comparison_qualifiers) < 2 and not (
-            comparison is expression and _is_audited_ordinal_self_relation(expression)
-        ):
+        if len(comparison_qualifiers) < 2:
             raise SQLGroundingValidationError(
                 "each relation comparison must connect two real qualified tables"
             )
@@ -974,6 +1079,14 @@ def validate_grounding_llm_response(
     ):
         raise SQLGroundingValidationError(
             "INITIAL_GROUNDING cannot return none while a dimension is null"
+        )
+    if (
+        stage == "INITIAL_GROUNDING"
+        and response.sql_grounding_state.all_dimensions_evaluated
+        and response.next_focus_dimension != "none"
+    ):
+        raise SQLGroundingValidationError(
+            "INITIAL_GROUNDING must return none after all dimensions are evaluated"
         )
     return response
 
