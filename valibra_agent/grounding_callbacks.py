@@ -1,16 +1,16 @@
-"""把可选的 Rule/LLM Grounding 包在 Baseline 回调外层。
+"""SQL Grounding V1 shadow callbacks around the frozen B0 callbacks.
 
-Grounding 记录有限的 Observation 和临时 Frame；仅 ``active`` View 模式会把
-有界 Requirement View 追加到当前模型请求的 system instruction。工具协议、
-Baseline 返回值和完整工具轨迹仍由冻结的 Baseline 独占管理。
+SG3 observes the real ADK lifecycle and drives the new four-dimensional
+``sql_grounding`` service with a deterministic local passthrough updater.  It
+never changes the model request, model response, tool protocol, Bird-Coin,
+submit state machine, or official trajectory.  Control, Attempt Gate, model
+Provider calls, and active View injection are deliberately absent.
 """
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
-import os
 import re
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -18,52 +18,30 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from shared.audit import to_jsonable
-from shared.config import PROJECT_ROOT
-from valibra_agent.requirement_grounding.evidence_bridge import (
-    EVIDENCE_OBSERVATION_TYPES,
-    EvidenceBridgeUpdater,
-)
-from valibra_agent.requirement_grounding.models import (
-    FrameInitializationReason,
-    Observation,
-    PendingToolCall,
-    RequirementGroundingRuntime,
-    migrate_requirement_grounding_runtime,
-)
-from valibra_agent.requirement_grounding.observations import (
-    ObservationNormalizationError,
-    build_observation,
+from valibra_agent.sql_grounding.models import (
+    SQL_GROUNDING_RUNTIME_KEY,
+    GroundingLLMResponse,
+    GroundingRuntime,
+    ValidationContext,
     canonical_json,
-    classify_tool_observation_type,
-    extract_submit_follow_up,
+    sql_grounding_state_sha256,
 )
-from valibra_agent.requirement_grounding.prompt_view import (
-    count_prompt_view_tokens,
-    prompt_view_sha256,
-    render_prompt_view,
+from valibra_agent.sql_grounding.observations import (
+    ObservationType,
+    SQLGroundingObservation,
+    build_sql_grounding_observation,
 )
-from valibra_agent.requirement_grounding.reducer import validate_runtime
-from valibra_agent.requirement_grounding.semantic_projection import (
-    requirement_semantic_sha256,
+from valibra_agent.sql_grounding.prompt_view import render_grounding_view
+from valibra_agent.sql_grounding.service import (
+    SQLGroundingServiceResult,
+    process_sql_grounding_observation,
 )
-from valibra_agent.requirement_grounding.service import (
-    add_pending_tool_call,
-    process_observation,
-    process_observation_with_llm,
-    process_phase_transition,
-    remove_pending_tool_call,
-    set_frame_initialization_result,
-)
-from valibra_agent.requirement_grounding.telemetry import record_failure
-from valibra_agent.requirement_grounding.updater import (
-    GROUNDING_LLM_OBSERVATION_TYPES,
-    LLMFrameProposalOutcome,
-    LLMUpdater,
-    LiteLLMGroundingClient,
-    NoOpUpdater,
-    RuleUpdater,
-    load_grounding_llm_config,
-    load_grounding_provider_config,
+from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
+from valibra_agent.sql_grounding.updater import (
+    SQL_GROUNDING_CONFIGURATION_SHA256,
+    SQL_GROUNDING_FORM_SCHEMA_SHA256,
+    SQL_GROUNDING_PROMPT_SHA256,
+    GroundingUpdaterResult,
 )
 
 if TYPE_CHECKING:
@@ -78,25 +56,30 @@ else:
     ToolContext = Any
 
 
-GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
-GROUNDING_SEQUENCE_KEY = "valibra:grounding_sequence"
+GROUNDING_RUNTIME_KEY = SQL_GROUNDING_RUNTIME_KEY
+GROUNDING_PENDING_KEY = "valibra:sql_grounding_pending"
+GROUNDING_SEQUENCE_KEY = "valibra:sql_grounding_sequence"
+SHADOW_AUDIT_KEY = "valibra_sql_grounding_shadow"
+GROUNDING_VIEW_AUDIT_KEY = "valibra_sql_grounding_view"
+GROUNDING_UPDATE_AUDIT_KEY = "valibra_sql_grounding_update"
+GROUNDING_ERROR_AUDIT_KEY = "valibra:sql_grounding_error_audits"
+
+# The frozen P6 export module imports these names at module load.  They are
+# retained only so that historical, read-only export code remains importable;
+# SG3 never reads either key and never runs the retired semantic core.
 GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY = (
     "valibra:frame_initialization_legacy_unknown"
 )
-SHADOW_AUDIT_KEY = "valibra_shadow"
-REQUIREMENT_VIEW_AUDIT_KEY = "valibra_requirement_view"
-GROUNDING_UPDATE_AUDIT_KEY = "valibra_grounding_update"
-GROUNDING_UPDATER_MODE_ENV = "GROUNDING_UPDATER_MODE"
-GROUNDING_PROMPT_VIEW_MODE_ENV = "GROUNDING_PROMPT_VIEW_MODE"
-
-REQUIREMENT_VIEW_BEGIN = "[VALIBRA REQUIREMENT VIEW BEGIN]"
-REQUIREMENT_VIEW_END = "[VALIBRA REQUIREMENT VIEW END]"
+REQUIREMENT_VIEW_AUDIT_KEY = GROUNDING_VIEW_AUDIT_KEY
 
 _MAX_ARGS_SUMMARY_CHARS = 768
+_MAX_AUDIT_BYTES = 4_096
+_MAX_ERROR_AUDITS = 64
+_MAX_PENDING = 64
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 
-_OBSERVATION_TYPES = {
+_TOOL_OBSERVATION_TYPES: Mapping[str, ObservationType] = {
     "execute_sql": "sql_execution",
     "get_schema": "schema",
     "get_all_column_meanings": "metadata",
@@ -107,128 +90,55 @@ _OBSERVATION_TYPES = {
     "ask_user": "user_answer",
     "submit_sql": "submission",
 }
-_RULE_UPDATER = RuleUpdater()
-_NOOP_UPDATER = NoOpUpdater()
-_EVIDENCE_UPDATER = EvidenceBridgeUpdater()
+_OFFICIAL_TOOL_ERROR_PREFIXES: Mapping[str, tuple[str, ...]] = {
+    "execute_sql": ("SQL Error:", "Error calling DB environment:"),
+    "get_schema": ("Error:",),
+    "get_all_column_meanings": ("Error:",),
+    "get_column_meaning": ("Error:",),
+    "get_all_external_knowledge_names": ("Error:",),
+    "get_knowledge_definition": ("Error:",),
+    "get_all_knowledge_definitions": ("Error:",),
+    "submit_sql": ("Error:",),
+}
+_FOLLOW_UP_PREFIX = "Follow-up question: "
+_BUDGET_PREFIX = "\nBudget remaining: "
 
 
-def _requested_updater_mode(
-    environment: Mapping[str, str] | None = None,
-) -> str:
-    """解析唯一模式开关；不做 trim、大小写或隐式回退。"""
+class _PassthroughSQLGroundingUpdater:
+    """Production SG3 updater: no I/O, no Provider, and no State guesswork."""
 
-    source = environment if environment is not None else os.environ
-    raw_mode = source.get(GROUNDING_UPDATER_MODE_ENV)
-    if raw_mode is None or raw_mode == "":
-        return "rule"
-    if raw_mode == "llm":
-        return "llm"
-    return "invalid"
-
-
-def _grounding_environment(
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """只复制显式 GROUNDING_* 变量，隔离主 Agent 的连接配置。"""
-
-    source = environment if environment is not None else os.environ
-    return {
-        key: str(value)
-        for key, value in source.items()
-        if key.startswith("GROUNDING_")
-    }
-
-
-def _build_llm_updater(
-    environment: Mapping[str, str] | None = None,
-) -> LLMUpdater:
-    """按调用即时构造 LLM Updater；对象和凭据不会进入 Session State。"""
-
-    grounding_environment = _grounding_environment(environment)
-    llm_config = load_grounding_llm_config(
-        PROJECT_ROOT,
-        grounding_environment,
-    )
-    provider_config = load_grounding_provider_config(
-        PROJECT_ROOT,
-        llm_config,
-        grounding_environment,
-    )
-    client = LiteLLMGroundingClient(
-        provider_config,
-        environment=grounding_environment,
-    )
-    return LLMUpdater(client, llm_config)
+    async def propose(
+        self,
+        runtime: GroundingRuntime,
+        observation: SQLGroundingObservation,
+        *,
+        original_query: str,
+        follow_up_query: str | None = None,
+    ) -> GroundingUpdaterResult:
+        del observation, original_query, follow_up_query
+        return GroundingUpdaterResult(
+            response=GroundingLLMResponse(
+                sql_grounding_state=runtime.grounding_state,
+                next_focus_dimension=runtime.focus_dimension,
+            ),
+            telemetry=GroundingLLMTelemetry(
+                attempted=False,
+                status="succeeded",
+                request_sha256="",
+                response_sha256="",
+                prompt_sha256=SQL_GROUNDING_PROMPT_SHA256,
+                form_schema_sha256=SQL_GROUNDING_FORM_SCHEMA_SHA256,
+                configuration_sha256=SQL_GROUNDING_CONFIGURATION_SHA256,
+            ),
+            transport_normalization="none",
+        )
 
 
-def grounding_updater_status(
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """返回 health 可公开的有效模式，不暴露配置内容或凭据。"""
-
-    requested_mode = _requested_updater_mode(environment)
-    if requested_mode == "rule":
-        return {
-            "requested_mode": "rule",
-            "effective_mode": "rule",
-            "configuration_valid": True,
-            "error_type": None,
-        }
-    if requested_mode == "invalid":
-        return {
-            "requested_mode": "invalid",
-            "effective_mode": "invalid",
-            "configuration_valid": False,
-            "error_type": "InvalidUpdaterMode",
-        }
-    try:
-        # 这里只校验冻结配置并构造对象；不会读取密钥内容或发送请求。
-        _build_llm_updater(environment)
-    except Exception as exc:
-        return {
-            "requested_mode": "llm",
-            "effective_mode": "invalid",
-            "configuration_valid": False,
-            "error_type": type(exc).__name__[:128],
-        }
-    return {
-        "requested_mode": "llm",
-        "effective_mode": "llm",
-        "configuration_valid": True,
-        "error_type": None,
-    }
-
-
-def grounding_prompt_view_status(
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """解析独立 View 模式；不做 trim、大小写或隐式回退。"""
-
-    source = environment if environment is not None else os.environ
-    raw_mode = source.get(GROUNDING_PROMPT_VIEW_MODE_ENV)
-    if raw_mode is None or raw_mode == "":
-        mode = "shadow"
-    elif raw_mode in {"off", "shadow", "active"}:
-        mode = raw_mode
-    else:
-        return {
-            "requested_mode": "invalid",
-            "effective_mode": "invalid",
-            "configuration_valid": False,
-            "error_type": "InvalidPromptViewMode",
-        }
-    return {
-        "requested_mode": mode,
-        "effective_mode": mode,
-        "configuration_valid": True,
-        "error_type": None,
-    }
+_SQL_GROUNDING_UPDATER: Any = _PassthroughSQLGroundingUpdater()
 
 
 @dataclass(slots=True)
 class _BoundTurnMessage:
-    """当前异步任务绑定的用户消息，只允许消费一次。"""
-
     task_id: str
     mode: str
     message: str
@@ -236,33 +146,72 @@ class _BoundTurnMessage:
 
 
 @dataclass(frozen=True, slots=True)
-class _ShadowObservationResult:
-    """Grounding 内部处理结果；用命名字段避免 outcome 与 reason 混位。"""
+class _PendingToolCall:
+    function_call_id: str
+    tool_name: str
+    phase_before: Literal[1, 2]
+    args_digest: str
+    args_summary: str
+    sequence: int
 
-    runtime: RequirementGroundingRuntime
-    status: Literal["processed", "duplicate", "failed", "skipped"]
-    llm_audit: dict[str, Any] | None = None
-    failure_reason: FrameInitializationReason | None = None
-    proposal_outcome: LLMFrameProposalOutcome | None = None
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "function_call_id": self.function_call_id,
+            "tool_name": self.tool_name,
+            "phase_before": self.phase_before,
+            "args_digest": self.args_digest,
+            "args_summary": self.args_summary,
+            "sequence": self.sequence,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_PendingToolCall":
+        if not isinstance(payload, dict) or set(payload) != {
+            "function_call_id",
+            "tool_name",
+            "phase_before",
+            "args_digest",
+            "args_summary",
+            "sequence",
+        }:
+            raise ValueError("invalid SQL Grounding pending record")
+        record = cls(**payload)
+        if not _IDENTIFIER_RE.fullmatch(record.function_call_id):
+            raise ValueError("invalid pending function_call_id")
+        if not record.tool_name or len(record.tool_name) > 64:
+            raise ValueError("invalid pending tool_name")
+        if record.phase_before not in (1, 2):
+            raise ValueError("invalid pending phase")
+        if not re.fullmatch(r"[0-9a-f]{64}", record.args_digest):
+            raise ValueError("invalid pending args digest")
+        if len(record.args_summary) > _MAX_ARGS_SUMMARY_CHARS:
+            raise ValueError("pending args summary is too large")
+        if not isinstance(record.sequence, int) or not 1 <= record.sequence <= _MAX_SEQUENCE:
+            raise ValueError("invalid pending sequence")
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservationResult:
+    runtime: GroundingRuntime
+    service_status: str
+    observation: SQLGroundingObservation
+    service_result: SQLGroundingServiceResult | None = None
 
 
 _ACTIVE_TURN_MESSAGE: ContextVar[_BoundTurnMessage | None] = ContextVar(
-    "valibra_active_turn_message",
+    "valibra_sql_grounding_active_turn_message",
     default=None,
 )
 
 
 def _bind_turn_message(task_id: str, mode: str, message: str) -> Any:
-    """把 run_turn 原始消息绑定到当前异步上下文。"""
-
     return _ACTIVE_TURN_MESSAGE.set(
         _BoundTurnMessage(task_id=task_id, mode=mode, message=message)
     )
 
 
 def _reset_turn_message(token: Any) -> None:
-    """恢复绑定前的上下文，防止并发任务互相污染。"""
-
     _ACTIVE_TURN_MESSAGE.reset(token)
 
 
@@ -270,113 +219,93 @@ async def before_model_callback(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> LlmResponse | None:
-    """按 off/shadow/active 模式处理当前 View，再调用 Baseline。"""
+    """Observe one bound query and render a non-injected four-dimensional View."""
 
     state = getattr(callback_context, "state", None)
-    model_call_count: int | None = None
-    grounding_update_audit: dict[str, Any] | None = None
-    view_status = grounding_prompt_view_status()
+    model_call_count = _model_call_count(state)
+    request_before: str | None = None
+    update_audit: dict[str, Any] | None = None
     view_audit: dict[str, Any] = {
-        "mode": view_status["effective_mode"],
-        "requested_mode": view_status["requested_mode"],
-        "effective_mode": view_status["effective_mode"],
+        "mode": "shadow",
         "injected": False,
     }
-    if state is not None:
-        try:
-            model_call_count = _model_call_count(state)
-            view_audit["request_sha256_before"] = _request_sha256(llm_request)
-            grounding_update_audit = await _consume_bound_user_message(state)
-            runtime = _ensure_runtime(state)
+    try:
+        request_before = _request_sha256(llm_request)
+        view_audit["request_sha256_before"] = request_before
+        if state is not None:
+            runtime, degraded = _ensure_runtime(state)
+            update_audit = await _consume_bound_user_message(state, runtime)
+            runtime, later_degraded = _ensure_runtime(state)
+            degraded = degraded or later_degraded
+            view = render_grounding_view(runtime.grounding_state)
             view_audit.update(
                 {
                     "grounding_revision": runtime.grounding_revision,
-                    "requirement_revision": runtime.requirement_revision,
-                    "requirement_semantic_sha256": (
-                        requirement_semantic_sha256(runtime.grounding_state)
+                    "stage": runtime.stage,
+                    "focus_dimension": runtime.focus_dimension,
+                    "state_sha256": sql_grounding_state_sha256(
+                        runtime.grounding_state
                     ),
-                    **_frame_initialization_summary(runtime),
+                    "view_sha256": view.sha256,
+                    "chars": view.char_count,
+                    "tokens_cl100k": view.token_count,
+                    "included_items": view.included_items,
+                    "omitted_items": view.omitted_items,
+                    "runtime_degraded": degraded,
                 }
             )
-            if not view_status["configuration_valid"]:
-                error = ValueError("invalid GROUNDING_PROMPT_VIEW_MODE")
-                _record_callback_failure(
-                    state,
-                    stage="service",
-                    exception=error,
-                    sequence=_current_sequence(state),
-                )
-                view_audit["error_type"] = view_status["error_type"]
-            elif view_status["effective_mode"] != "off":
-                view = render_prompt_view(runtime.grounding_state)
-                block = _requirement_view_block(view) if view else ""
-                view_audit.update(
-                    {
-                        "view": view,
-                        "view_sha256": prompt_view_sha256(view),
-                        "chars": len(view),
-                        "tokens_cl100k": count_prompt_view_tokens(view),
-                        "injection_block_sha256": (
-                            _sha256_text(block) if block else None
-                        ),
-                    }
-                )
-                if view_status["effective_mode"] == "active" and block:
-                    _inject_requirement_view(llm_request, block)
-                    view_audit["injected"] = True
-            view_audit["request_sha256_after"] = _request_sha256(llm_request)
-        except Exception as exc:
-            # Grounding/View 失败只能记有界诊断，不能打断 Baseline。
-            _record_callback_failure(
+        view_audit["request_sha256_after_shadow"] = _request_sha256(
+            llm_request
+        )
+    except Exception as exc:
+        view_audit.update(
+            {
+                "error_type": type(exc).__name__[:128],
+                "runtime_degraded": True,
+            }
+        )
+        if state is not None:
+            _append_error_audit(
                 state,
-                stage="observation",
-                exception=exc,
-                sequence=_current_sequence(state),
+                _bounded_error_audit("before_model", exc),
             )
-            view_audit["injected"] = False
-            view_audit["error_type"] = type(exc).__name__[:128]
-            try:
-                view_audit["request_sha256_after"] = _request_sha256(
-                    llm_request
-                )
-            except Exception:
-                pass
+
     from system_agent import callbacks as baseline_callbacks
 
     baseline_result = await baseline_callbacks.before_model_callback(
         callback_context,
         llm_request,
     )
-    if state is not None:
-        try:
+    try:
+        request_after = _request_sha256(llm_request)
+        view_audit["request_sha256_after"] = request_after
+        view_audit["request_unchanged"] = bool(
+            request_before is not None
+            and request_before
+            == view_audit.get("request_sha256_after_shadow")
+            == request_after
+        )
+        if state is not None:
             model_call_index = _new_model_call_index(state, model_call_count)
             if model_call_index is not None:
-                for key, metadata in (
-                    (REQUIREMENT_VIEW_AUDIT_KEY, view_audit),
-                    (GROUNDING_UPDATE_AUDIT_KEY, grounding_update_audit),
-                ):
-                    if metadata is None:
-                        continue
-                    try:
-                        _attach_model_call_audit(
-                            state,
-                            model_call_index,
-                            key,
-                            metadata,
-                        )
-                    except Exception as exc:
-                        _record_callback_failure(
-                            state,
-                            stage="service",
-                            exception=exc,
-                            sequence=_current_sequence(state),
-                        )
-        except Exception as exc:
-            _record_callback_failure(
+                _attach_model_call_audit(
+                    state,
+                    model_call_index,
+                    GROUNDING_VIEW_AUDIT_KEY,
+                    view_audit,
+                )
+                if update_audit is not None:
+                    _attach_model_call_audit(
+                        state,
+                        model_call_index,
+                        GROUNDING_UPDATE_AUDIT_KEY,
+                        update_audit,
+                    )
+    except Exception as exc:
+        if state is not None:
+            _append_error_audit(
                 state,
-                stage="service",
-                exception=exc,
-                sequence=_current_sequence(state),
+                _bounded_error_audit("before_model_audit", exc),
             )
     return baseline_result
 
@@ -385,7 +314,7 @@ async def after_model_callback(
     callback_context: CallbackContext,
     llm_response: LlmResponse,
 ) -> LlmResponse | None:
-    """模型响应只交给 Baseline 处理一次，Valibra 不改内容。"""
+    """Return the frozen Baseline callback result without modification."""
 
     from system_agent import callbacks as baseline_callbacks
 
@@ -400,7 +329,7 @@ async def before_tool_callback(
     args: dict,
     tool_context: ToolContext,
 ) -> dict | None:
-    """先让 Baseline 判断预算；获准后再登记待完成工具调用。"""
+    """Let B0 own budget rejection, then register one exact pending call."""
 
     from system_agent import callbacks as baseline_callbacks
 
@@ -410,37 +339,31 @@ async def before_tool_callback(
         tool_context,
     )
     if baseline_result is not None:
-        # 非 None 表示 Baseline 已拒绝或接管，本层不能再登记调用。
         return baseline_result
-
     state = getattr(tool_context, "state", None)
     if state is None:
         return baseline_result
-    sequence = _current_sequence(state)
     try:
         function_call_id = _require_function_call_id(tool_context)
         tool_name = _tool_name(tool)
-        phase_before = _phase(state.get("current_phase", 1))
-        args_json = canonical_json(args)
-        sequence = _next_sequence(state)
-        pending = PendingToolCall(
+        args_json = canonical_json(to_jsonable(args))
+        pending = _PendingToolCall(
             function_call_id=function_call_id,
             tool_name=tool_name,
+            phase_before=_phase(state.get("current_phase", 1)),
+            args_digest=_sha256_text(args_json),
             args_summary=_bounded_args_summary(args_json),
-            args_digest=hashlib.sha256(args_json.encode("utf-8")).hexdigest(),
-            phase_before=phase_before,
-            sequence=sequence,
-            started_at=None,
+            sequence=_next_sequence(state),
         )
-        runtime = add_pending_tool_call(_ensure_runtime(state), pending)
-        _store_runtime(state, runtime)
+        _add_pending(state, pending)
     except Exception as exc:
-        _record_callback_failure(
+        _append_error_audit(
             state,
-            stage="service",
-            exception=exc,
-            sequence=sequence,
-            function_call_id=_valid_context_identifier(tool_context),
+            _bounded_error_audit(
+                "before_tool",
+                exc,
+                function_call_id=_valid_context_identifier(tool_context),
+            ),
         )
     return baseline_result
 
@@ -451,14 +374,12 @@ async def after_tool_callback(
     tool_context: ToolContext,
     tool_response: Any,
 ) -> Any:
-    """先执行 Baseline 回调，再用原始工具结果更新 Shadow。"""
+    """Delegate once, then observe the original response and return B0 override."""
 
     from system_agent import callbacks as baseline_callbacks
 
     state = getattr(tool_context, "state", None)
-    trajectory_before = (
-        _trajectory_length(state) if state is not None else None
-    )
+    trajectory_before = _trajectory_length(state)
     try:
         baseline_override = await baseline_callbacks.after_tool_callback(
             tool,
@@ -470,206 +391,117 @@ async def after_tool_callback(
         if state is not None:
             _cleanup_pending_best_effort(state, tool_context)
         raise
-
     if state is None:
         return baseline_override
 
     audit_index = _new_trajectory_index(state, trajectory_before)
-    raw_log_ref = (
+    private_ref = (
         f"session://tool_trajectory/{audit_index}"
         if audit_index is not None
         else None
     )
-    sequence = _current_sequence(state)
-    audit_metadata: dict[str, Any] | None = None
-    shadow_mode = _requested_updater_mode()
+    audit: dict[str, Any]
     try:
         function_call_id = _require_function_call_id(tool_context)
-        runtime = _ensure_runtime(state)
-        runtime, pending = remove_pending_tool_call(runtime, function_call_id)
-        # 先删除 Pending 并落盘；后续失败也不会遗留“正在调用”的假状态。
-        _store_runtime(state, runtime)
+        pending = _pop_pending(state, function_call_id)
         if pending is None:
-            return baseline_override
-
-        tool_name = _tool_name(tool)
-        if pending.tool_name != tool_name:
-            raise ValueError(
-                "pending tool name does not match the exact function call"
+            audit = {
+                "service_status": "skipped_missing_pending",
+                "function_call_id": function_call_id,
+                "tool_name": _safe_tool_name(tool),
+                "private_raw_ref": private_ref,
+            }
+        else:
+            tool_name = _tool_name(tool)
+            if pending.tool_name != tool_name:
+                raise ValueError("pending tool name does not match function_call_id")
+            raw_content = to_jsonable(tool_response)
+            observation_type = _classify_tool_observation_type(
+                tool_name,
+                tool_response,
             )
-        task_id = _task_id(state)
-        sequence = _next_sequence(state)
-        success_type = _observation_type(tool_name)
-        observation_type = classify_tool_observation_type(
-            tool_name=tool_name,
-            tool_response=tool_response,
-            success_type=success_type,
-        )
-        observation = build_observation(
-            task_id=task_id,
-            observation_type=observation_type,
-            phase=pending.phase_before,
-            sequence=sequence,
-            source="adk_tool_result",
-            raw=tool_response,
-            raw_log_ref=raw_log_ref,
-            function_call_id=function_call_id,
-            invocation_id=_valid_invocation_id(tool_context),
-            tool_name=tool_name,
-        )
-        shadow_result = await _process_shadow_observation(runtime, observation)
-        runtime = shadow_result.runtime
-        result_status = shadow_result.status
-        llm_audit = shadow_result.llm_audit
-        proposal_outcome = shadow_result.proposal_outcome
-        if observation_type == "tool_error":
-            runtime = record_failure(
-                runtime,
-                stage="observation",
-                exception=RuntimeError(
-                    f"official {tool_name} returned its frozen error form"
-                ),
-                sequence=observation.sequence,
-                observation_id=observation.observation_id,
-                function_call_id=function_call_id,
-            )
-
-        transition_observation_id: str | None = None
-        follow_up_observation_id: str | None = None
-        follow_up_status: str | None = None
-        follow_up_llm_audit: dict[str, Any] | None = None
-        follow_up_proposal_outcome: LLMFrameProposalOutcome | None = None
-        phase_after = _phase(state.get("current_phase", pending.phase_before))
-        if (
-            tool_name == "submit_sql"
-            and observation_type == "submission"
-            and pending.phase_before == 1
-            and phase_after == 2
-        ):
-            # submit_sql 让 Baseline 进入 Phase 2 时，显式记录阶段切换。
-            transition_sequence = _next_sequence(state)
-            transition_observation = build_observation(
-                task_id=task_id,
-                observation_type="phase_transition",
-                phase=2,
-                sequence=transition_sequence,
-                source="adk_lifecycle",
-                raw={
-                    "submission_observation_id": observation.observation_id,
-                    "phase_before": 1,
-                    "phase_after": 2,
-                },
-                summary="legal submit_sql transitioned Baseline phase 1 to phase 2",
-                raw_log_ref=raw_log_ref,
-                function_call_id=function_call_id,
-                invocation_id=_valid_invocation_id(tool_context),
+            observation = build_sql_grounding_observation(
+                task_id=_task_id(state),
+                phase=pending.phase_before,
+                sequence=_next_sequence(state),
+                observation_type=observation_type,
+                content=raw_content,
+                summary=f"official {tool_name} result observed",
                 tool_name=tool_name,
+                function_call_id=function_call_id,
+                private_raw_ref=private_ref,
             )
-            transition_result = process_phase_transition(
-                runtime,
-                transition_observation,
+            result = await _handle_observation(state, observation)
+            runtime = result.runtime
+            follow_up_audit: dict[str, Any] | None = None
+            phase_after = _phase(
+                state.get("current_phase", pending.phase_before)
             )
-            runtime = transition_result.runtime
-            transition_observation_id = transition_observation.observation_id
-            if transition_result.status == "processed" and runtime.phase == 2:
-                try:
-                    follow_up = extract_submit_follow_up(tool_response)
-                    follow_up_sequence = _next_sequence(state)
-                    follow_up_observation = build_observation(
-                        task_id=task_id,
-                        observation_type="user_query",
-                        phase=2,
-                        sequence=follow_up_sequence,
-                        source="submit_sql_follow_up",
-                        raw=follow_up,
-                        summary=follow_up,
-                        raw_log_ref=raw_log_ref,
-                        function_call_id=function_call_id,
-                        invocation_id=_valid_invocation_id(tool_context),
-                        tool_name=tool_name,
-                    )
-                    follow_up_result = await _process_shadow_observation(
-                        runtime,
-                        follow_up_observation,
-                    )
-                    runtime = follow_up_result.runtime
-                    follow_up_status = follow_up_result.status
-                    follow_up_llm_audit = follow_up_result.llm_audit
-                    follow_up_proposal_outcome = (
-                        follow_up_result.proposal_outcome
-                    )
-                    follow_up_observation_id = follow_up_observation.observation_id
-                except ObservationNormalizationError as exc:
-                    follow_up_status = "failed"
-                    runtime = record_failure(
-                        runtime,
-                        stage="observation",
-                        exception=exc,
-                        sequence=_current_sequence(state),
-                        observation_id=transition_observation.observation_id,
-                        function_call_id=function_call_id,
-                    )
-
-        _store_runtime(state, runtime)
-        audit_metadata = {
-            "mode": shadow_mode,
-            "status": result_status,
-            "function_call_id": function_call_id,
-            "tool_name": tool_name,
-            "phase_before": pending.phase_before,
-            "phase_after": phase_after,
-            "observation_id": observation.observation_id,
-            "observation_type": observation.observation_type,
-            "proposal_outcome": proposal_outcome,
-            "transition_observation_id": transition_observation_id,
-            "follow_up_observation_id": follow_up_observation_id,
-            "follow_up_status": follow_up_status,
-            "follow_up_proposal_outcome": follow_up_proposal_outcome,
-            "raw_digest": observation.raw_digest,
-            "raw_log_ref": raw_log_ref,
-            "summary": observation.summary,
-            "grounding_revision": runtime.grounding_revision,
-            "requirement_revision": runtime.requirement_revision,
-            "requirement_semantic_sha256": requirement_semantic_sha256(
-                runtime.grounding_state
-            ),
-            **_frame_initialization_summary(runtime),
-            "runtime_bytes": _runtime_bytes(runtime),
-        }
-        if llm_audit is not None:
-            audit_metadata["llm"] = llm_audit
-        if follow_up_llm_audit is not None:
-            audit_metadata["follow_up_llm"] = follow_up_llm_audit
+            if (
+                tool_name == "submit_sql"
+                and observation_type == "submission"
+                and pending.phase_before == 1
+                and phase_after == 2
+            ):
+                follow_up = _extract_submit_follow_up(tool_response)
+                follow_up_observation = build_sql_grounding_observation(
+                    task_id=_task_id(state),
+                    phase=2,
+                    sequence=_next_sequence(state),
+                    observation_type="p2_follow_up",
+                    content=follow_up,
+                    summary="official Phase-2 follow-up observed",
+                    private_raw_ref=private_ref,
+                )
+                follow_up_result = await _handle_observation(
+                    state,
+                    follow_up_observation,
+                )
+                runtime = follow_up_result.runtime
+                follow_up_audit = _observation_audit(follow_up_result)
+            audit = _observation_audit(result)
+            audit.update(
+                {
+                    "function_call_id": function_call_id,
+                    "tool_name": tool_name,
+                    "phase_before": pending.phase_before,
+                    "phase_after": phase_after,
+                    "args_digest": pending.args_digest,
+                    "private_raw_ref": private_ref,
+                    "official_error": observation_type == "tool_error",
+                }
+            )
+            if follow_up_audit is not None:
+                audit["p2_follow_up"] = follow_up_audit
+            _store_runtime(state, runtime)
     except Exception as exc:
-        function_call_id = _valid_context_identifier(tool_context)
         _cleanup_pending_best_effort(state, tool_context)
-        runtime = _record_callback_failure(
-            state,
-            stage="observation",
-            exception=exc,
-            sequence=sequence,
-            function_call_id=function_call_id,
-        )
-        audit_metadata = {
-            "mode": shadow_mode,
-            "status": "failed",
-            "function_call_id": function_call_id,
+        runtime, _ = _ensure_runtime(state)
+        audit = {
+            "service_status": "failed_open",
+            "function_call_id": _valid_context_identifier(tool_context),
             "tool_name": _safe_tool_name(tool),
-            "raw_log_ref": raw_log_ref,
+            "private_raw_ref": private_ref,
             "error_type": type(exc).__name__[:128],
-            "grounding_revision": runtime.grounding_revision,
-            "requirement_revision": runtime.requirement_revision,
-            "requirement_semantic_sha256": requirement_semantic_sha256(
-                runtime.grounding_state
-            ),
-            **_frame_initialization_summary(runtime),
-            "runtime_bytes": _runtime_bytes(runtime),
+            **_runtime_audit(runtime),
         }
+        _append_error_audit(state, audit)
     finally:
         _cleanup_pending_best_effort(state, tool_context)
-        if audit_index is not None and audit_metadata is not None:
-            _attach_shadow_audit(state, audit_index, audit_metadata)
-
+        if audit_index is not None:
+            try:
+                _attach_tool_audit(state, audit_index, audit)
+            except Exception as exc:
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit(
+                        "after_tool_audit",
+                        exc,
+                        function_call_id=_valid_context_identifier(
+                            tool_context
+                        ),
+                    ),
+                )
     return baseline_override
 
 
@@ -679,364 +511,300 @@ async def on_tool_error_callback(
     tool_context: ToolContext,
     error: Exception,
 ) -> None:
-    """真实工具异常形成有界 ToolErrorObservation，并精确清理 Pending。"""
+    """Observe an ADK exception, clear its exact pending call, and stay invisible."""
 
     del args
-    state = tool_context.state
-    sequence = _current_sequence(state)
+    state = getattr(tool_context, "state", None)
+    if state is None:
+        return None
     function_call_id = _valid_context_identifier(tool_context)
     try:
         exact_id = _require_function_call_id(tool_context)
-        runtime = _ensure_runtime(state)
-        runtime, pending = remove_pending_tool_call(runtime, exact_id)
-        _store_runtime(state, runtime)
+        pending = _pop_pending(state, exact_id)
         if pending is None:
             return None
         tool_name = _tool_name(tool)
         if pending.tool_name != tool_name:
-            raise ValueError(
-                "pending tool name does not match the exact function call"
-            )
-        sequence = _next_sequence(state)
-        observation = build_observation(
+            raise ValueError("pending tool name does not match function_call_id")
+        observation = build_sql_grounding_observation(
             task_id=_task_id(state),
-            observation_type="tool_error",
             phase=pending.phase_before,
-            sequence=sequence,
-            source="adk_tool_error",
-            raw={"error_type": type(error).__name__[:128]},
-            summary=f"{tool_name} raised {type(error).__name__[:128]}",
-            function_call_id=exact_id,
-            invocation_id=_valid_invocation_id(tool_context),
+            sequence=_next_sequence(state),
+            observation_type="tool_error",
+            content={"error_type": type(error).__name__[:128]},
+            summary=f"official {tool_name} exception observed",
             tool_name=tool_name,
-        )
-        runtime = (
-            await _process_shadow_observation(runtime, observation)
-        ).runtime
-        runtime = record_failure(
-            runtime,
-            stage="service",
-            exception=error,
-            sequence=sequence,
             function_call_id=exact_id,
         )
-        _store_runtime(state, runtime)
-    except Exception as callback_error:
-        _record_callback_failure(
-            state,
-            stage="service",
-            exception=callback_error,
-            sequence=sequence,
-            function_call_id=function_call_id,
+        result = await _handle_observation(state, observation)
+        _store_runtime(state, result.runtime)
+        audit = _observation_audit(result)
+        audit.update(
+            {
+                "function_call_id": exact_id,
+                "tool_name": tool_name,
+                "official_exception": True,
+            }
         )
+        _append_error_audit(state, audit)
+    except Exception as callback_error:
+        _append_error_audit(
+            state,
+            _bounded_error_audit(
+                "tool_error",
+                callback_error,
+                function_call_id=function_call_id,
+            ),
+        )
+    finally:
+        _cleanup_pending_best_effort(state, tool_context)
     return None
-
-
-def _ensure_runtime(state: Any) -> RequirementGroundingRuntime:
-    """读取当前 Runtime 或显式单向迁移 V1；坏数据保持 fail-open。"""
-
-    try:
-        raw = state.get(GROUNDING_RUNTIME_KEY)
-        if raw is None:
-            runtime = RequirementGroundingRuntime()
-        else:
-            migration = migrate_requirement_grounding_runtime(raw)
-            runtime = migration.runtime
-            if migration.legacy_unknown_history:
-                # 控制标记不进入 Runtime/Frame/Prompt；跨轮保留历史未知。
-                state[GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY] = True
-        validate_runtime(runtime)
-    except Exception as exc:
-        if raw is not None:
-            # 无法验证的已有 Runtime 也不能被重建后的默认值冒充为可信历史。
-            state[GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY] = True
-        runtime = RequirementGroundingRuntime()
-        try:
-            runtime = record_failure(
-                runtime,
-                stage="service",
-                exception=exc,
-                sequence=_current_sequence(state),
-            )
-        except Exception:
-            runtime = RequirementGroundingRuntime()
-    _store_runtime(state, runtime)
-    if state.get(GROUNDING_SEQUENCE_KEY) is None:
-        state[GROUNDING_SEQUENCE_KEY] = 0
-    return runtime
 
 
 async def _consume_bound_user_message(
     state: Any,
+    runtime: GroundingRuntime | None = None,
 ) -> dict[str, Any] | None:
-    """把本轮用户消息转成一次 Observation，并交给所选 Shadow。"""
-
     bound = _ACTIVE_TURN_MESSAGE.get()
     if bound is None or bound.consumed or bound.mode != "a-interact":
         return None
-    # 先标记已消费：即使处理失败，同一轮多次 before_model 也不会重复记账。
     bound.consumed = True
     if _task_id(state) != bound.task_id:
-        raise ValueError("run_turn task_id does not match ADK session state")
-    sequence = _next_sequence(state)
-    observation = build_observation(
+        raise ValueError("run_turn task_id does not match Session state")
+    query = _user_message_query(bound.message)
+    observation = build_sql_grounding_observation(
         task_id=bound.task_id,
-        observation_type="user_query",
         phase=_phase(state.get("current_phase", 1)),
-        sequence=sequence,
-        source="adk_run_turn_message",
-        raw=bound.message,
-        summary=_user_message_summary(bound.message),
+        sequence=_next_sequence(state),
+        observation_type="user_query",
+        content=query,
+        summary="current user query observed",
     )
-    original_runtime = _ensure_runtime(state)
-    initialization_contract_known = not bool(
-        state.get(GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY, False)
-    )
-    initialization_pending = (
-        observation.phase == 1
-        and initialization_contract_known
-        and original_runtime.frame_initialization_status == "not_attempted"
-    )
-    updater_mode = _requested_updater_mode()
-    try:
-        shadow_result = await _process_shadow_observation(
-            original_runtime,
-            observation,
-        )
-        runtime = shadow_result.runtime
-        status = shadow_result.status
-        llm_audit = shadow_result.llm_audit
-        failure_reason = shadow_result.failure_reason
-        proposal_outcome = shadow_result.proposal_outcome
-    except Exception as exc:
-        runtime = record_failure(
-            original_runtime,
-            stage="service",
-            exception=exc,
-            sequence=observation.sequence,
-            observation_id=observation.observation_id,
-            metric_namespace=("llm" if updater_mode == "llm" else "generic"),
-        )
-        status = "failed"
-        llm_audit = None
-        failure_reason = "unexpected_error"
-        proposal_outcome = None
-    if initialization_pending and status in {"processed", "failed"}:
-        slot_count = _frame_slot_count(runtime)
-        if status == "processed" and updater_mode == "llm":
-            if proposal_outcome == "populated" and slot_count > 0:
-                initialization_status = "ready"
-                initialization_reason = None
-            elif (
-                proposal_outcome
-                in {"insufficient_information", "no_extractable_requirement"}
-                and slot_count == 0
-            ):
-                initialization_status = "empty"
-                initialization_reason = proposal_outcome
-            else:
-                # Form/Reducer 已确保正常路径不会矛盾；若扩展代码破坏合同，
-                # 仍按技术失败处理，绝不从 slot_count 猜 empty 原因。
-                initialization_status = "failed"
-                initialization_reason = "unexpected_error"
-                status = "failed"
-        elif status == "processed" and slot_count > 0:
-            initialization_status = "ready"
-            initialization_reason = None
-        elif status == "processed":
-            # Rule 路径没有 LLM 的显式 outcome，仍不能猜 empty 原因。
-            initialization_status = "failed"
-            initialization_reason = "unexpected_error"
-            status = "failed"
-        else:
-            initialization_status = "failed"
-            initialization_reason = failure_reason or "unexpected_error"
-        runtime = set_frame_initialization_result(
-            runtime,
-            status=initialization_status,
-            reason=initialization_reason,
+    active_runtime = runtime if runtime is not None else _ensure_runtime(state)[0]
+    result = await _handle_observation(state, observation, active_runtime)
+    _store_runtime(state, result.runtime)
+    return _observation_audit(result)
+
+
+async def _handle_observation(
+    state: Any,
+    observation: SQLGroundingObservation,
+    runtime: GroundingRuntime | None = None,
+) -> _ObservationResult:
+    active_runtime = runtime if runtime is not None else _ensure_runtime(state)[0]
+    if observation.observation_type in {"submission", "p2_follow_up"}:
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="skipped_control_not_active",
             observation=observation,
         )
-    _store_runtime(state, runtime)
-    audit = {
-        "observation_id": observation.observation_id,
-        "observation_type": observation.observation_type,
-        "phase": observation.phase,
-        "status": status,
-        "proposal_outcome": proposal_outcome,
-        "grounding_revision": runtime.grounding_revision,
-        "requirement_revision": runtime.requirement_revision,
-        "requirement_semantic_sha256": requirement_semantic_sha256(
-            runtime.grounding_state
+    context = _build_validation_context(state, observation)
+    service_result = await process_sql_grounding_observation(
+        active_runtime,
+        observation,
+        context,
+        _SQL_GROUNDING_UPDATER,
+    )
+    return _ObservationResult(
+        runtime=service_result.runtime,
+        service_status=service_result.state_update.status,
+        observation=observation,
+        service_result=service_result,
+    )
+
+
+def _build_validation_context(
+    state: Any,
+    observation: SQLGroundingObservation,
+) -> ValidationContext:
+    bound = _ACTIVE_TURN_MESSAGE.get()
+    if bound is None or bound.task_id != _task_id(state):
+        raise ValueError("current bound query is required for ValidationContext")
+    return ValidationContext(
+        current_query=_user_message_query(bound.message),
+        follow_up_query=(
+            observation.content
+            if observation.observation_type == "p2_follow_up"
+            and isinstance(observation.content, str)
+            else None
         ),
-        **_frame_initialization_summary(runtime),
+        latest_observation_id=observation.observation_id,
+        official_trajectory_observation_ids=_official_trajectory_refs(state),
+        # Production SG3 is deliberately fail-closed: no inferred identifiers
+        # or knowledge enter this transient context.
+        known_tables=frozenset(),
+        known_columns=frozenset(),
+        supported_domain_knowledge=frozenset(),
+    )
+
+
+def _ensure_runtime(state: Any) -> tuple[GroundingRuntime, bool]:
+    """Load only the SQL Grounding key; corrupt values reset fail-open."""
+
+    raw = state.get(GROUNDING_RUNTIME_KEY)
+    degraded = False
+    if raw is None:
+        runtime = GroundingRuntime()
+    else:
+        try:
+            runtime = GroundingRuntime.model_validate(raw)
+        except Exception:
+            runtime = GroundingRuntime()
+            degraded = True
+    _store_runtime(state, runtime)
+    if state.get(GROUNDING_SEQUENCE_KEY) is None:
+        state[GROUNDING_SEQUENCE_KEY] = 0
+    if state.get(GROUNDING_PENDING_KEY) is None:
+        state[GROUNDING_PENDING_KEY] = {}
+    return runtime, degraded
+
+
+def _store_runtime(state: Any, runtime: GroundingRuntime) -> None:
+    validated = GroundingRuntime.model_validate(runtime)
+    state[GROUNDING_RUNTIME_KEY] = validated.model_dump(mode="json")
+
+
+def _observation_audit(result: _ObservationResult) -> dict[str, Any]:
+    audit = {
+        "observation_id": result.observation.observation_id,
+        "observation_type": result.observation.observation_type,
+        "phase": result.observation.phase,
+        "raw_digest": result.observation.raw_digest,
+        "private_raw_ref": result.observation.private_raw_ref,
+        "service_status": result.service_status,
+        **_runtime_audit(result.runtime),
     }
-    if llm_audit is not None:
-        audit["llm"] = llm_audit
+    if result.service_result is not None:
+        update = result.service_result.state_update
+        audit.update(
+            {
+                "changed_dimensions": list(update.changed_dimensions),
+                "focus_before": update.focus_before,
+                "focus_after": update.focus_after,
+                "provider_attempted": result.service_result.llm_telemetry.attempted,
+                "service_error_type": update.error_type,
+            }
+        )
     return audit
 
 
-async def _process_shadow_observation(
-    runtime: RequirementGroundingRuntime,
-    observation: Observation,
-) -> _ShadowObservationResult:
-    """按精确模式处理 Observation；错误只写有限 telemetry，不降级到 Rule。"""
+def _runtime_audit(runtime: GroundingRuntime) -> dict[str, Any]:
+    return {
+        "grounding_revision": runtime.grounding_revision,
+        "stage": runtime.stage,
+        "focus_dimension": runtime.focus_dimension,
+        "state_sha256": sql_grounding_state_sha256(runtime.grounding_state),
+        "runtime_bytes": len(canonical_json(runtime).encode("utf-8")),
+    }
 
-    if observation.observation_type in EVIDENCE_OBSERVATION_TYPES:
-        result = process_observation(
-            runtime,
-            observation,
-            updater=_EVIDENCE_UPDATER,
-        )
-        return _ShadowObservationResult(
-            runtime=result.runtime,
-            status=result.status,
-            failure_reason=result.failure_reason,
-        )
 
-    if observation.observation_type == "tool_error":
-        result = process_observation(
-            runtime,
-            observation,
-            updater=_NOOP_UPDATER,
-        )
-        return _ShadowObservationResult(
-            runtime=result.runtime,
-            status=result.status,
-            failure_reason=result.failure_reason,
-        )
+def _load_pending(state: Any) -> dict[str, _PendingToolCall]:
+    payload = state.get(GROUNDING_PENDING_KEY, {})
+    if not isinstance(payload, dict) or len(payload) > _MAX_PENDING:
+        raise ValueError("invalid SQL Grounding pending store")
+    result: dict[str, _PendingToolCall] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            raise ValueError("pending key must be a string")
+        record = _PendingToolCall.from_json(value)
+        if record.function_call_id != key:
+            raise ValueError("pending key does not match function_call_id")
+        result[key] = record
+    return result
 
-    mode = _requested_updater_mode()
-    if mode == "rule":
-        result = process_observation(
-            runtime,
-            observation,
-            updater=_RULE_UPDATER,
-        )
-        return _ShadowObservationResult(
-            runtime=result.runtime,
-            status=result.status,
-            failure_reason=result.failure_reason,
-        )
 
-    if mode == "invalid":
-        failed = record_failure(
-            runtime,
-            stage="updater",
-            exception=ValueError("invalid GROUNDING_UPDATER_MODE"),
-            sequence=observation.sequence,
-            observation_id=observation.observation_id,
-            function_call_id=observation.function_call_id,
-            metric_namespace="llm",
-        )
-        return _ShadowObservationResult(
-            runtime=failed,
-            status="failed",
-            failure_reason="configuration_error",
-        )
+def _store_pending(state: Any, pending: Mapping[str, _PendingToolCall]) -> None:
+    if len(pending) > _MAX_PENDING:
+        raise ValueError("too many pending SQL Grounding calls")
+    state[GROUNDING_PENDING_KEY] = {
+        key: pending[key].to_json() for key in sorted(pending)
+    }
 
-    if observation.observation_type not in GROUNDING_LLM_OBSERVATION_TYPES:
-        # 非用户 Observation 只记生命周期，不调用模型也不消耗 LLM call budget。
-        result = process_observation(
-            runtime,
-            observation,
-            updater=_NOOP_UPDATER,
-        )
-        return _ShadowObservationResult(
-            runtime=result.runtime,
-            status=result.status,
-            failure_reason=result.failure_reason,
-        )
 
+def _add_pending(state: Any, pending: _PendingToolCall) -> None:
+    records = _load_pending(state)
+    if pending.function_call_id in records:
+        raise ValueError("duplicate pending function_call_id")
+    records[pending.function_call_id] = pending
+    _store_pending(state, records)
+
+
+def _pop_pending(state: Any, function_call_id: str) -> _PendingToolCall | None:
+    records = _load_pending(state)
+    record = records.pop(function_call_id, None)
+    _store_pending(state, records)
+    return record
+
+
+def _cleanup_pending_best_effort(state: Any, tool_context: Any) -> None:
+    function_call_id = _valid_context_identifier(tool_context)
+    if function_call_id is None:
+        return
     try:
-        updater = _build_llm_updater()
-    except Exception as exc:
-        failed = record_failure(
-            runtime,
-            stage="updater",
-            exception=exc,
-            sequence=observation.sequence,
-            observation_id=observation.observation_id,
-            function_call_id=observation.function_call_id,
-            metric_namespace="llm",
-        )
-        return _ShadowObservationResult(
-            runtime=failed,
-            status="failed",
-            failure_reason="configuration_error",
-        )
-
-    result = await process_observation_with_llm(
-        runtime,
-        observation,
-        updater=updater,
-    )
-    return _ShadowObservationResult(
-        runtime=result.runtime,
-        status=result.status,
-        llm_audit=_bounded_llm_audit(result.llm_audit),
-        failure_reason=result.failure_reason,
-        proposal_outcome=result.proposal_outcome,
-    )
+        _pop_pending(state, function_call_id)
+    except Exception:
+        return
 
 
-def _frame_slot_count(runtime: RequirementGroundingRuntime) -> int:
-    frame = runtime.grounding_state.requirement_frame
-    return (
-        len(frame.value_slots)
-        + len(frame.schema_slots)
-        + len(frame.operation_slots)
-    )
+def _official_trajectory_refs(state: Any) -> tuple[str, ...]:
+    refs: list[str] = []
+    trajectory = state.get("tool_trajectory", [])
+    if not isinstance(trajectory, list):
+        return ()
+    for event in trajectory:
+        if not isinstance(event, dict):
+            continue
+        audit = event.get(SHADOW_AUDIT_KEY)
+        if not isinstance(audit, dict):
+            continue
+        observation_id = audit.get("observation_id")
+        if isinstance(observation_id, str) and observation_id not in refs:
+            refs.append(observation_id)
+    return tuple(refs[-512:])
 
 
-def _frame_initialization_summary(
-    runtime: RequirementGroundingRuntime,
-) -> dict[str, Any]:
-    """返回有界初始化历史；不包含 Observation 或 Provider 正文。"""
-
-    return {
-        "frame_initialization_status": runtime.frame_initialization_status,
-        "frame_initialization_reason": runtime.frame_initialization_reason,
-        "frame_initialization_observation_id": (
-            runtime.frame_initialization_observation_id
-        ),
-    }
-
-
-def _bounded_llm_audit(audit: Any) -> dict[str, Any]:
-    """保留有限、无正文的单次 LLM 审计摘要。"""
-
-    return {
-        "status": audit.status,
-        "attempted": audit.attempted,
-        "configuration_sha256": audit.configuration_sha256,
-        "prompt_sha256": audit.prompt_sha256,
-        "input_tokens": audit.input_tokens,
-        "output_tokens": audit.output_tokens,
-        "reasoning_tokens": audit.reasoning_tokens,
-        "total_tokens": audit.total_tokens,
-        "latency_ms": audit.latency_ms,
-        "cost": audit.cost,
-        "model": audit.model,
-        "provider": audit.provider,
-        "credential_source": audit.credential_source,
-        "request_sha256": audit.request_sha256,
-        "response_sha256": audit.response_sha256,
-        "raw_audit_ref": audit.raw_audit_ref,
-        "timed_out": audit.timed_out,
-        "provider_may_continue_after_cancel": (
-            audit.provider_may_continue_after_cancel
-        ),
-        "provider_may_bill_after_cancel": audit.provider_may_bill_after_cancel,
-        "error_type": audit.error_type,
-    }
+def _classify_tool_observation_type(
+    tool_name: str,
+    tool_response: Any,
+) -> ObservationType:
+    prefixes = _OFFICIAL_TOOL_ERROR_PREFIXES.get(tool_name, ())
+    if isinstance(tool_response, str) and any(
+        tool_response.startswith(prefix) for prefix in prefixes
+    ):
+        return "tool_error"
+    try:
+        return _TOOL_OBSERVATION_TYPES[tool_name]
+    except KeyError as exc:
+        raise ValueError(f"unsupported a-interact tool: {tool_name}") from exc
 
 
-def _user_message_summary(message: str) -> str:
-    """从 Baseline 拼装的提示中取出真正的用户问题。"""
+def _extract_submit_follow_up(tool_response: Any) -> str:
+    if not isinstance(tool_response, str):
+        raise ValueError("submit_sql follow-up response must be a string")
+    starts: list[int] = []
+    offset = 0
+    while True:
+        index = tool_response.find(_FOLLOW_UP_PREFIX, offset)
+        if index < 0:
+            break
+        if index == 0 or tool_response[index - 1] == "\n":
+            starts.append(index)
+        offset = index + len(_FOLLOW_UP_PREFIX)
+    if len(starts) != 1:
+        raise ValueError("submit_sql response must contain one follow-up marker")
+    value_start = starts[0] + len(_FOLLOW_UP_PREFIX)
+    value_end = tool_response.find(_BUDGET_PREFIX, value_start)
+    if value_end < 0:
+        raise ValueError("follow-up must precede official budget line")
+    value = tool_response[value_start:value_end].strip()
+    if not value or len(value) > 32_768:
+        raise ValueError("invalid bounded submit_sql follow-up")
+    return value
 
-    if not isinstance(message, str):
-        raise TypeError("run_turn message must be a string")
+
+def _user_message_query(message: str) -> str:
+    if not isinstance(message, str) or not message:
+        raise ValueError("run_turn message must be a non-empty string")
     marker = "User Query:\n"
     suffix = "\n\nYou have a budget"
     start = message.find(marker)
@@ -1044,69 +812,27 @@ def _user_message_summary(message: str) -> str:
         return message
     start += len(marker)
     end = message.find(suffix, start)
-    if end < 0:
-        return message[start:]
-    return message[start:end]
+    return message[start:] if end < 0 else message[start:end]
 
 
-def _store_runtime(state: Any, runtime: RequirementGroundingRuntime) -> None:
-    """校验后以纯 JSON 数据写回 ADK Session State。"""
-
-    validate_runtime(runtime)
-    state[GROUNDING_RUNTIME_KEY] = runtime.model_dump(mode="json")
-
-
-def _record_callback_failure(
-    state: Any,
-    *,
-    stage: str,
-    exception: BaseException,
-    sequence: int,
-    function_call_id: str | None = None,
-) -> RequirementGroundingRuntime:
-    """尽力记录回调错误；记录失败也不能覆盖 Baseline 结果。"""
-
-    runtime = _ensure_runtime(state)
-    try:
-        runtime = record_failure(
-            runtime,
-            stage=stage,
-            exception=exception,
-            sequence=max(0, sequence),
-            function_call_id=function_call_id,
-        )
-        _store_runtime(state, runtime)
-    except Exception:
-        # 连诊断本身失败也直接忽略，Baseline 的结果优先。
-        pass
-    return runtime
+def _task_id(state: Any) -> str:
+    task_id = state.get("task_id")
+    if not isinstance(task_id, str) or not _IDENTIFIER_RE.fullmatch(task_id):
+        raise ValueError("bounded task_id is required")
+    return task_id
 
 
-def _cleanup_pending_best_effort(state: Any, tool_context: Any) -> None:
-    """尽力清理一个准确匹配的 Pending，不向外抛错。"""
-
-    function_call_id = _valid_context_identifier(tool_context)
-    if function_call_id is None:
-        return
-    try:
-        runtime = _ensure_runtime(state)
-        runtime, _ = remove_pending_tool_call(runtime, function_call_id)
-        _store_runtime(state, runtime)
-    except Exception:
-        return
+def _phase(value: Any) -> Literal[1, 2]:
+    if isinstance(value, bool) or value not in (1, 2):
+        raise ValueError("phase must be exactly 1 or 2")
+    return value
 
 
 def _require_function_call_id(tool_context: Any) -> str:
-    """强制使用 ADK 的真实调用 ID，不允许自造兜底 ID。"""
-
-    function_call_id = getattr(tool_context, "function_call_id", None)
-    if not isinstance(function_call_id, str) or not _IDENTIFIER_RE.fullmatch(
-        function_call_id
-    ):
-        raise ValueError(
-            "google-adk ToolContext.function_call_id is required; no fallback ID"
-        )
-    return function_call_id
+    value = getattr(tool_context, "function_call_id", None)
+    if not isinstance(value, str) or not _IDENTIFIER_RE.fullmatch(value):
+        raise ValueError("ToolContext.function_call_id is required; no fallback")
+    return value
 
 
 def _valid_context_identifier(tool_context: Any) -> str | None:
@@ -1114,55 +840,21 @@ def _valid_context_identifier(tool_context: Any) -> str | None:
     return value if isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value) else None
 
 
-def _valid_invocation_id(tool_context: Any) -> str | None:
-    value = getattr(tool_context, "invocation_id", None)
-    return value if isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value) else None
-
-
 def _tool_name(tool: Any) -> str:
     value = getattr(tool, "name", None)
     if not isinstance(value, str) or not value or len(value) > 64:
         raise ValueError("tool has no bounded official name")
+    if value not in _TOOL_OBSERVATION_TYPES:
+        raise ValueError(f"unsupported a-interact tool: {value}")
     return value
 
 
 def _safe_tool_name(tool: Any) -> str:
     value = getattr(tool, "name", None)
-    if isinstance(value, str):
-        return value[:64]
-    return type(tool).__name__[:64]
-
-
-def _observation_type(tool_name: str) -> str:
-    try:
-        return _OBSERVATION_TYPES[tool_name]
-    except KeyError as exc:
-        raise ValueError(f"unsupported a-interact tool: {tool_name}") from exc
-
-
-def _task_id(state: Any) -> str:
-    task_id = state.get("task_id")
-    if not isinstance(task_id, str) or not _IDENTIFIER_RE.fullmatch(task_id):
-        raise ValueError("bounded task_id is required for Shadow Observation")
-    return task_id
-
-
-def _phase(value: Any) -> int:
-    if isinstance(value, bool) or value not in (1, 2):
-        raise ValueError("phase must be exactly 1 or 2")
-    return int(value)
-
-
-def _current_sequence(state: Any) -> int:
-    value = state.get(GROUNDING_SEQUENCE_KEY, 0)
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return value if 0 <= value <= _MAX_SEQUENCE else 0
+    return value[:64] if isinstance(value, str) else type(tool).__name__[:64]
 
 
 def _next_sequence(state: Any) -> int:
-    """生成严格递增的 Shadow 事件序号。"""
-
     current = state.get(GROUNDING_SEQUENCE_KEY, 0)
     if (
         isinstance(current, bool)
@@ -1170,10 +862,10 @@ def _next_sequence(state: Any) -> int:
         or current < 0
         or current >= _MAX_SEQUENCE
     ):
-        raise ValueError("invalid or exhausted Shadow sequence")
-    next_value = current + 1
-    state[GROUNDING_SEQUENCE_KEY] = next_value
-    return next_value
+        raise ValueError("invalid or exhausted SQL Grounding sequence")
+    value = current + 1
+    state[GROUNDING_SEQUENCE_KEY] = value
+    return value
 
 
 def _bounded_args_summary(args_json: str) -> str:
@@ -1183,6 +875,8 @@ def _bounded_args_summary(args_json: str) -> str:
 
 
 def _trajectory_length(state: Any) -> int | None:
+    if state is None:
+        return None
     trajectory = state.get("tool_trajectory", [])
     return len(trajectory) if isinstance(trajectory, list) else None
 
@@ -1191,9 +885,7 @@ def _new_trajectory_index(state: Any, before: int | None) -> int | None:
     trajectory = state.get("tool_trajectory", [])
     if before is None or not isinstance(trajectory, list):
         return None
-    if len(trajectory) != before + 1:
-        return None
-    return before
+    return before if len(trajectory) == before + 1 else None
 
 
 def _model_call_count(state: Any) -> int | None:
@@ -1213,106 +905,20 @@ def _new_model_call_index(state: Any, before: int | None) -> int | None:
     return before
 
 
+def _request_sha256(llm_request: Any) -> str:
+    return _sha256_text(
+        json.dumps(
+            to_jsonable(llm_request),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    )
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _request_sha256(llm_request: Any) -> str:
-    """Hash the current JSON-safe model request without retaining its body."""
-
-    payload = json.dumps(
-        to_jsonable(llm_request),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _requirement_view_block(view: str) -> str:
-    return f"{REQUIREMENT_VIEW_BEGIN}\n{view}\n{REQUIREMENT_VIEW_END}"
-
-
-def _strip_requirement_view_blocks(value: str) -> str:
-    """Remove complete Valibra blocks while preserving all other instruction text."""
-
-    result = value
-    while True:
-        begin = result.find(REQUIREMENT_VIEW_BEGIN)
-        if begin < 0:
-            return result
-        end = result.find(REQUIREMENT_VIEW_END, begin + len(REQUIREMENT_VIEW_BEGIN))
-        if end < 0:
-            raise ValueError("incomplete Valibra Requirement View block")
-        end += len(REQUIREMENT_VIEW_END)
-        removal_start = begin
-        if result[max(0, begin - 2) : begin] == "\n\n":
-            removal_start = begin - 2
-        result = result[:removal_start] + result[end:]
-
-
-def _inject_requirement_view(llm_request: Any, block: str) -> None:
-    """Atomically leave exactly one current View block in system_instruction."""
-
-    append = getattr(llm_request, "append_instructions", None)
-    config = getattr(llm_request, "config", None)
-    if not callable(append) or config is None:
-        raise TypeError("LlmRequest.append_instructions is required")
-    system_instruction = getattr(config, "system_instruction", None)
-    if system_instruction is not None and not isinstance(system_instruction, str):
-        raise TypeError("LlmRequest system_instruction must be a string")
-
-    original_config = copy.deepcopy(config)
-    original_contents = copy.deepcopy(getattr(llm_request, "contents", None))
-    try:
-        current = system_instruction or ""
-        if (
-            current.count(REQUIREMENT_VIEW_BEGIN) == 1
-            and current.count(REQUIREMENT_VIEW_END) == 1
-            and block in current
-        ):
-            return
-        base_instruction = _strip_requirement_view_blocks(current)
-        config.system_instruction = base_instruction or None
-        returned_contents = append([block])
-        if returned_contents:
-            raise RuntimeError(
-                "append_instructions returned unexpected user contents"
-            )
-        if getattr(llm_request, "contents", None) != original_contents:
-            raise RuntimeError("append_instructions modified request contents")
-        final_instruction = getattr(config, "system_instruction", None)
-        if not isinstance(final_instruction, str):
-            raise RuntimeError("append_instructions produced no string instruction")
-        if (
-            final_instruction.count(REQUIREMENT_VIEW_BEGIN) != 1
-            or final_instruction.count(REQUIREMENT_VIEW_END) != 1
-            or block not in final_instruction
-            or _strip_requirement_view_blocks(final_instruction)
-            != base_instruction
-        ):
-            raise RuntimeError("Requirement View injection was not atomic")
-    except BaseException:
-        llm_request.config = original_config
-        if hasattr(llm_request, "contents"):
-            llm_request.contents = original_contents
-        raise
-
-
-def _attach_requirement_view_audit(
-    state: Any,
-    index: int,
-    metadata: dict[str, Any],
-) -> None:
-    """Attach one bounded Shadow View to its exact Baseline model call."""
-
-    _attach_model_call_audit(
-        state,
-        index,
-        REQUIREMENT_VIEW_AUDIT_KEY,
-        metadata,
-    )
 
 
 def _attach_model_call_audit(
@@ -1321,23 +927,13 @@ def _attach_model_call_audit(
     key: str,
     metadata: dict[str, Any],
 ) -> None:
-    """Attach one bounded Valibra summary to an exact Baseline model call."""
-
     calls = state.get("system_agent_llm_calls", [])
     if not isinstance(calls, list) or not 0 <= index < len(calls):
         return
+    _require_bounded_audit(metadata)
     call = calls[index]
     if not isinstance(call, dict):
         return
-    encoded = json.dumps(
-        metadata,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    if len(encoded) > 4096:
-        raise ValueError("Valibra model-call audit exceeds bounded size")
     updated = list(calls)
     updated_call = dict(call)
     updated_call[key] = metadata
@@ -1345,28 +941,17 @@ def _attach_model_call_audit(
     state["system_agent_llm_calls"] = updated
 
 
-def _attach_shadow_audit(
+def _attach_tool_audit(
     state: Any,
     index: int,
     metadata: dict[str, Any],
 ) -> None:
-    """把有限 Shadow 摘要挂到对应 Baseline 工具轨迹。"""
-
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list) or not 0 <= index < len(trajectory):
         return
+    _require_bounded_audit(metadata)
     event = trajectory[index]
     if not isinstance(event, dict):
-        return
-    # 摘要一旦意外膨胀就不写；这里严禁原始响应、Prompt、凭据和模型正文。
-    encoded = json.dumps(
-        metadata,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    if len(encoded) > 4096:
         return
     updated = list(trajectory)
     updated_event = dict(event)
@@ -1375,15 +960,34 @@ def _attach_shadow_audit(
     state["tool_trajectory"] = updated
 
 
-def _runtime_bytes(runtime: RequirementGroundingRuntime) -> int:
-    """计算 Runtime 的规范 JSON 大小，供审计查看。"""
+def _append_error_audit(state: Any, metadata: dict[str, Any]) -> None:
+    try:
+        _require_bounded_audit(metadata)
+        existing = state.get(GROUNDING_ERROR_AUDIT_KEY, [])
+        if not isinstance(existing, list):
+            existing = []
+        state[GROUNDING_ERROR_AUDIT_KEY] = (
+            [*existing[-(_MAX_ERROR_AUDITS - 1) :], metadata]
+        )
+    except Exception:
+        return
 
-    return len(
-        json.dumps(
-            runtime.model_dump(mode="json"),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    )
+
+def _bounded_error_audit(
+    stage: str,
+    exception: BaseException,
+    *,
+    function_call_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "service_status": "failed_open",
+        "stage": stage[:64],
+        "function_call_id": function_call_id,
+        "error_type": type(exception).__name__[:128],
+    }
+
+
+def _require_bounded_audit(metadata: dict[str, Any]) -> None:
+    encoded = canonical_json(metadata).encode("utf-8")
+    if len(encoded) > _MAX_AUDIT_BYTES:
+        raise ValueError("SQL Grounding audit exceeds bounded size")

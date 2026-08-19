@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -8,8 +7,10 @@ from fastapi.testclient import TestClient
 from system_agent import server as baseline_server
 from system_agent.adk_runtime import AdkRuntime as BaselineAdkRuntime
 from valibra_agent import server as valibra_server
+from valibra_agent import grounding_callbacks
 from valibra_agent.adk_runtime import AdkRuntime
 from valibra_agent.agent import build_agent
+from valibra_agent.sql_grounding.models import GroundingRuntime
 
 
 class FakeSessionService:
@@ -82,6 +83,42 @@ class RuntimeParityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(removed["session_removed"])
         self.assertFalse(absent["session_removed"])
         self.assertEqual(service.deleted[-1][-1], reset["session_id"])
+
+    async def test_sql_grounding_runtime_reuse_reset_and_cleanup_isolation(self):
+        runtime = AdkRuntime()
+        service = FakeSessionService()
+        runner = SimpleNamespace(session_service=service)
+        runtime._get_runner = AsyncMock(
+            return_value=(runner, "bird_interact_a_interact")
+        )
+        persisted = GroundingRuntime().model_dump(mode="json")
+        first = await runtime.init_session(
+            task_id="task-sqlg",
+            mode="a-interact",
+            state={grounding_callbacks.GROUNDING_RUNTIME_KEY: persisted},
+            reset=False,
+        )
+        reused = await runtime.init_session(
+            task_id="task-sqlg", mode="a-interact", state={}, reset=False
+        )
+        self.assertEqual(first["session_id"], reused["session_id"])
+        self.assertEqual(
+            service.created[0][2].state[
+                grounding_callbacks.GROUNDING_RUNTIME_KEY
+            ],
+            persisted,
+        )
+
+        reset = await runtime.init_session(
+            task_id="task-sqlg", mode="a-interact", state={}, reset=True
+        )
+        self.assertNotEqual(reset["session_id"], first["session_id"])
+        self.assertNotIn(
+            grounding_callbacks.GROUNDING_RUNTIME_KEY,
+            service.created[1][2].state,
+        )
+        removed = await runtime.cleanup_session("task-sqlg", "a-interact")
+        self.assertTrue(removed["session_removed"])
 
 
 class HttpContractTests(unittest.TestCase):
@@ -160,14 +197,13 @@ class HttpContractTests(unittest.TestCase):
         fake_runtime.run_turn.assert_awaited_once()
         fake_runtime.cleanup_session.assert_awaited_once()
 
-    def test_health_identifies_rule_shadow_and_contains_no_credentials(self):
-        with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}):
-            with TestClient(valibra_server.app) as client:
-                response = client.get("/health")
+    def test_health_identifies_sql_grounding_v1_shadow_without_credentials(self):
+        with TestClient(valibra_server.app) as client:
+            response = client.get("/health")
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["service"], "valibra_agent")
-        self.assertEqual(body["variant"], "P4.3c-Rule-Shadow")
+        self.assertEqual(body["variant"], "SQL-Grounding-V1-SG3-Shadow")
         self.assertTrue(body["configuration_summary"]["grounding_enabled"])
         self.assertEqual(
             body["configuration_summary"]["grounding_mode"],
@@ -175,7 +211,18 @@ class HttpContractTests(unittest.TestCase):
         )
         self.assertEqual(
             body["configuration_summary"]["grounding_updater"],
-            "rule",
+            "deterministic_passthrough",
+        )
+        self.assertEqual(
+            body["configuration_summary"]["grounding_core"],
+            "sql_grounding_v1",
+        )
+        self.assertFalse(
+            body["configuration_summary"]["grounding_provider_enabled"]
+        )
+        self.assertFalse(body["configuration_summary"]["control_enabled"])
+        self.assertFalse(
+            body["configuration_summary"]["attempt_gate_enabled"]
         )
         self.assertFalse(
             body["configuration_summary"]["prompt_view_injected"]
