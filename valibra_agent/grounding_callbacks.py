@@ -1,10 +1,11 @@
 """SQL Grounding V1 callbacks around the frozen B0 callbacks.
 
 SG6a injects the bounded four-dimensional Grounding View and Control Hint into
-the model system instruction.  The first-submit Attempt Gate remains SG5
-shadow-only.  Baseline remains the only execution fact source: this module
-never changes model contents, model responses, tool protocol, Bird-Coin,
-submit execution, or the official trajectory.
+the model system instruction.  SG6b hard-blocks only a safely pairable,
+premature first submit before B0 can charge it.  A narrowly frozen budget
+liveness policy bypasses that block when every current-focus Grounding tool is
+unaffordable, so the Baseline forced-exit path remains reachable.  Baseline is
+still the only source of Official tool, Bird-Coin, and submit lifecycle facts.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -86,6 +88,8 @@ GROUNDING_UPDATE_AUDIT_KEY = "valibra_sql_grounding_update"
 GROUNDING_CONTROL_AUDIT_KEY = "valibra_sql_grounding_control"
 GROUNDING_ERROR_AUDIT_KEY = "valibra:sql_grounding_error_audits"
 GROUNDING_PROVIDER_CALL_COUNT_KEY = "valibra:sql_grounding_provider_calls"
+GROUNDING_BLOCKED_SUBMITS_KEY = "valibra:sql_grounding_blocked_submits"
+GROUNDING_GATE_AUDITS_KEY = "valibra:sql_grounding_gate_audits"
 
 # The frozen P6 export module imports these names at module load.  They are
 # retained only so that historical, read-only export code remains importable;
@@ -112,8 +116,16 @@ _MAX_ARGS_SUMMARY_CHARS = 768
 _MAX_AUDIT_BYTES = 4_096
 _MAX_ERROR_AUDITS = 64
 _MAX_PENDING = 64
+_MAX_BLOCKED_SUBMITS = 64
+_MAX_GATE_AUDITS = 64
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+
+_BLOCKED_SUBMIT_STATUS = "VALIBRA_FIRST_SUBMIT_BLOCKED"
+_BLOCKED_SUBMIT_GUIDANCE = (
+    "Continue Grounding using the current Valibra Control Hint before "
+    "retrying submit_sql."
+)
 
 _TOOL_OBSERVATION_TYPES: Mapping[str, ObservationType] = {
     "execute_sql": "sql_execution",
@@ -241,6 +253,105 @@ class _PendingToolCall:
             if not isinstance(record.control_gate_audit, dict):
                 raise ValueError("invalid pending Control audit")
             _require_bounded_audit(record.control_gate_audit)
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class _GateExecutionPolicy:
+    """Transient SG6b execution facts; never part of Grounding Runtime."""
+
+    action: Literal[
+        "blocked",
+        "open",
+        "budget_liveness_bypass",
+        "failed_open",
+    ]
+    budget_remaining: float | None = None
+    focus_directions: tuple[str, ...] = ()
+    affordable_directions: tuple[str, ...] = ()
+    liveness_bypass_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockedSubmitCall:
+    """Bounded Callback glue for one ADK-level synthetic submit denial."""
+
+    function_call_id: str
+    tool_name: Literal["submit_sql"]
+    args_digest: str
+    gate_reason: str
+    stage: str
+    focus: str
+    denial_sha256: str
+    sequence: int
+    gate_audit: dict[str, Any]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "function_call_id": self.function_call_id,
+            "tool_name": self.tool_name,
+            "args_digest": self.args_digest,
+            "gate_reason": self.gate_reason,
+            "stage": self.stage,
+            "focus": self.focus,
+            "denial_sha256": self.denial_sha256,
+            "sequence": self.sequence,
+            "gate_audit": self.gate_audit,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_BlockedSubmitCall":
+        required = {
+            "function_call_id",
+            "tool_name",
+            "args_digest",
+            "gate_reason",
+            "stage",
+            "focus",
+            "denial_sha256",
+            "sequence",
+            "gate_audit",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid blocked-submit record")
+        record = cls(**payload)
+        if not _IDENTIFIER_RE.fullmatch(record.function_call_id):
+            raise ValueError("invalid blocked-submit function_call_id")
+        if record.tool_name != "submit_sql":
+            raise ValueError("blocked record must be submit_sql")
+        for value, label in (
+            (record.args_digest, "args digest"),
+            (record.denial_sha256, "denial digest"),
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError(f"invalid blocked-submit {label}")
+        if not _IDENTIFIER_RE.fullmatch(record.gate_reason):
+            raise ValueError("invalid blocked-submit Gate reason")
+        if record.stage not in {
+            "INITIAL_GROUNDING",
+            "SQL_ATTEMPT",
+            "REPAIR",
+            "P2_INCREMENTAL",
+            "DONE",
+        }:
+            raise ValueError("invalid blocked-submit stage")
+        if record.focus not in {
+            "tables",
+            "join_keys",
+            "column_mapping",
+            "domain_knowledge",
+            "none",
+        }:
+            raise ValueError("invalid blocked-submit focus")
+        if (
+            isinstance(record.sequence, bool)
+            or not isinstance(record.sequence, int)
+            or not 1 <= record.sequence <= _MAX_SEQUENCE
+        ):
+            raise ValueError("invalid blocked-submit sequence")
+        if not isinstance(record.gate_audit, dict):
+            raise ValueError("invalid blocked-submit Gate audit")
+        _require_bounded_audit(record.gate_audit)
         return record
 
 
@@ -469,7 +580,7 @@ async def before_tool_callback(
     args: dict,
     tool_context: ToolContext,
 ) -> dict | None:
-    """Evaluate a shadow gate before B0 cost, then register an exact call."""
+    """Apply the active first-submit policy before B0 cost, then register B0."""
 
     from system_agent import callbacks as baseline_callbacks
 
@@ -484,22 +595,104 @@ async def before_tool_callback(
                 runtime,
                 first_submit=first_submit,
             )
-            control_gate_audit = {
-                "control_status": "failed_open" if degraded else "succeeded",
-                "stage_before": runtime.stage,
-                "attempt_gate": {
-                    "applicable": gate.applicable,
-                    "open": gate.open,
-                    "reason": gate.reason,
-                    "would_block": gate.applicable and not gate.open,
-                    "blocked": False,
-                    "first_submit": first_submit,
-                },
-            }
             if degraded:
-                control_gate_audit["error_type"] = "RuntimeValidationError"
+                policy = _GateExecutionPolicy(action="failed_open")
+                control_gate_audit = _active_gate_audit(
+                    runtime,
+                    gate=gate,
+                    first_submit=first_submit,
+                    policy=policy,
+                    control_status="failed_open",
+                    error_type="RuntimeValidationError",
+                )
+            else:
+                try:
+                    policy = _evaluate_gate_execution_policy(
+                        runtime,
+                        gate=gate,
+                        state=state,
+                        tool_costs=baseline_callbacks.TOOL_COSTS,
+                    )
+                except Exception as exc:
+                    policy = _GateExecutionPolicy(action="failed_open")
+                    control_gate_audit = _active_gate_audit(
+                        runtime,
+                        gate=gate,
+                        first_submit=first_submit,
+                        policy=policy,
+                        control_status="failed_open",
+                        error_type=type(exc).__name__[:128],
+                    )
+                    _append_error_audit(
+                        state,
+                        _bounded_error_audit(
+                            "before_tool_gate_execution_policy",
+                            exc,
+                            function_call_id=_valid_context_identifier(
+                                tool_context
+                            ),
+                        ),
+                    )
+                else:
+                    control_gate_audit = _active_gate_audit(
+                        runtime,
+                        gate=gate,
+                        first_submit=first_submit,
+                        policy=policy,
+                        control_status="succeeded",
+                    )
+            if policy.action == "blocked":
+                try:
+                    function_call_id = _require_function_call_id(tool_context)
+                    args_json = canonical_json(to_jsonable(args))
+                    denial = _blocked_submit_denial(gate.reason)
+                    denial_sha256 = _sha256_text(canonical_json(denial))
+                    record = _BlockedSubmitCall(
+                        function_call_id=function_call_id,
+                        tool_name="submit_sql",
+                        args_digest=_sha256_text(args_json),
+                        gate_reason=gate.reason,
+                        stage=runtime.stage,
+                        focus=runtime.focus_dimension,
+                        denial_sha256=denial_sha256,
+                        sequence=_next_sequence(state),
+                        gate_audit=control_gate_audit,
+                    )
+                    _add_blocked_submit(state, record)
+                    _upsert_gate_audit(
+                        state,
+                        _blocked_gate_audit(
+                            record,
+                            budget_remaining=policy.budget_remaining,
+                            after_tool_seen=False,
+                        ),
+                    )
+                except Exception as exc:
+                    _cleanup_blocked_best_effort(state, tool_context)
+                    policy = _GateExecutionPolicy(action="failed_open")
+                    control_gate_audit = _active_gate_audit(
+                        runtime,
+                        gate=gate,
+                        first_submit=first_submit,
+                        policy=policy,
+                        control_status="failed_open",
+                        error_type=type(exc).__name__[:128],
+                    )
+                    _append_error_audit(
+                        state,
+                        _bounded_error_audit(
+                            "before_tool_active_gate",
+                            exc,
+                            function_call_id=_valid_context_identifier(
+                                tool_context
+                            ),
+                        ),
+                    )
+                else:
+                    return denial
             _require_bounded_audit(control_gate_audit)
         except Exception as exc:
+            _cleanup_blocked_best_effort(state, tool_context)
             control_gate_audit = {
                 "control_status": "failed_open",
                 "stage_before": None,
@@ -510,6 +703,13 @@ async def before_tool_callback(
                     "would_block": False,
                     "blocked": False,
                     "first_submit": None,
+                    "liveness_bypass": False,
+                    "liveness_bypass_reason": None,
+                    "budget_remaining": None,
+                    "focus_direction_count": None,
+                    "affordable_direction_count": None,
+                    "affordable_tool_directions": [],
+                    "effective_gate_action": "failed_open",
                 },
                 "error_type": type(exc).__name__[:128],
             }
@@ -568,6 +768,48 @@ async def after_tool_callback(
     from system_agent import callbacks as baseline_callbacks
 
     state = getattr(tool_context, "state", None)
+    function_call_id = _valid_context_identifier(tool_context)
+    if (
+        state is not None
+        and function_call_id is not None
+        and _blocked_submit_present(state, function_call_id)
+    ):
+        try:
+            blocked = _pop_blocked_submit(state, function_call_id)
+            if blocked is None:
+                raise ValueError("exact blocked-submit record disappeared")
+            denial = _blocked_submit_denial(blocked.gate_reason)
+            error_type: str | None = None
+            if _safe_tool_name(tool) != "submit_sql":
+                error_type = "BlockedToolNameMismatch"
+            elif _sha256_text(canonical_json(to_jsonable(tool_response))) != (
+                blocked.denial_sha256
+            ):
+                error_type = "BlockedResponseMismatch"
+            _upsert_gate_audit(
+                state,
+                _blocked_gate_audit(
+                    blocked,
+                    budget_remaining=_blocked_record_budget(blocked),
+                    after_tool_seen=True,
+                    error_type=error_type,
+                ),
+            )
+            return denial
+        except Exception as exc:
+            _cleanup_blocked_best_effort(state, tool_context)
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "after_tool_blocked_submit",
+                    exc,
+                    function_call_id=function_call_id,
+                ),
+            )
+            # Exact presence proves ADK skipped the tool.  Never create a fake
+            # Official result by falling through to Baseline after_tool.
+            return tool_response
+
     trajectory_before = _trajectory_length(state)
     try:
         baseline_override = await baseline_callbacks.after_tool_callback(
@@ -717,6 +959,34 @@ async def on_tool_error_callback(
     if state is None:
         return None
     function_call_id = _valid_context_identifier(tool_context)
+    if (
+        function_call_id is not None
+        and _blocked_submit_present(state, function_call_id)
+    ):
+        try:
+            blocked = _pop_blocked_submit(state, function_call_id)
+            if blocked is not None:
+                _upsert_gate_audit(
+                    state,
+                    _blocked_gate_audit(
+                        blocked,
+                        budget_remaining=_blocked_record_budget(blocked),
+                        after_tool_seen=False,
+                        error_type=type(error).__name__[:128],
+                    ),
+                )
+        except Exception as callback_error:
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "tool_error_blocked_submit",
+                    callback_error,
+                    function_call_id=function_call_id,
+                ),
+            )
+        finally:
+            _cleanup_blocked_best_effort(state, tool_context)
+        return None
     try:
         exact_id = _require_function_call_id(tool_context)
         pending = _pop_pending(state, exact_id)
@@ -806,14 +1076,14 @@ async def _handle_submit_observation(
     )
     gate = pending.control_gate_audit or {}
     attempt_gate = gate.get("attempt_gate", {})
-    would_block = bool(
-        isinstance(attempt_gate, dict) and attempt_gate.get("would_block") is True
+    blocked = bool(
+        isinstance(attempt_gate, dict) and attempt_gate.get("blocked") is True
     )
-    if would_block:
+    if blocked:
         return (
             _ObservationResult(
                 runtime=runtime,
-                service_status="skipped_shadow_gate_would_block",
+                service_status="skipped_active_gate_blocked_submit",
                 observation=observation,
                 control_status="succeeded",
                 official_outcome=outcome,
@@ -833,7 +1103,16 @@ async def _handle_submit_observation(
             None,
         )
 
-    transitioned, transition = _apply_control_event(runtime, event)
+    liveness_bypass = bool(
+        isinstance(attempt_gate, dict)
+        and attempt_gate.get("effective_gate_action")
+        == "budget_liveness_bypass"
+    )
+    transitioned, transition = _apply_control_event(
+        runtime,
+        event,
+        allow_initial_forced_exit=liveness_bypass,
+    )
     if event == "official_submit_failed":
         repaired = await _handle_observation(state, observation, transitioned)
         return (
@@ -1000,8 +1279,14 @@ async def _handle_observation(
 def _apply_control_event(
     runtime: GroundingRuntime,
     event: StageEvent,
+    *,
+    allow_initial_forced_exit: bool = False,
 ) -> tuple[GroundingRuntime, dict[str, str]]:
-    candidate = transition_grounding_stage(runtime, event)
+    candidate = transition_grounding_stage(
+        runtime,
+        event,
+        allow_initial_forced_exit=allow_initial_forced_exit,
+    )
     return candidate, {
         "event": event,
         "stage_before": runtime.stage,
@@ -1423,6 +1708,13 @@ def _control_audit_for_runtime(
             "would_block": False,
             "blocked": False,
             "first_submit": None,
+            "liveness_bypass": False,
+            "liveness_bypass_reason": None,
+            "budget_remaining": None,
+            "focus_direction_count": None,
+            "affordable_direction_count": None,
+            "affordable_tool_directions": [],
+            "effective_gate_action": "open",
         }
     stage_before = gate.get("stage_before")
     if not isinstance(stage_before, str):
@@ -1433,7 +1725,7 @@ def _control_audit_for_runtime(
         else control_status
     )
     audit: dict[str, Any] = {
-        "mode": "shadow",
+        "mode": "active_first_submit",
         "control_status": effective_status,
         "stage_before": stage_before,
         "stage_after": runtime.stage,
@@ -1452,6 +1744,251 @@ def _control_audit_for_runtime(
         audit["error_type"] = effective_error[:128]
     _require_bounded_audit(audit)
     return audit
+
+
+def _evaluate_gate_execution_policy(
+    runtime: GroundingRuntime,
+    *,
+    gate: Any,
+    state: Any,
+    tool_costs: Mapping[str, Any],
+) -> _GateExecutionPolicy:
+    """Resolve the approved SG6b policy without changing pure readiness."""
+
+    if not gate.applicable or gate.open:
+        return _GateExecutionPolicy(action="open")
+    if runtime.stage != "INITIAL_GROUNDING" or runtime.focus_dimension == "none":
+        return _GateExecutionPolicy(action="blocked")
+
+    directions = tuple(tool_directions_for_focus(runtime.focus_dimension))
+    if not directions:
+        raise ValueError("current focus has no frozen tool directions")
+    budget = state.get("budget_remaining")
+    if (
+        isinstance(budget, bool)
+        or not isinstance(budget, (int, float))
+        or not math.isfinite(float(budget))
+    ):
+        raise ValueError("budget_remaining must be a finite number")
+    if not isinstance(tool_costs, Mapping):
+        raise ValueError("Baseline TOOL_COSTS is unavailable")
+
+    affordable: list[str] = []
+    for direction in directions:
+        if direction not in tool_costs:
+            raise ValueError("focus direction has no Baseline cost")
+        cost = tool_costs[direction]
+        if (
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
+            or not math.isfinite(float(cost))
+            or float(cost) < 0
+        ):
+            raise ValueError("Baseline tool cost must be finite and non-negative")
+        if float(cost) <= float(budget):
+            affordable.append(direction)
+
+    if affordable:
+        return _GateExecutionPolicy(
+            action="blocked",
+            budget_remaining=float(budget),
+            focus_directions=directions,
+            affordable_directions=tuple(affordable),
+        )
+    return _GateExecutionPolicy(
+        action="budget_liveness_bypass",
+        budget_remaining=float(budget),
+        focus_directions=directions,
+        affordable_directions=(),
+        liveness_bypass_reason="no_affordable_focus_direction",
+    )
+
+
+def _active_gate_audit(
+    runtime: GroundingRuntime,
+    *,
+    gate: Any,
+    first_submit: bool,
+    policy: _GateExecutionPolicy,
+    control_status: Literal["succeeded", "failed_open"],
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    attempt_gate = {
+        "applicable": bool(gate.applicable),
+        "open": bool(gate.open),
+        "reason": str(gate.reason)[:128],
+        "would_block": bool(gate.applicable and not gate.open),
+        "blocked": policy.action == "blocked",
+        "first_submit": first_submit,
+        "liveness_bypass": policy.action == "budget_liveness_bypass",
+        "liveness_bypass_reason": policy.liveness_bypass_reason,
+        "budget_remaining": policy.budget_remaining,
+        "focus_direction_count": len(policy.focus_directions),
+        "affordable_direction_count": len(policy.affordable_directions),
+        "affordable_tool_directions": list(policy.affordable_directions),
+        "effective_gate_action": policy.action,
+    }
+    audit: dict[str, Any] = {
+        "control_status": control_status,
+        "stage_before": runtime.stage,
+        "grounding_revision": runtime.grounding_revision,
+        "state_sha256": sql_grounding_state_sha256(runtime.grounding_state),
+        "attempt_gate": attempt_gate,
+    }
+    if error_type is not None:
+        audit["error_type"] = error_type[:128]
+    _require_bounded_audit(audit)
+    return audit
+
+
+def _blocked_submit_denial(gate_reason: str) -> dict[str, str]:
+    if not isinstance(gate_reason, str) or not _IDENTIFIER_RE.fullmatch(gate_reason):
+        raise ValueError("invalid Gate reason for blocked response")
+    return {
+        "status": _BLOCKED_SUBMIT_STATUS,
+        "reason": gate_reason,
+        "guidance": _BLOCKED_SUBMIT_GUIDANCE,
+    }
+
+
+def _load_blocked_submits(state: Any) -> dict[str, _BlockedSubmitCall]:
+    payload = state.get(GROUNDING_BLOCKED_SUBMITS_KEY, {})
+    if not isinstance(payload, dict) or len(payload) > _MAX_BLOCKED_SUBMITS:
+        raise ValueError("invalid blocked-submit store")
+    records: dict[str, _BlockedSubmitCall] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            raise ValueError("blocked-submit key must be a string")
+        record = _BlockedSubmitCall.from_json(value)
+        if record.function_call_id != key:
+            raise ValueError("blocked-submit key does not match function_call_id")
+        records[key] = record
+    return records
+
+
+def _store_blocked_submits(
+    state: Any,
+    records: Mapping[str, _BlockedSubmitCall],
+) -> None:
+    if len(records) > _MAX_BLOCKED_SUBMITS:
+        raise ValueError("too many blocked-submit records")
+    state[GROUNDING_BLOCKED_SUBMITS_KEY] = {
+        key: _BlockedSubmitCall.from_json(records[key].to_json()).to_json()
+        for key in sorted(records)
+    }
+
+
+def _add_blocked_submit(state: Any, record: _BlockedSubmitCall) -> None:
+    records = _load_blocked_submits(state)
+    if record.function_call_id in records:
+        raise ValueError("duplicate blocked-submit function_call_id")
+    records[record.function_call_id] = _BlockedSubmitCall.from_json(
+        record.to_json()
+    )
+    _store_blocked_submits(state, records)
+
+
+def _pop_blocked_submit(
+    state: Any,
+    function_call_id: str,
+) -> _BlockedSubmitCall | None:
+    records = _load_blocked_submits(state)
+    record = records.pop(function_call_id, None)
+    _store_blocked_submits(state, records)
+    return record
+
+
+def _blocked_submit_present(state: Any, function_call_id: str) -> bool:
+    payload = state.get(GROUNDING_BLOCKED_SUBMITS_KEY, {})
+    return isinstance(payload, dict) and function_call_id in payload
+
+
+def _cleanup_blocked_best_effort(state: Any, tool_context: Any) -> None:
+    function_call_id = _valid_context_identifier(tool_context)
+    if function_call_id is None:
+        return
+    payload = state.get(GROUNDING_BLOCKED_SUBMITS_KEY)
+    if not isinstance(payload, dict) or function_call_id not in payload:
+        return
+    cleaned = dict(payload)
+    cleaned.pop(function_call_id, None)
+    state[GROUNDING_BLOCKED_SUBMITS_KEY] = cleaned
+
+
+def _load_gate_audits(state: Any) -> list[dict[str, Any]]:
+    payload = state.get(GROUNDING_GATE_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) > _MAX_GATE_AUDITS:
+        raise ValueError("invalid active Gate audit store")
+    records: list[dict[str, Any]] = []
+    for value in payload:
+        if not isinstance(value, dict):
+            raise ValueError("active Gate audit must be an object")
+        _require_bounded_audit(value)
+        records.append(dict(value))
+    return records
+
+
+def _upsert_gate_audit(state: Any, audit: dict[str, Any]) -> None:
+    _require_bounded_audit(audit)
+    function_call_id = audit.get("function_call_id")
+    if not isinstance(function_call_id, str) or not _IDENTIFIER_RE.fullmatch(
+        function_call_id
+    ):
+        raise ValueError("active Gate audit requires exact function_call_id")
+    records = _load_gate_audits(state)
+    indexes = [
+        index
+        for index, item in enumerate(records)
+        if item.get("function_call_id") == function_call_id
+    ]
+    if len(indexes) > 1:
+        raise ValueError("duplicate active Gate audits")
+    if indexes:
+        records[indexes[0]] = dict(audit)
+    else:
+        if len(records) >= _MAX_GATE_AUDITS:
+            raise ValueError("active Gate audit store is full")
+        records.append(dict(audit))
+    state[GROUNDING_GATE_AUDITS_KEY] = records
+
+
+def _blocked_gate_audit(
+    record: _BlockedSubmitCall,
+    *,
+    budget_remaining: float | None,
+    after_tool_seen: bool,
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    audit = record.gate_audit
+    result: dict[str, Any] = {
+        "function_call_id": record.function_call_id,
+        "mode": "active_first_submit",
+        "pure_gate_reason": record.gate_reason,
+        "effective_gate_action": "blocked",
+        "stage": record.stage,
+        "focus": record.focus,
+        "state_sha256": audit.get("state_sha256"),
+        "grounding_revision": audit.get("grounding_revision"),
+        "budget_remaining": budget_remaining,
+        "denial_sha256": record.denial_sha256,
+        "after_tool_seen": after_tool_seen,
+        "actual_tool_executed": False,
+        "baseline_before_tool_called": False,
+        "baseline_after_tool_called": False,
+        "sequence": record.sequence,
+    }
+    if error_type is not None:
+        result["error_type"] = error_type[:128]
+    _require_bounded_audit(result)
+    return result
+
+
+def _blocked_record_budget(record: _BlockedSubmitCall) -> float | None:
+    attempt = record.gate_audit.get("attempt_gate")
+    if not isinstance(attempt, dict):
+        return None
+    value = attempt.get("budget_remaining")
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def _load_pending(state: Any) -> dict[str, _PendingToolCall]:

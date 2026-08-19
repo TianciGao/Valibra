@@ -524,9 +524,8 @@ class SG6aBoundsGateHealthTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(forbidden, instruction)
 
-    async def test_closed_first_submit_gate_stays_shadow_and_matches_baseline_cost(self):
+    async def test_active_view_is_unchanged_while_closed_submit_is_blocked(self):
         valibra = task_state("sg6a-gate-v")
-        baseline = task_state("sg6a-gate-b")
         tool = SimpleNamespace(name="submit_sql")
         args = {"sql": "SELECT 1"}
         valibra_context = SimpleNamespace(
@@ -534,34 +533,22 @@ class SG6aBoundsGateHealthTests(unittest.IsolatedAsyncioTestCase):
             function_call_id="gate-v",
             invocation_id="inv-gate-v",
         )
-        baseline_context = SimpleNamespace(
-            state=baseline,
-            function_call_id="gate-b",
-            invocation_id="inv-gate-b",
-        )
         valibra_before = await grounding_callbacks.before_tool_callback(
             tool, args, valibra_context
         )
-        baseline_before = await baseline_callbacks.before_tool_callback(
-            tool, args, baseline_context
+        self.assertEqual(
+            valibra_before["status"],
+            "VALIBRA_FIRST_SUBMIT_BLOCKED",
         )
-        self.assertEqual(valibra_before, baseline_before)
-        self.assertEqual(valibra["budget_remaining"], baseline["budget_remaining"])
-        self.assertEqual(valibra["budget_remaining"], 9.0)
+        self.assertEqual(valibra["budget_remaining"], 12.0)
 
         valibra_after = await grounding_callbacks.after_tool_callback(
-            tool, args, valibra_context, "incorrect"
+            tool, args, valibra_context, valibra_before
         )
-        baseline_after = await baseline_callbacks.after_tool_callback(
-            tool, args, baseline_context, "incorrect"
-        )
-        self.assertEqual(valibra_after, baseline_after)
-        self.assertEqual(len(valibra["tool_trajectory"]), 1)
-        gate = valibra["tool_trajectory"][0][
-            grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
-        ]["attempt_gate"]
-        self.assertTrue(gate["would_block"])
-        self.assertFalse(gate["blocked"])
+        self.assertEqual(valibra_after, valibra_before)
+        self.assertEqual(valibra["tool_trajectory"], [])
+        audit = valibra[grounding_callbacks.GROUNDING_GATE_AUDITS_KEY][0]
+        self.assertEqual(audit["effective_gate_action"], "blocked")
 
     def test_health_and_frozen_contracts(self):
         summary = server._configuration_summary()
@@ -571,10 +558,11 @@ class SG6aBoundsGateHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["prompt_view_injected"])
         self.assertEqual(summary["control_mode"], "active_hint")
         self.assertTrue(summary["control_hint_injection_enabled"])
-        self.assertEqual(summary["attempt_gate_mode"], "shadow")
-        self.assertFalse(summary["attempt_gate_blocking_enabled"])
-        self.assertFalse(summary["attempt_gate_enabled"])
-        self.assertEqual(server._variant(summary), "SQL-Grounding-V1-SG6a-Active-View")
+        self.assertEqual(summary["attempt_gate_mode"], "active_first_submit")
+        self.assertTrue(summary["attempt_gate_blocking_enabled"])
+        self.assertTrue(summary["attempt_gate_budget_liveness_bypass"])
+        self.assertTrue(summary["attempt_gate_enabled"])
+        self.assertEqual(server._variant(summary), "SQL-Grounding-V1-SG6b-Active-Gate")
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)

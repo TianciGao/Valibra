@@ -255,12 +255,10 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(control["control_hint_injected"])
         self.assertEqual(load_runtime(current).focus_dimension, "domain_knowledge")
 
-    async def test_closed_first_submit_is_observed_before_cost_but_never_blocked(self):
+    async def test_closed_first_submit_is_blocked_before_baseline_cost(self):
         valibra = task_state("sg5-closed-v")
-        baseline = task_state("sg5-closed-b")
         self.bind(valibra)
         order: list[tuple[str, float]] = []
-        original_before = baseline_callbacks.before_tool_callback
 
         def gate(runtime, *, first_submit):
             order.append(("gate", valibra["budget_remaining"]))
@@ -268,50 +266,36 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
                 runtime, first_submit=first_submit
             )
 
-        async def baseline_before(tool, args, context):
-            order.append(("baseline", context.state["budget_remaining"]))
-            return await original_before(tool, args, context)
-
         tool = SimpleNamespace(name="submit_sql")
+        baseline_mock = AsyncMock(return_value=None)
         with (
             patch.object(grounding_callbacks, "evaluate_first_submit_gate", gate),
-            patch.object(baseline_callbacks, "before_tool_callback", baseline_before),
+            patch.object(
+                baseline_callbacks,
+                "before_tool_callback",
+                baseline_mock,
+            ),
         ):
             valibra_before = await grounding_callbacks.before_tool_callback(
                 tool, {"sql": "SELECT 1"}, tool_context(valibra, "closed-v")
             )
-        pending_json = valibra[grounding_callbacks.GROUNDING_PENDING_KEY]["closed-v"]
-        self.assertNotIn("focus_before", str(pending_json))
+        self.assertEqual(valibra_before["status"], "VALIBRA_FIRST_SUBMIT_BLOCKED")
+        baseline_mock.assert_not_awaited()
         valibra_after = await grounding_callbacks.after_tool_callback(
             tool,
             {"sql": "SELECT 1"},
             tool_context(valibra, "closed-v"),
-            "incorrect",
-        )
-        baseline_before_result = await original_before(
-            tool, {"sql": "SELECT 1"}, tool_context(baseline, "closed-b")
-        )
-        baseline_after_result = await baseline_callbacks.after_tool_callback(
-            tool,
-            {"sql": "SELECT 1"},
-            tool_context(baseline, "closed-b"),
-            "incorrect",
+            valibra_before,
         )
 
-        self.assertEqual(order, [("gate", 12.0), ("baseline", 12.0)])
-        self.assertEqual(valibra_before, baseline_before_result)
-        self.assertEqual(valibra_after, baseline_after_result)
-        self.assertEqual(valibra["budget_remaining"], baseline["budget_remaining"])
+        self.assertEqual(order, [("gate", 12.0)])
+        self.assertEqual(valibra_after, valibra_before)
+        self.assertEqual(valibra["budget_remaining"], 12.0)
         self.assertEqual(load_runtime(valibra).stage, "INITIAL_GROUNDING")
-        control = valibra["tool_trajectory"][0][
-            grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
-        ]
-        self.assertTrue(control["attempt_gate"]["would_block"])
-        self.assertFalse(control["attempt_gate"]["blocked"])
-        self.assertEqual(control["official_outcome"], "p1_failed")
-        self.assertEqual(control["events"], [])
-        self.assertEqual(len(valibra["tool_trajectory"]), 1)
-        self.assertEqual(valibra["tool_trajectory"][0]["tool"], "submit_sql")
+        self.assertEqual(valibra["tool_trajectory"], [])
+        control = valibra[grounding_callbacks.GROUNDING_GATE_AUDITS_KEY][0]
+        self.assertEqual(control["effective_gate_action"], "blocked")
+        self.assertTrue(control["after_tool_seen"])
 
     async def test_open_first_submit_preserves_baseline_and_enters_repair(self):
         current = task_state("sg5-open")
@@ -538,7 +522,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
                 self.turn_token = None
                 self.assertEqual(load_runtime(current).stage, "DONE")
 
-    async def test_shadow_closed_gate_never_forces_illegal_terminal_transition(self):
+    async def test_active_closed_gate_never_forces_illegal_terminal_transition(self):
         current = task_state("sg5-closed-terminal")
         self.bind(current)
         tool = SimpleNamespace(name="submit_sql")
@@ -550,12 +534,10 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         await grounding_callbacks.after_tool_callback(tool, {"sql": "S"}, call, "passed")
 
         self.assertEqual(load_runtime(current).stage, "INITIAL_GROUNDING")
-        control = current["tool_trajectory"][0][
-            grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
-        ]
-        self.assertTrue(control["attempt_gate"]["would_block"])
-        self.assertEqual(control["official_outcome"], "task_completed_p1")
-        self.assertEqual(control["events"], [])
+        self.assertEqual(current["tool_trajectory"], [])
+        control = current[grounding_callbacks.GROUNDING_GATE_AUDITS_KEY][0]
+        self.assertEqual(control["effective_gate_action"], "blocked")
+        self.assertTrue(control["after_tool_seen"])
 
     async def test_control_transition_error_fails_open_with_last_valid_runtime(self):
         current = task_state("sg5-control-fail-open")
@@ -641,17 +623,18 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SG5HealthAndFreezeTests(unittest.TestCase):
-    def test_health_reports_active_visibility_and_shadow_gate_truthfully(self):
+    def test_health_reports_active_visibility_and_active_gate_truthfully(self):
         summary = server._configuration_summary()
         self.assertEqual(summary["grounding_prompt_view_effective_mode"], "active")
         self.assertTrue(summary["prompt_view_injection_enabled"])
         self.assertEqual(summary["control_mode"], "active_hint")
         self.assertTrue(summary["control_hint_injection_enabled"])
-        self.assertEqual(summary["attempt_gate_mode"], "shadow")
-        self.assertFalse(summary["attempt_gate_blocking_enabled"])
+        self.assertEqual(summary["attempt_gate_mode"], "active_first_submit")
+        self.assertTrue(summary["attempt_gate_blocking_enabled"])
+        self.assertTrue(summary["attempt_gate_budget_liveness_bypass"])
         self.assertTrue(summary["control_enabled"])
-        self.assertFalse(summary["attempt_gate_enabled"])
-        self.assertEqual(server._variant(summary), "SQL-Grounding-V1-SG6a-Active-View")
+        self.assertTrue(summary["attempt_gate_enabled"])
+        self.assertEqual(server._variant(summary), "SQL-Grounding-V1-SG6b-Active-Gate")
 
     def test_sg4_contract_hashes_are_unchanged(self):
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)

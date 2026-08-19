@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG6b",
+  "status": "PASS",
+  "start_head": "3ceed1d61c7fd3d169ca7b73adb8eae615fc72b0",
+  "branch": "research/sql-grounding-v1",
+  "pure_gate_changed": false,
+  "effective_actions": [
+    "blocked",
+    "open",
+    "budget_liveness_bypass",
+    "failed_open"
+  ],
+  "affordability_matrix": [
+    {"focus": "tables", "budget": 0.25, "affordable_count": 0, "action": "budget_liveness_bypass"},
+    {"focus": "tables", "budget": 1.0, "affordable_count": 1, "action": "blocked"},
+    {"focus": "column_mapping", "budget": 0.5, "affordable_count": 1, "action": "blocked"},
+    {"focus": "column_mapping", "budget": 0.49, "affordable_count": 0, "action": "budget_liveness_bypass"},
+    {"focus": "domain_knowledge", "budget": 0.5, "affordable_count": 2, "action": "blocked"},
+    {"focus": "join_keys", "budget_relation": "less_than_1.0", "affordable_count": 0, "action": "budget_liveness_bypass"}
+  ],
+  "actual_adk": {
+    "closed_block": {
+      "bird_coin_delta": 0.0,
+      "actual_submit_calls": 0,
+      "baseline_before_tool_calls": 0,
+      "baseline_after_tool_calls": 0,
+      "official_trajectory_delta": 0,
+      "after_tool_seen": true
+    },
+    "budget_liveness": {
+      "initial_budget": 0.25,
+      "focus": "tables",
+      "focus_direction_count": 1,
+      "affordable_direction_count": 0,
+      "get_schema_actual_calls": 0,
+      "submit_actual_calls": 1,
+      "final_budget": -1,
+      "official_trajectory_delta": 2,
+      "final_stage": "REPAIR"
+    }
+  },
+  "frozen_sha256": {
+    "prompt": "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594",
+    "form": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration": "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
+  },
+  "tests": {
+    "focused_passed": 13,
+    "focused_total": 13,
+    "staged_passed": 144,
+    "staged_total": 144,
+    "full_passed": 441,
+    "full_total": 441,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "grounding_provider": 0,
+    "system_provider": 0,
+    "bird_external": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "source_sha256": {
+    "valibra_agent/grounding_callbacks.py": "db88d20046f8d7bce08453916ec161ff1a8792549ecf9fb477bc3fa2157a5fc6",
+    "valibra_agent/server.py": "0c0c0c940d59f9f9b923b95470e5a3a624be02a39926307aa2e282af294d9b0d",
+    "valibra_agent/sql_grounding/control.py": "1d3a3d246de8b978680bdcf1b2e5d1cd954a514c55d67085c418224b905815af",
+    "tests/valibra/test_sg6b_active_attempt_gate.py": "1d33340b51b0593c573746a71c5d5aa92228c58d5d5fcf74dc228f9febf8ed3a"
+  },
+  "sg7_started": false
+}

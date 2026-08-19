@@ -94,6 +94,8 @@ def render_control_hint(focus: FocusDimension) -> RenderedControlHint:
 def transition_grounding_stage(
     runtime: GroundingRuntime,
     event: StageEvent,
+    *,
+    allow_initial_forced_exit: bool = False,
 ) -> GroundingRuntime:
     """Apply only an explicit future-callback lifecycle event."""
 
@@ -108,13 +110,19 @@ def transition_grounding_stage(
             )
         stage = "SQL_ATTEMPT"
     elif event == "official_submit_failed":
-        if runtime.stage not in {"SQL_ATTEMPT", "P2_INCREMENTAL"}:
+        allowed_stages = {"SQL_ATTEMPT", "P2_INCREMENTAL"}
+        if allow_initial_forced_exit:
+            allowed_stages.add("INITIAL_GROUNDING")
+        if runtime.stage not in allowed_stages:
             raise SQLGroundingValidationError(
                 "official_submit_failed requires an SQL attempt stage"
             )
         stage = "REPAIR"
     elif event == "official_p2_follow_up":
-        if runtime.stage != "SQL_ATTEMPT":
+        allowed_stages = {"SQL_ATTEMPT"}
+        if allow_initial_forced_exit:
+            allowed_stages.add("INITIAL_GROUNDING")
+        if runtime.stage not in allowed_stages:
             raise SQLGroundingValidationError(
                 "official_p2_follow_up requires SQL_ATTEMPT"
             )

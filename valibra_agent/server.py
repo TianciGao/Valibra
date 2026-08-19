@@ -19,7 +19,7 @@ from valibra_agent.adk_runtime import AdkRuntime
 from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG6a-Active")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG6b-Active")
 runtime = AdkRuntime()
 
 
@@ -88,19 +88,19 @@ def _configuration_summary() -> Dict[str, Any]:
         "prompt_view_injected": True,
         "control_mode": "active_hint",
         "control_hint_injection_enabled": True,
-        "attempt_gate_mode": "shadow",
-        "attempt_gate_blocking_enabled": False,
-        # Compatibility: the advisory Hint is active; the Gate is not.
+        "attempt_gate_mode": "active_first_submit",
+        "attempt_gate_blocking_enabled": True,
+        "attempt_gate_budget_liveness_bypass": True,
         "control_enabled": True,
-        "attempt_gate_enabled": False,
+        "attempt_gate_enabled": True,
     }
 
 
 def _variant(summary: Dict[str, Any]) -> str:
-    """Return the SG6a Active View service identity."""
+    """Return the SG6b Active Gate service identity."""
 
     del summary
-    return "SQL-Grounding-V1-SG6a-Active-View"
+    return "SQL-Grounding-V1-SG6b-Active-Gate"
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:
