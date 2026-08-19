@@ -2,6 +2,7 @@
 
 from valibra_agent.sql_grounding.models import (
     ALLOWED_CAST_TYPES,
+    CORRELATED_RELATION_AST_WHITELIST,
     FIELD_EXPRESSION_AST_WHITELIST,
     FIELD_EXPRESSION_FUNCTION_WHITELIST,
     LEGACY_GROUNDING_RUNTIME_KEY,
@@ -12,11 +13,14 @@ from valibra_agent.sql_grounding.models import (
     DomainKnowledge,
     DomainKnowledgeKind,
     FocusDimension,
+    GROUNDING_DIMENSIONS,
+    GroundingDimension,
     GroundingLLMResponse,
     GroundingRuntime,
     GroundingStage,
     SQLGroundingState,
     SQLGroundingValidationError,
+    StateDiffAuthorization,
     ValidationContext,
     canonical_json,
     canonicalize_field_expression,
@@ -24,11 +28,13 @@ from valibra_agent.sql_grounding.models import (
     sql_grounding_state_sha256,
     validate_grounding_llm_response,
     validate_grounding_runtime_transition,
+    validate_grounding_state_transition,
     validate_sql_grounding_state,
 )
 
 __all__ = [
     "ALLOWED_CAST_TYPES",
+    "CORRELATED_RELATION_AST_WHITELIST",
     "FIELD_EXPRESSION_AST_WHITELIST",
     "FIELD_EXPRESSION_FUNCTION_WHITELIST",
     "LEGACY_GROUNDING_RUNTIME_KEY",
@@ -39,11 +45,14 @@ __all__ = [
     "DomainKnowledge",
     "DomainKnowledgeKind",
     "FocusDimension",
+    "GROUNDING_DIMENSIONS",
+    "GroundingDimension",
     "GroundingLLMResponse",
     "GroundingRuntime",
     "GroundingStage",
     "SQLGroundingState",
     "SQLGroundingValidationError",
+    "StateDiffAuthorization",
     "ValidationContext",
     "canonical_json",
     "canonicalize_field_expression",
@@ -51,5 +60,6 @@ __all__ = [
     "sql_grounding_state_sha256",
     "validate_grounding_llm_response",
     "validate_grounding_runtime_transition",
+    "validate_grounding_state_transition",
     "validate_sql_grounding_state",
 ]

@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from valibra_agent.sql_grounding import (
     ALLOWED_CAST_TYPES,
+    CORRELATED_RELATION_AST_WHITELIST,
     FIELD_EXPRESSION_AST_WHITELIST,
     FIELD_EXPRESSION_FUNCTION_WHITELIST,
     LEGACY_GROUNDING_RUNTIME_KEY,
@@ -19,6 +20,7 @@ from valibra_agent.sql_grounding import (
     GroundingRuntime,
     SQLGroundingState,
     SQLGroundingValidationError,
+    StateDiffAuthorization,
     ValidationContext,
     canonical_json,
     canonicalize_field_expression,
@@ -26,6 +28,7 @@ from valibra_agent.sql_grounding import (
     sql_grounding_state_sha256,
     validate_grounding_llm_response,
     validate_grounding_runtime_transition,
+    validate_grounding_state_transition,
     validate_sql_grounding_state,
 )
 
@@ -49,6 +52,9 @@ def validation_context() -> ValidationContext:
             "audits",
             "month_targets",
             "stars",
+            "encounters",
+            "patients",
+            "planets",
         }
     )
     columns = frozenset(
@@ -74,6 +80,12 @@ def validation_context() -> ValidationContext:
             "audits.REMED_DUE",
             "month_targets.audit_month",
             "stars.rn",
+            "encounters.time_mark",
+            "encounters.pat_ref",
+            "patients.pat_key",
+            "stars.hostplname",
+            "stars.stellarref",
+            "planets.hostlink",
         }
     )
     return ValidationContext(
@@ -86,26 +98,6 @@ def validation_context() -> ValidationContext:
         official_trajectory_observation_ids=("obs-schema-1", "obs-knowledge-1"),
         known_tables=tables,
         known_columns=columns,
-        table_aliases=(
-            ("p", "plants"),
-            ("pr", "plant_record"),
-            ("om", "operational_metrics"),
-            ("ep", "electrical_performance"),
-            ("df", "data_flows"),
-            ("c", "candidates"),
-            ("m", "metrics"),
-            ("s", "metrics"),
-            ("rd", "robot_details"),
-            ("pm", "predictive_models"),
-            ("b", "score_bands"),
-            ("r", "score_rules"),
-            ("i", "incidents"),
-            ("pce", "prediction_events"),
-            ("a", "audits"),
-            ("mt", "month_targets"),
-            ("s1", "stars"),
-            ("s2", "stars"),
-        ),
         supported_domain_knowledge=frozenset(
             {
                 (
@@ -129,8 +121,8 @@ def complete_state() -> SQLGroundingState:
     return SQLGroundingState(
         tables=("plants", "plant_record", "operational_metrics"),
         join_keys=(
-            "plant_record.snapkey = om.snapops",
-            "p.sitekey = pr.sitetie",
+            "plant_record.snapkey = operational_metrics.snapops",
+            "plants.sitekey = plant_record.sitetie",
         ),
         column_mapping=(
             ColumnMapping(
@@ -214,11 +206,11 @@ class ExpressionContractTests(unittest.TestCase):
     def test_plain_json_array_cast_and_full600_expansion_examples(self) -> None:
         examples = (
             "operational_metrics.maintcost",
-            "ep.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
-            "m.values[1]",
-            "UNNEST(STRING_TO_ARRAY(c.comorbid_detail, ','))",
-            "JSONB_ARRAY_ELEMENTS_TEXT(s.session_telemetry -> 'activity_pattern' -> 'hourly_observed')",
-            "CAST(df.flow_overview AS JSONB) -> 'routing' ->> 'destination_country'",
+            "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+            "metrics.values[1]",
+            "UNNEST(STRING_TO_ARRAY(candidates.comorbid_detail, ','))",
+            "JSONB_ARRAY_ELEMENTS_TEXT(metrics.session_telemetry -> 'activity_pattern' -> 'hourly_observed')",
+            "CAST(data_flows.flow_overview AS JSONB) -> 'routing' ->> 'destination_country'",
         )
         for expression in examples:
             with self.subTest(expression=expression):
@@ -226,14 +218,14 @@ class ExpressionContractTests(unittest.TestCase):
 
     def test_equal_normalized_range_temporal_and_ordinal_relations(self) -> None:
         examples = (
-            "p.sitekey = pr.sitetie",
-            "LOWER(rd.mfgnameval) = pm.mfgnameval_lower",
-            "TRIM(rd.mfgnameval) = TRIM(pm.mfgnameval_lower)",
-            "b.score BETWEEN r.min_score AND r.max_exclusive",
-            "b.score < r.max_exclusive OR (r.include_max AND b.score <= r.max_exclusive)",
-            "i.time_mark < pce.estimated_subscription_date",
-            "TO_CHAR(a.REMED_DUE, 'YYYY-MM') = mt.audit_month",
-            "s1.rn = s2.rn - 1",
+            "plants.sitekey = plant_record.sitetie",
+            "LOWER(robot_details.mfgnameval) = predictive_models.mfgnameval_lower",
+            "TRIM(robot_details.mfgnameval) = TRIM(predictive_models.mfgnameval_lower)",
+            "score_bands.score BETWEEN score_rules.min_score AND score_rules.max_exclusive",
+            "score_bands.score < score_rules.max_exclusive OR (score_rules.include_max AND score_bands.score <= score_rules.max_exclusive)",
+            "incidents.time_mark < prediction_events.estimated_subscription_date",
+            "TO_CHAR(audits.REMED_DUE, 'YYYY-MM') = month_targets.audit_month",
+            "stars.rn = stars.rn - 1",
         )
         for expression in examples:
             with self.subTest(expression=expression):
@@ -248,11 +240,11 @@ class ExpressionContractTests(unittest.TestCase):
             "operational_metrics.maintcost + 1",
         )
         invalid_relations = (
-            "p.sitekey = pr.sitetie; DELETE FROM plants",
-            "p.sitekey = pr.sitetie /* comment */",
-            "p.sitekey IN (SELECT pr.sitetie FROM plant_record AS pr)",
-            "p.sitekey = 1",
-            "p.sitekey = pr.sitetie OR 1 = 1",
+            "plants.sitekey = plant_record.sitetie; DELETE FROM plants",
+            "plants.sitekey = plant_record.sitetie /* comment */",
+            "plants.sitekey IN (SELECT inner_record.sitetie FROM plant_record AS inner_record)",
+            "plants.sitekey = 1",
+            "plants.sitekey = plant_record.sitetie OR 1 = 1",
         )
         for expression in invalid_fields:
             with self.subTest(field=expression), self.assertRaises(
@@ -268,10 +260,12 @@ class ExpressionContractTests(unittest.TestCase):
     def test_noncanonical_expression_is_rejected_not_silently_rewritten(self) -> None:
         with self.assertRaises(SQLGroundingValidationError):
             canonicalize_relation_expression(
-                "lower(rd.mfgnameval) = pm.mfgnameval_lower"
+                "lower(robot_details.mfgnameval) = predictive_models.mfgnameval_lower"
             )
         with self.assertRaises(SQLGroundingValidationError):
-            canonicalize_field_expression("unnest(string_to_array(c.comorbid_detail, ','))")
+            canonicalize_field_expression(
+                "unnest(string_to_array(candidates.comorbid_detail, ','))"
+            )
 
     def test_sqlglot_and_whitelists_are_frozen(self) -> None:
         self.assertEqual(SQLGLOT_VERSION, "26.16.4")
@@ -293,6 +287,23 @@ class ExpressionContractTests(unittest.TestCase):
         self.assertIn("TimeToStr", RELATION_EXPRESSION_AST_WHITELIST)
         self.assertNotIn("Select", RELATION_EXPRESSION_AST_WHITELIST)
         self.assertEqual(
+            CORRELATED_RELATION_AST_WHITELIST,
+            frozenset(
+                {
+                    "Column",
+                    "EQ",
+                    "From",
+                    "Identifier",
+                    "Max",
+                    "Select",
+                    "Subquery",
+                    "Table",
+                    "TableAlias",
+                    "Where",
+                }
+            ),
+        )
+        self.assertEqual(
             ALLOWED_CAST_TYPES,
             frozenset(
                 {
@@ -311,13 +322,70 @@ class ExpressionContractTests(unittest.TestCase):
             ),
         )
 
+    def test_full600_correlated_scalar_relation_shapes_are_narrowly_supported(
+        self,
+    ) -> None:
+        audited = (
+            "encounters.time_mark = (SELECT MAX(inner_encounters.time_mark) FROM encounters AS inner_encounters WHERE inner_encounters.pat_ref = patients.pat_key)",
+            "stars.hostplname = (SELECT inner_stars.hostplname FROM stars AS inner_stars WHERE inner_stars.stellarref = planets.hostlink)",
+        )
+        for expression in audited:
+            with self.subTest(expression=expression):
+                self.assertEqual(canonicalize_relation_expression(expression), expression)
 
-class ValidationContextTests(unittest.TestCase):
-    def test_full600_driven_examples_validate_against_transient_context(self) -> None:
-        context = validation_context()
+    def test_arbitrary_or_uncorrelated_selects_remain_rejected(self) -> None:
+        rejected = (
+            "patients.pat_key = (SELECT inner_encounters.pat_ref FROM encounters AS inner_encounters)",
+            "patients.pat_key = (SELECT inner_encounters.pat_ref FROM encounters AS inner_encounters WHERE inner_encounters.pat_ref = inner_encounters.enc_key)",
+            "encounters.time_mark = (SELECT MIN(inner_encounters.time_mark) FROM encounters AS inner_encounters WHERE inner_encounters.pat_ref = patients.pat_key)",
+            "patients.pat_key = (SELECT inner_encounters.pat_ref FROM encounters AS inner_encounters JOIN patients AS inner_patients ON inner_patients.pat_key = inner_encounters.pat_ref WHERE inner_encounters.pat_ref = patients.pat_key)",
+        )
+        for expression in rejected:
+            with self.subTest(expression=expression), self.assertRaises(
+                SQLGroundingValidationError
+            ):
+                canonicalize_relation_expression(expression)
+
+
+class SelfContainedAndCrossDimensionTests(unittest.TestCase):
+    def test_normal_expressions_use_real_table_identifiers(self) -> None:
         state = SQLGroundingState(
-            tables=("electrical_performance", "data_flows", "metrics"),
-            join_keys=("LOWER(rd.mfgnameval) = pm.mfgnameval_lower",),
+            tables=("electrical_performance", "plant_record", "plants"),
+            join_keys=("plants.sitekey = plant_record.sitetie",),
+            column_mapping=(
+                ColumnMapping(
+                    phrase="current power",
+                    targets=(
+                        "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(
+            state.column_mapping[0].targets[0],
+            "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+        )
+
+    def test_hidden_shorthand_aliases_cannot_enter_state(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "absent from"):
+            SQLGroundingState(
+                tables=("electrical_performance",),
+                column_mapping=(
+                    ColumnMapping(
+                        phrase="current power",
+                        targets=(
+                            "ep.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+                        ),
+                    ),
+                ),
+            )
+        with self.assertRaisesRegex(ValidationError, "absent from"):
+            SQLGroundingState(
+                tables=("plant_record", "plants"),
+                join_keys=("p.sitekey = pr.sitetie",),
+            )
+        disguised_alias = SQLGroundingState(
+            tables=("ep",),
             column_mapping=(
                 ColumnMapping(
                     phrase="current power",
@@ -325,10 +393,100 @@ class ValidationContextTests(unittest.TestCase):
                         "ep.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
                     ),
                 ),
+            ),
+        )
+        with self.assertRaisesRegex(SQLGroundingValidationError, "unknown table ep"):
+            validate_sql_grounding_state(disguised_alias, validation_context())
+
+    def test_correlated_local_alias_is_self_contained_and_context_validated(self) -> None:
+        mental = SQLGroundingState(
+            tables=("encounters", "patients"),
+            join_keys=(
+                "encounters.time_mark = (SELECT MAX(inner_encounters.time_mark) FROM encounters AS inner_encounters WHERE inner_encounters.pat_ref = patients.pat_key)",
+            ),
+        )
+        planets = SQLGroundingState(
+            tables=("planets", "stars"),
+            join_keys=(
+                "stars.hostplname = (SELECT inner_stars.hostplname FROM stars AS inner_stars WHERE inner_stars.stellarref = planets.hostlink)",
+            ),
+        )
+        context = validation_context()
+        self.assertIs(validate_sql_grounding_state(mental, context), mental)
+        self.assertIs(validate_sql_grounding_state(planets, context), planets)
+
+        with self.assertRaises(SQLGroundingValidationError):
+            canonicalize_relation_expression(
+                "encounters.time_mark = (SELECT MAX(encounters.time_mark) FROM encounters AS encounters WHERE encounters.pat_ref = patients.pat_key)"
+            )
+
+    def test_mapping_and_relation_references_must_be_subset_of_tables(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "predictive_models"):
+            SQLGroundingState(
+                tables=("robot_details",),
+                join_keys=(
+                    "LOWER(robot_details.mfgnameval) = predictive_models.mfgnameval_lower",
+                ),
+            )
+        with self.assertRaisesRegex(ValidationError, "electrical_performance"):
+            SQLGroundingState(
+                tables=("plants",),
+                column_mapping=(
+                    ColumnMapping(
+                        phrase="current power",
+                        targets=(
+                            "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+                        ),
+                    ),
+                ),
+            )
+        with self.assertRaisesRegex(ValidationError, "plants"):
+            SQLGroundingState(
+                tables=(),
+                join_keys=("plants.sitekey = plant_record.sitetie",),
+            )
+
+    def test_single_table_no_join_and_unbound_domain_fact_remain_valid(self) -> None:
+        state = SQLGroundingState(
+            tables=("operational_metrics",),
+            join_keys=(),
+            column_mapping=(),
+            domain_knowledge=(
+                DomainKnowledge(
+                    kind="database_capability",
+                    content="pg_relation_size is required to obtain relation size",
+                ),
+            ),
+        )
+        self.assertEqual(state.join_keys, ())
+        self.assertIs(validate_sql_grounding_state(state, validation_context()), state)
+
+
+class ValidationContextTests(unittest.TestCase):
+    def test_full600_driven_examples_validate_against_transient_context(self) -> None:
+        context = validation_context()
+        state = SQLGroundingState(
+            tables=(
+                "data_flows",
+                "electrical_performance",
+                "metrics",
+                "predictive_models",
+                "robot_details",
+            ),
+            join_keys=(
+                "LOWER(robot_details.mfgnameval) = predictive_models.mfgnameval_lower",
+            ),
+            column_mapping=(
+                ColumnMapping(
+                    phrase="current power",
+                    targets=(
+                        "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+                    ),
+                ),
                 ColumnMapping(
                     phrase="hourly activity",
                     targets=(
-                        "JSONB_ARRAY_ELEMENTS_TEXT(s.session_telemetry -> 'activity_pattern' -> 'hourly_observed')",
+                        "JSONB_ARRAY_ELEMENTS_TEXT(metrics.session_telemetry -> 'activity_pattern' -> 'hourly_observed')",
                     ),
                 ),
             ),
@@ -348,11 +506,12 @@ class ValidationContextTests(unittest.TestCase):
     def test_phrase_must_be_verbatim_in_query_or_follow_up(self) -> None:
         context = validation_context()
         rewritten = SQLGroundingState(
+            tables=("electrical_performance",),
             column_mapping=(
                 ColumnMapping(
                     phrase="power currently produced",
                     targets=(
-                        "ep.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+                        "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
                     ),
                 ),
             )
@@ -368,6 +527,7 @@ class ValidationContextTests(unittest.TestCase):
                 context,
             )
         state = SQLGroundingState(
+            tables=("operational_metrics",),
             column_mapping=(
                 ColumnMapping(
                     phrase="maintenance cost",
@@ -402,7 +562,7 @@ class ValidationContextTests(unittest.TestCase):
         self.assertFalse(hasattr(context, "database"))
         self.assertFalse(hasattr(context, "network_client"))
 
-    def test_context_rejects_columns_without_known_table_and_bad_aliases(self) -> None:
+    def test_context_rejects_columns_without_known_table_and_has_no_alias_map(self) -> None:
         with self.assertRaises(ValueError):
             ValidationContext(
                 current_query="query",
@@ -410,13 +570,167 @@ class ValidationContextTests(unittest.TestCase):
                 known_tables=frozenset({"plants"}),
                 known_columns=frozenset({"invented.id"}),
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TypeError):
             ValidationContext(
                 current_query="query",
                 latest_observation_id="obs-1",
                 known_tables=frozenset({"plants"}),
                 table_aliases=(("p", "invented"),),
             )
+        self.assertNotIn("table_aliases", ValidationContext.__dataclass_fields__)
+
+
+class StateDiffAuthorizationTests(unittest.TestCase):
+    def test_authorization_contract_is_strict_json_safe_and_canonical(self) -> None:
+        authorization = StateDiffAuthorization(
+            stage="P2_INCREMENTAL",
+            authorized_dimensions=("domain_knowledge", "tables"),
+        )
+        self.assertEqual(
+            authorization.authorized_dimensions,
+            ("tables", "domain_knowledge"),
+        )
+        self.assertEqual(
+            StateDiffAuthorization.model_validate_json(
+                authorization.model_dump_json()
+            ),
+            authorization,
+        )
+        with self.assertRaises(ValidationError):
+            StateDiffAuthorization(
+                stage="P2_INCREMENTAL",
+                authorized_dimensions=("tables", "tables"),
+            )
+
+    def test_initial_null_to_populated_requires_dimension_authorization(self) -> None:
+        previous = SQLGroundingState()
+        candidate = SQLGroundingState(tables=("plants",))
+        allowed = StateDiffAuthorization(
+            stage="INITIAL_GROUNDING",
+            authorized_dimensions=("tables",),
+        )
+        self.assertEqual(
+            validate_grounding_state_transition(previous, candidate, allowed),
+            ("tables",),
+        )
+        with self.assertRaisesRegex(SQLGroundingValidationError, "unauthorized"):
+            validate_grounding_state_transition(
+                previous,
+                candidate,
+                StateDiffAuthorization(stage="INITIAL_GROUNDING"),
+            )
+
+    def test_evaluated_dimension_never_regresses_to_null(self) -> None:
+        previous = SQLGroundingState(tables=("plants",))
+        candidate = SQLGroundingState()
+        for stage in ("INITIAL_GROUNDING", "P2_INCREMENTAL", "REPAIR"):
+            with self.subTest(stage=stage), self.assertRaisesRegex(
+                SQLGroundingValidationError,
+                "evaluated to null",
+            ):
+                validate_grounding_state_transition(
+                    previous,
+                    candidate,
+                    StateDiffAuthorization(
+                        stage=stage,
+                        authorized_dimensions=("tables",),
+                    ),
+                )
+
+    def test_authorized_initial_correction_can_replace_or_clear_a_dimension(self) -> None:
+        previous = SQLGroundingState(tables=("plants",))
+        replacement = SQLGroundingState(tables=("operational_metrics",))
+        cleared = SQLGroundingState(tables=())
+        authorization = StateDiffAuthorization(
+            stage="INITIAL_GROUNDING",
+            authorized_dimensions=("tables",),
+        )
+        self.assertEqual(
+            validate_grounding_state_transition(previous, replacement, authorization),
+            ("tables",),
+        )
+        self.assertEqual(
+            validate_grounding_state_transition(previous, cleared, authorization),
+            ("tables",),
+        )
+
+    def test_p2_only_changes_follow_up_authorized_dimensions(self) -> None:
+        previous = complete_state()
+        candidate = previous.model_copy(
+            update={
+                "domain_knowledge": (
+                    DomainKnowledge(
+                        kind="business_rule",
+                        content="downtime score = mttrh / (mtbfh + mttrh)",
+                    ),
+                )
+            }
+        )
+        allowed = StateDiffAuthorization(
+            stage="P2_INCREMENTAL",
+            authorized_dimensions=("domain_knowledge",),
+        )
+        self.assertEqual(
+            validate_grounding_state_transition(previous, candidate, allowed),
+            ("domain_knowledge",),
+        )
+        with self.assertRaisesRegex(SQLGroundingValidationError, "unauthorized"):
+            validate_grounding_state_transition(
+                previous,
+                candidate,
+                StateDiffAuthorization(
+                    stage="P2_INCREMENTAL",
+                    authorized_dimensions=("column_mapping",),
+                ),
+            )
+
+    def test_repair_can_replace_target_but_not_clear_non_target(self) -> None:
+        previous = complete_state()
+        replacement = previous.model_copy(update={"join_keys": ()})
+        repair_join = StateDiffAuthorization(
+            stage="REPAIR",
+            authorized_dimensions=("join_keys",),
+        )
+        self.assertEqual(
+            validate_grounding_state_transition(previous, replacement, repair_join),
+            ("join_keys",),
+        )
+
+        unrelated_clear = previous.model_copy(update={"column_mapping": ()})
+        with self.assertRaisesRegex(SQLGroundingValidationError, "unauthorized"):
+            validate_grounding_state_transition(
+                previous,
+                unrelated_clear,
+                repair_join,
+            )
+
+    def test_attempt_and_done_cannot_change_grounding_state(self) -> None:
+        previous = SQLGroundingState()
+        candidate = SQLGroundingState(tables=("plants",))
+        for stage in ("SQL_ATTEMPT", "DONE"):
+            with self.subTest(stage=stage), self.assertRaisesRegex(
+                SQLGroundingValidationError,
+                "does not authorize",
+            ):
+                validate_grounding_state_transition(
+                    previous,
+                    candidate,
+                    StateDiffAuthorization(
+                        stage=stage,
+                        authorized_dimensions=("tables",),
+                    ),
+                )
+
+    def test_noop_has_no_changed_dimensions(self) -> None:
+        state = complete_state()
+        self.assertEqual(
+            validate_grounding_state_transition(
+                state,
+                state,
+                StateDiffAuthorization(stage="REPAIR"),
+            ),
+            (),
+        )
 
 
 class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
@@ -501,12 +815,35 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
             focus_dimension="domain_knowledge",
             grounding_state=SQLGroundingState(tables=("plants",)),
         )
-        self.assertIs(validate_grounding_runtime_transition(old, changed), changed)
+        initial_tables = StateDiffAuthorization(
+            stage="INITIAL_GROUNDING",
+            authorized_dimensions=("tables",),
+        )
+        self.assertIs(
+            validate_grounding_runtime_transition(old, changed, initial_tables),
+            changed,
+        )
 
         with self.assertRaises(SQLGroundingValidationError):
             validate_grounding_runtime_transition(
                 old,
                 changed.model_copy(update={"grounding_revision": 0}),
+                initial_tables,
+            )
+        with self.assertRaises(SQLGroundingValidationError):
+            validate_grounding_runtime_transition(
+                old,
+                changed.model_copy(update={"grounding_revision": 2}),
+                initial_tables,
+            )
+        with self.assertRaisesRegex(SQLGroundingValidationError, "stage must match"):
+            validate_grounding_runtime_transition(
+                old,
+                changed,
+                StateDiffAuthorization(
+                    stage="REPAIR",
+                    authorized_dimensions=("tables",),
+                ),
             )
         with self.assertRaises(SQLGroundingValidationError):
             validate_grounding_runtime_transition(
@@ -516,12 +853,16 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
 
     def test_canonical_json_and_sha_are_order_independent(self) -> None:
         left = SQLGroundingState(
-            tables=("plants", "operational_metrics"),
+            tables=(
+                "electrical_performance",
+                "operational_metrics",
+                "plants",
+            ),
             column_mapping=(
                 ColumnMapping(
                     phrase="current power",
                     targets=(
-                        "ep.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
+                        "electrical_performance.elec_perf_snapshot -> 'power' ->> 'power_now_w'",
                         "operational_metrics.maintcost",
                     ),
                 ),
@@ -532,7 +873,11 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
             ),
         )
         right = SQLGroundingState(
-            tables=("operational_metrics", "plants"),
+            tables=(
+                "plants",
+                "operational_metrics",
+                "electrical_performance",
+            ),
             column_mapping=tuple(reversed(left.column_mapping or ())),
         )
         self.assertEqual(canonical_json(left), canonical_json(right))
