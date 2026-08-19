@@ -239,12 +239,16 @@ def _validate_observation_specific_diff(
     *,
     changed: tuple[GroundingDimension, ...],
 ) -> None:
-    if observation.observation_type == "metadata" and "domain_knowledge" in changed:
+    if (
+        observation.observation_type in {"schema", "metadata"}
+        and "domain_knowledge" in changed
+    ):
         old = runtime.grounding_state.domain_knowledge
         new = response.sql_grounding_state.domain_knowledge
         if old is not None or new != ():
             raise SQLGroundingValidationError(
-                "metadata can only resolve null domain_knowledge to []"
+                f"{observation.observation_type} can only resolve null "
+                "domain_knowledge to []"
             )
     if observation.observation_type in {
         "user_query",

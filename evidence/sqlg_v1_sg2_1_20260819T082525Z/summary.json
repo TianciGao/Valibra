@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG2.1",
+  "status": "PASS",
+  "start_head": "e844eca16370b63783b5f1ed610b39840d97a2e5",
+  "branch": "research/sql-grounding-v1",
+  "checkpoint": "sqlg-v1-sg2-pass",
+  "domain_knowledge_authorization": {
+    "schema": "null_to_empty_only",
+    "metadata": "null_to_empty_only",
+    "knowledge": "canonical_nonempty_allowed"
+  },
+  "repair_events": {
+    "repair_completed_p1": "REPAIR_to_SQL_ATTEMPT",
+    "repair_completed_p2": "REPAIR_to_P2_INCREMENTAL",
+    "preconditions": [
+      "source_stage_is_REPAIR",
+      "all_dimensions_evaluated",
+      "focus_dimension_is_none"
+    ],
+    "state_changed": false,
+    "revision_changed": false
+  },
+  "frozen_sha256": {
+    "prompt": "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962",
+    "form_schema": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration": "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
+  },
+  "tests": {
+    "focused_passed": 34,
+    "focused_total": 34,
+    "sg1_regression_passed": 39,
+    "sg1_regression_total": 39,
+    "full_passed": 449,
+    "full_total": 449,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "sg3_boundary": {
+    "affected_dimensions": "transient_fail_closed",
+    "new_judge_planner_or_complex_inference_allowed": false,
+    "sg3_started": false
+  },
+  "scope_review": {
+    "models_diff": false,
+    "observations_diff": false,
+    "updater_diff": false,
+    "prompt_view_diff": false,
+    "telemetry_diff": false,
+    "grounding_callbacks_diff": false,
+    "system_agent_diff": false,
+    "legacy_requirement_grounding_diff": false,
+    "new_stage_added": false,
+    "sensitive_findings": 0,
+    "large_files_over_1_mib": 0
+  },
+  "source_sha256": {
+    "valibra_agent/sql_grounding/service.py": "afe2c5747254c329b6a663a059ae25897344e14bb2099e009d0c6314413d2ea4",
+    "valibra_agent/sql_grounding/control.py": "6d9d0dca3db217b91a89f3cbc2853ef8c11f104567aac1efc2566d8dee335b17",
+    "tests/valibra/test_sg2_sql_grounding_kernel.py": "6cb1b87c4269a435b54ac50deeb5d0a6faae79589cac6379e3e28b2c703ef1b2"
+  }
+}

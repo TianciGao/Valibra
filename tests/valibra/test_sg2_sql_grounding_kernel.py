@@ -23,6 +23,7 @@ from valibra_agent.sql_grounding import (
     SQLGroundingObservation,
     SQLGroundingState,
     SQLGroundingUpdater,
+    SQLGroundingValidationError,
     ValidationContext,
     build_sql_grounding_observation,
     canonical_json,
@@ -39,6 +40,7 @@ QUERY = "Show maintenance event, cost, and revenue impact ratio."
 FOLLOW_OPERATION = "Now show the top 5."
 FOLLOW_POWER = "also include current power"
 RATIO_RULE = "revenue impact ratio = maintenance cost / total revenue"
+UPDATED_RATIO_RULE = "revenue impact ratio uses adjusted maintenance cost"
 
 PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
@@ -443,6 +445,68 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.state_update.error_type, "authorization_rejected")
         self.assertIs(rejected.runtime, base)
 
+    async def test_schema_can_only_resolve_domain_null_to_empty(self) -> None:
+        base = GroundingRuntime(
+            focus_dimension="domain_knowledge",
+            grounding_state=solar_partial_state(),
+            grounding_revision=1,
+        )
+        obs = observation(
+            "schema",
+            sequence=4,
+            content={"tables": ["maintenance_events", "operational_metrics"]},
+        )
+        resolved = solar_partial_state().model_copy(update={"domain_knowledge": ()})
+        accepted = await self.run_service(
+            base,
+            obs,
+            response_json(resolved, "none"),
+        )
+        self.assertEqual(accepted.state_update.status, "accepted")
+        self.assertEqual(accepted.runtime.grounding_revision, 2)
+        self.assertEqual(accepted.runtime.grounding_state.domain_knowledge, ())
+
+        empty = GroundingRuntime(
+            stage="REPAIR",
+            focus_dimension="domain_knowledge",
+            grounding_state=resolved,
+            grounding_revision=2,
+        )
+        populated = GroundingRuntime(
+            stage="REPAIR",
+            focus_dimension="domain_knowledge",
+            grounding_state=solar_complete_state(),
+            grounding_revision=2,
+        )
+        replacement = solar_partial_state().model_copy(
+            update={
+                "domain_knowledge": (
+                    DomainKnowledge(
+                        kind="business_rule",
+                        content=UPDATED_RATIO_RULE,
+                    ),
+                )
+            }
+        )
+        forbidden = (
+            (base, solar_complete_state(), RATIO_RULE),
+            (empty, solar_complete_state(), RATIO_RULE),
+            (populated, replacement, UPDATED_RATIO_RULE),
+        )
+        for previous, proposed, supported_content in forbidden:
+            with self.subTest(previous=previous.grounding_state.domain_knowledge):
+                rejected = await self.run_service(
+                    previous,
+                    obs,
+                    response_json(proposed, "none"),
+                    supported=frozenset({("business_rule", supported_content)}),
+                )
+                self.assertEqual(
+                    rejected.state_update.error_type,
+                    "authorization_rejected",
+                )
+                self.assertIs(rejected.runtime, previous)
+
     async def test_knowledge_updates_only_domain_knowledge(self) -> None:
         base = GroundingRuntime(
             grounding_revision=1,
@@ -756,6 +820,45 @@ class ControlAndViewTests(unittest.TestCase):
         self.assertEqual(p2.stage, "P2_INCREMENTAL")
         self.assertEqual(p2.grounding_revision, 3)
 
+    def test_repair_completion_events_are_explicit_and_revision_neutral(self) -> None:
+        repair = GroundingRuntime(
+            grounding_revision=7,
+            stage="REPAIR",
+            focus_dimension="none",
+            grounding_state=simple_complete_state(),
+        )
+        p1 = transition_grounding_stage(repair, "repair_completed_p1")
+        p2 = transition_grounding_stage(repair, "repair_completed_p2")
+        self.assertEqual((p1.stage, p2.stage), ("SQL_ATTEMPT", "P2_INCREMENTAL"))
+        for transitioned in (p1, p2):
+            self.assertEqual(transitioned.grounding_state, repair.grounding_state)
+            self.assertEqual(transitioned.grounding_revision, 7)
+            self.assertEqual(transitioned.focus_dimension, "none")
+
+    def test_repair_completion_events_reject_incomplete_or_wrong_control_state(self) -> None:
+        invalid_runtimes = (
+            GroundingRuntime(
+                stage="REPAIR",
+                focus_dimension="column_mapping",
+                grounding_state=simple_complete_state(),
+            ),
+            GroundingRuntime(
+                stage="REPAIR",
+                focus_dimension="none",
+                grounding_state=SQLGroundingState(),
+            ),
+            GroundingRuntime(
+                stage="SQL_ATTEMPT",
+                focus_dimension="none",
+                grounding_state=simple_complete_state(),
+            ),
+        )
+        for runtime in invalid_runtimes:
+            for event in ("repair_completed_p1", "repair_completed_p2"):
+                with self.subTest(stage=runtime.stage, focus=runtime.focus_dimension, event=event):
+                    with self.assertRaises(SQLGroundingValidationError):
+                        transition_grounding_stage(runtime, event)  # type: ignore[arg-type]
+
     def test_first_submit_gate_is_hard_only_for_first_submit(self) -> None:
         closed = evaluate_first_submit_gate(GroundingRuntime(), first_submit=True)
         self.assertFalse(closed.open)
@@ -1014,6 +1117,68 @@ class EndToEndFlowTests(unittest.IsolatedAsyncioTestCase):
             corrected.runtime.grounding_state.domain_knowledge,
             simple_complete_state().domain_knowledge,
         )
+
+        retry = transition_grounding_stage(corrected.runtime, "repair_completed_p1")
+        self.assertEqual(retry.stage, "SQL_ATTEMPT")
+        self.assertEqual(retry.grounding_revision, 3)
+        self.assertEqual(retry.grounding_state, corrected.runtime.grounding_state)
+
+        second_failure = transition_grounding_stage(retry, "official_submit_failed")
+        self.assertEqual(second_failure.stage, "REPAIR")
+        self.assertEqual(second_failure.grounding_revision, 3)
+
+        p2 = transition_grounding_stage(retry, "official_p2_follow_up")
+        self.assertEqual(p2.stage, "P2_INCREMENTAL")
+        self.assertEqual(p2.grounding_revision, 3)
+
+    async def test_h_p2_repair_returns_to_incremental_attempt(self) -> None:
+        p2_attempt = GroundingRuntime(
+            grounding_revision=4,
+            stage="P2_INCREMENTAL",
+            focus_dimension="none",
+            grounding_state=simple_complete_state(),
+        )
+        repair = transition_grounding_stage(p2_attempt, "official_submit_failed")
+        submission = observation(
+            "submission",
+            sequence=1,
+            phase=2,
+            content={"result": "failed", "failure_signal": "wrong field"},
+        )
+        focused = await self.process(
+            repair,
+            submission,
+            response_json(simple_complete_state(), "column_mapping"),
+        )
+
+        replacement = simple_complete_state().model_copy(
+            update={
+                "column_mapping": (
+                    ColumnMapping(
+                        phrase="cost",
+                        targets=("operational_metrics.cost_adjusted",),
+                    ),
+                )
+            }
+        )
+        metadata = observation(
+            "metadata",
+            sequence=2,
+            phase=2,
+            content={"column": "operational_metrics.cost_adjusted"},
+        )
+        corrected = await self.process(
+            focused.runtime,
+            metadata,
+            response_json(replacement, "none"),
+        )
+        retry = transition_grounding_stage(corrected.runtime, "repair_completed_p2")
+        self.assertEqual(retry.stage, "P2_INCREMENTAL")
+        self.assertEqual(retry.grounding_revision, 5)
+        self.assertEqual(retry.grounding_state, corrected.runtime.grounding_state)
+        subsequent = evaluate_first_submit_gate(retry, first_submit=False)
+        self.assertFalse(subsequent.applicable)
+        self.assertTrue(subsequent.open)
 
     async def test_telemetry_is_independent_and_does_not_enter_runtime(self) -> None:
         obs = observation("user_query", sequence=1, content=QUERY)

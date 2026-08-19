@@ -23,6 +23,8 @@ StageEvent: TypeAlias = Literal[
     "official_submit_failed",
     "official_p2_follow_up",
     "official_task_completed",
+    "repair_completed_p1",
+    "repair_completed_p2",
 ]
 
 FOCUS_TOOL_DIRECTIONS: Mapping[FocusDimension, tuple[str, ...]] = MappingProxyType({
@@ -117,6 +119,16 @@ def transition_grounding_stage(
                 "official_p2_follow_up requires SQL_ATTEMPT"
             )
         stage = "P2_INCREMENTAL"
+    elif event in {"repair_completed_p1", "repair_completed_p2"}:
+        if (
+            runtime.stage != "REPAIR"
+            or not runtime.grounding_state.all_dimensions_evaluated
+            or runtime.focus_dimension != "none"
+        ):
+            raise SQLGroundingValidationError(
+                f"{event} requires complete REPAIR with focus none"
+            )
+        stage = "SQL_ATTEMPT" if event == "repair_completed_p1" else "P2_INCREMENTAL"
     else:
         if runtime.stage == "DONE":
             return runtime
