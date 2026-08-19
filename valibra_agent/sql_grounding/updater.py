@@ -60,7 +60,17 @@ _SENSITIVE_AUDIT_KEYS = frozenset(
         "token",
     }
 )
-_BEARER_TOKEN_RE = re.compile(r"(?im)^\s*(?:Bearer\s+)?([^\s=]+)\s*$")
+_BEARER_MARKER_RE = re.compile(r"Authorization\s*:\s*Bearer\b", re.IGNORECASE)
+_BEARER_TOKEN_RE = re.compile(
+    r"Authorization\s*:\s*Bearer\s+([^\s\"'\\]+)(?=$|\s|[\"'])",
+    re.IGNORECASE,
+)
+_RAW_TOKEN_RE = re.compile(r"^[^\s\"'\\=:\{\}\[\]]+$")
+_OPAQUE_RAW_CANDIDATE_RE = re.compile(r"^[A-Za-z0-9._-]{16,}$")
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    re.IGNORECASE,
+)
 
 SQL_GROUNDING_PROMPT = """Fill the fixed Valibra SQL Grounding form from the bounded JSON input.
 Return exactly one JSON object and no prose, comments, Markdown other than the
@@ -69,6 +79,25 @@ single transport fence allowed by the caller, or additional fields.
 The output fields are exactly:
 - sql_grounding_state: tables, join_keys, column_mapping, domain_knowledge
 - next_focus_dimension
+
+Exact output shape:
+- sql_grounding_state contains exactly:
+  - tables: null or an array of table-name strings
+  - join_keys: null or an array of relation-expression strings
+  - column_mapping: null or an array of objects containing exactly:
+    - phrase: one string
+    - targets: an array of one or more strings
+  - domain_knowledge: null or an array of objects containing exactly:
+    - kind: business_rule, runtime_state, or database_capability
+    - content: one string
+- next_focus_dimension is exactly one of tables, join_keys, column_mapping,
+  domain_knowledge, or none.
+
+Important structural rules:
+- The field name is exactly "targets", plural.
+- "targets" is always a JSON array, even when it contains one item.
+- There is no field named "target".
+- Do not add any fields not listed above.
 
 Rules for the persisted four-dimensional State:
 1. Use only real, fully qualified database identifiers already supported by the
@@ -788,10 +817,42 @@ def _read_grounding_api_key(
         content = Path(config.api_key_file or "").read_text(encoding="utf-8")
     except OSError:
         raise SQLGroundingProviderError("Grounding credential file unavailable") from None
-    match = _BEARER_TOKEN_RE.fullmatch(content.strip())
-    if match:
-        return match.group(1)
-    raise SQLGroundingProviderError("Grounding credential file format invalid")
+    return _parse_grounding_credential_file(content)
+
+
+def _parse_grounding_credential_file(content: str) -> str:
+    """Accept one raw token or exactly one Bearer header, and nothing ambiguous."""
+
+    nonempty_lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if len(nonempty_lines) == 1 and _RAW_TOKEN_RE.fullmatch(nonempty_lines[0]):
+        return nonempty_lines[0]
+
+    stripped = content.strip()
+    if (
+        not stripped
+        or _PRIVATE_KEY_BLOCK_RE.search(content)
+        or (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
+    ):
+        raise SQLGroundingProviderError("Grounding credential file format invalid")
+
+    markers = tuple(_BEARER_MARKER_RE.finditer(content))
+    matches = tuple(_BEARER_TOKEN_RE.finditer(content))
+    if len(markers) != 1 or len(matches) != 1:
+        raise SQLGroundingProviderError("Grounding credential file format invalid")
+
+    bearer_line_index = content[: matches[0].start()].count("\n")
+    for index, raw_line in enumerate(content.splitlines()):
+        if index == bearer_line_index:
+            continue
+        candidate = raw_line.strip()
+        if (
+            _OPAQUE_RAW_CANDIDATE_RE.fullmatch(candidate)
+            and any(character.isdigit() for character in candidate)
+            and any(character in "._-" for character in candidate)
+        ):
+            raise SQLGroundingProviderError("Grounding credential file format invalid")
+    return matches[0].group(1)
 
 
 def _build_provider_request(
@@ -809,14 +870,10 @@ def _build_provider_request(
         {"role": "system", "content": request.prompt},
         {"role": "user", "content": request.input_json},
     ]
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "valibra_sql_grounding_v1",
-            "strict": True,
-            "schema": request.response_schema,
-        },
-    }
+    # The Provider transport guarantees only one JSON object.  The frozen
+    # Pydantic form and SQL Grounding semantic validators remain the sole
+    # authoritative shape and business-state gates after transport parsing.
+    response_format = {"type": "json_object"}
     preset = llm_config.preset_config
     generation: dict[str, Any] = {
         "temperature": preset.get("temperature", 0.0),

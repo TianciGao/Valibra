@@ -42,9 +42,9 @@ FOLLOW_POWER = "also include current power"
 RATIO_RULE = "revenue impact ratio = maintenance cost / total revenue"
 UPDATED_RATIO_RULE = "revenue impact ratio uses adjusted maintenance cost"
 
-PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
+PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
+CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
 
 KNOWN_TABLES = frozenset(
     {

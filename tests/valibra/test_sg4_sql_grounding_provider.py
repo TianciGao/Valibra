@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import stat
@@ -9,6 +10,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import httpx
+import litellm
+from openai import AsyncOpenAI
 
 from shared.config import PROJECT_ROOT
 from system_agent import callbacks as baseline_callbacks
@@ -21,6 +26,7 @@ from valibra_agent.sql_grounding.models import (
     GroundingRuntime,
     SQLGroundingState,
     ValidationContext,
+    canonical_json,
 )
 from valibra_agent.sql_grounding.observations import build_sql_grounding_observation
 from valibra_agent.sql_grounding.service import process_sql_grounding_observation
@@ -28,8 +34,11 @@ from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_CONFIGURATION_SHA256,
     SQL_GROUNDING_FORM_SCHEMA,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
+    SQL_GROUNDING_PROMPT,
     SQL_GROUNDING_PROMPT_SHA256,
     GroundingClientResponse,
+    GroundingLLMRequest,
+    SQLGroundingProviderError,
     GroundingUpdaterError,
     GroundingUpdaterResult,
     LiteLLMSQLGroundingClient,
@@ -39,12 +48,16 @@ from valibra_agent.sql_grounding.updater import (
     load_sql_grounding_llm_config,
     load_sql_grounding_provider_config,
     sql_grounding_provider_health_report,
+    _build_provider_request,
+    _parse_grounding_credential_file,
 )
 
 
-PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
+OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
+OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
+PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
+CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
 QUERY = "What is the maintenance cost?"
 
 
@@ -106,6 +119,57 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         )
         return llm, SQLGroundingProviderConfig.model_validate(provider)
 
+    def test_credential_file_parser_accepts_only_two_frozen_formats(self):
+        raw = "synthetic-raw-token-1234567890"
+        bearer = "synthetic-bearer-token-1234567890"
+        accepted = (
+            (raw, raw),
+            (f"Authorization: Bearer {bearer}", bearer),
+            (
+                "saved request\n"
+                f"--header 'Authorization: Bearer {bearer}'\n"
+                "non credential notes\n",
+                bearer,
+            ),
+            (f"aUtHoRiZaTiOn : bEaReR {bearer}", bearer),
+        )
+        for content, expected in accepted:
+            with self.subTest(content_class="accepted"):
+                self.assertEqual(_parse_grounding_credential_file(content), expected)
+
+        rejected = (
+            "",
+            "raw-token-one-1234567890\nraw-token-two-1234567890\n",
+            (
+                "Authorization: Bearer synthetic-bearer-one-1234567890\n"
+                "Authorization: Bearer synthetic-bearer-two-1234567890\n"
+            ),
+            (
+                "raw-token-extra-1234567890\n"
+                "Authorization: Bearer synthetic-bearer-token-1234567890\n"
+            ),
+            '"quoted-token-1234567890"',
+            "token with whitespace",
+            '{"api_key":"synthetic-token-1234567890"}',
+            "GROUNDING_API_KEY=synthetic-token-1234567890",
+            "Authorization: Bearer 'quoted-token-1234567890'",
+            "Authorization: Bearer token\\with-boundary",
+        )
+        for content in rejected:
+            with self.subTest(content_class="rejected"):
+                with self.assertRaises(SQLGroundingProviderError):
+                    _parse_grounding_credential_file(content)
+
+    def test_missing_credential_file_remains_fail_closed(self):
+        llm = load_sql_grounding_llm_config(PROJECT_ROOT, self.env)
+        missing = self.root / "missing.key"
+        with self.assertRaisesRegex(ValueError, "non-empty file"):
+            load_sql_grounding_provider_config(
+                PROJECT_ROOT,
+                llm,
+                self.env | {"GROUNDING_API_KEY_FILE": str(missing)},
+            )
+
     def test_mode_and_credentials_are_strict_and_never_fall_back_to_system(self):
         self.assertEqual(
             sql_grounding_provider_health_report(PROJECT_ROOT, {}),
@@ -138,7 +202,7 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
                 self.env | {"GROUNDING_API_KEY": "ambiguous"},
             )
 
-    async def test_native_async_single_request_schema_no_tools_usage_and_permissions(self):
+    async def test_native_async_single_request_json_object_no_tools_usage_and_permissions(self):
         llm, provider = self.configs()
         calls = []
 
@@ -173,11 +237,7 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["max_retries"], 0)
         self.assertNotIn("tools", sent)
         self.assertNotIn("tool_choice", sent)
-        self.assertTrue(sent["response_format"]["json_schema"]["strict"])
-        self.assertEqual(
-            sent["response_format"]["json_schema"]["schema"],
-            SQL_GROUNDING_FORM_SCHEMA,
-        )
+        self.assertEqual(sent["response_format"], {"type": "json_object"})
         self.assertEqual(result.telemetry.usage.total_tokens, 18)
         self.assertEqual(result.telemetry.usage.reasoning_tokens, 3)
         self.assertEqual(result.telemetry.provider_reported_cost, 0.125)
@@ -191,6 +251,221 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         request = json.loads(audit_text)["request"]
         self.assertEqual(request["tools"], [])
         self.assertIsNone(request["tool_choice"])
+
+    async def test_litellm_transformation_preserves_json_object_in_http_body(self):
+        llm, provider = self.configs()
+        request = GroundingLLMRequest(
+            prompt=SQL_GROUNDING_PROMPT,
+            input_json="{}",
+            response_schema=SQL_GROUNDING_FORM_SCHEMA,
+        )
+        _, provider_kwargs = _build_provider_request(
+            request,
+            llm,
+            provider,
+            api_key="synthetic-offline-credential",
+        )
+        self.assertEqual(provider_kwargs["num_retries"], 0)
+        self.assertEqual(provider_kwargs["max_retries"], 0)
+
+        captured = {}
+
+        async def handle_http(http_request):
+            captured["path"] = http_request.url.path
+            captured["body"] = json.loads(http_request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "offline",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "glm-5.2",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "{}"},
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            )
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle_http))
+        openai_client = AsyncOpenAI(
+            api_key="synthetic-offline-credential",
+            base_url=provider_kwargs["api_base"],
+            http_client=http_client,
+        )
+        transformed_kwargs = dict(provider_kwargs)
+        transformed_kwargs["client"] = openai_client
+        try:
+            await litellm.acompletion(**transformed_kwargs)
+        finally:
+            await openai_client.close()
+
+        expected_path = (
+            httpx.URL(provider_kwargs["api_base"]).path.rstrip("/")
+            + "/chat/completions"
+        )
+        self.assertEqual(captured["path"], expected_path)
+        body = captured["body"]
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertNotIn("tools", body)
+        self.assertNotIn("tool_choice", body)
+
+    async def _process_provider_content(self, content):
+        llm, provider = self.configs()
+        calls = []
+
+        async def completion(**kwargs):
+            calls.append(kwargs)
+            return {
+                "choices": [{"message": {"content": content}}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+                "_hidden_params": {"custom_llm_provider": "offline"},
+            }
+
+        runtime = GroundingRuntime(
+            grounding_state=SQLGroundingState(
+                tables=("operational_metrics",),
+                join_keys=(),
+                column_mapping=None,
+                domain_knowledge=(),
+            ),
+            focus_dimension="column_mapping",
+        )
+        current_observation = observation(
+            "metadata",
+            {"meaning": "maintenance cost"},
+            "get_column_meaning",
+        )
+        result = await process_sql_grounding_observation(
+            runtime,
+            current_observation,
+            ValidationContext(
+                current_query=QUERY,
+                latest_observation_id=current_observation.observation_id,
+                known_tables=frozenset({"operational_metrics"}),
+                known_columns=frozenset({"operational_metrics.maintcost"}),
+            ),
+            SQLGroundingUpdater(
+                LiteLLMSQLGroundingClient(
+                    llm,
+                    provider,
+                    environment=self.env,
+                    completion=completion,
+                )
+            ),
+        )
+        return runtime, result, calls
+
+    async def test_local_strict_form_rejects_invalid_provider_objects_atomically(self):
+        valid = {
+            "sql_grounding_state": {
+                "tables": ["operational_metrics"],
+                "join_keys": [],
+                "column_mapping": [
+                    {
+                        "phrase": "maintenance cost",
+                        "targets": ["operational_metrics.maintcost"],
+                    }
+                ],
+                "domain_knowledge": [],
+            },
+            "next_focus_dimension": "none",
+        }
+        singular_target = json.loads(json.dumps(valid))
+        singular_target["sql_grounding_state"]["column_mapping"][0] = {
+            "phrase": "maintenance cost",
+            "target": "operational_metrics.maintcost",
+        }
+        extra_field = json.loads(json.dumps(valid))
+        extra_field["sql_grounding_state"]["column_mapping"][0]["confidence"] = 1
+        missing_required = json.loads(json.dumps(valid))
+        del missing_required["next_focus_dimension"]
+        wrong_type = json.loads(json.dumps(valid))
+        wrong_type["sql_grounding_state"]["tables"] = "operational_metrics"
+        unknown_focus = json.loads(json.dumps(valid))
+        unknown_focus["next_focus_dimension"] = "schema"
+        invalid_expression = json.loads(json.dumps(valid))
+        invalid_expression["sql_grounding_state"]["column_mapping"][0]["targets"] = [
+            "operational_metrics.not_real"
+        ]
+        encoded = json.dumps(valid, separators=(",", ":"), sort_keys=True)
+        duplicate = encoded.replace(
+            '"next_focus_dimension":"none"',
+            '"next_focus_dimension":"none","next_focus_dimension":"none"',
+        )
+        cases = {
+            "singular_target": (json.dumps(singular_target), "form_validation_failed"),
+            "extra_field": (json.dumps(extra_field), "form_validation_failed"),
+            "missing_required": (json.dumps(missing_required), "form_validation_failed"),
+            "wrong_type": (json.dumps(wrong_type), "form_validation_failed"),
+            "duplicate_key": (duplicate, "duplicate_json_key"),
+            "prose_json": ("Here is JSON:\n" + encoded, "json_invalid"),
+            "malformed_fence": ("```json\n" + encoded, "transport_format_invalid"),
+            "unknown_focus": (json.dumps(unknown_focus), "form_validation_failed"),
+            "invalid_expression": (
+                json.dumps(invalid_expression),
+                "state_validation_failed",
+            ),
+        }
+        for name, (content, expected) in cases.items():
+            with self.subTest(name=name):
+                runtime, result, calls = await self._process_provider_content(content)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
+                self.assertEqual(result.runtime, runtime)
+                self.assertEqual(result.runtime.grounding_revision, 0)
+                observed = (
+                    result.state_update.error_type
+                    if expected == "state_validation_failed"
+                    else result.llm_telemetry.error_type
+                )
+                self.assertEqual(observed, expected)
+
+    async def test_valid_local_form_and_semantics_replace_state_atomically(self):
+        content = json.dumps(
+            {
+                "sql_grounding_state": {
+                    "tables": ["operational_metrics"],
+                    "join_keys": [],
+                    "column_mapping": [
+                        {
+                            "phrase": "maintenance cost",
+                            "targets": ["operational_metrics.maintcost"],
+                        }
+                    ],
+                    "domain_knowledge": [],
+                },
+                "next_focus_dimension": "none",
+            }
+        )
+        runtime, result, calls = await self._process_provider_content(content)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
+        self.assertEqual(result.state_update.status, "accepted")
+        self.assertEqual(result.runtime.grounding_revision, 1)
+        self.assertEqual(result.runtime.focus_dimension, "none")
+        self.assertEqual(
+            result.runtime.grounding_state.column_mapping,
+            (
+                ColumnMapping(
+                    phrase="maintenance cost",
+                    targets=("operational_metrics.maintcost",),
+                ),
+            ),
+        )
+        self.assertNotEqual(result.runtime, runtime)
 
     async def test_provider_exception_is_sanitized_and_timeout_is_fail_open(self):
         llm, provider = self.configs()
@@ -237,6 +512,19 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)
+        self.assertNotEqual(SQL_GROUNDING_PROMPT_SHA256, OLD_PROMPT_SHA)
+        self.assertNotEqual(SQL_GROUNDING_CONFIGURATION_SHA256, OLD_CONFIG_SHA)
+        self.assertEqual(
+            hashlib.sha256(
+                canonical_json(GroundingLLMResponse.model_json_schema()).encode("utf-8")
+            ).hexdigest(),
+            FORM_SHA,
+        )
+        self.assertIn('"targets"', SQL_GROUNDING_PROMPT)
+        self.assertIn('There is no field named "target".', SQL_GROUNDING_PROMPT)
+        self.assertIn('"targets" is always a JSON array', SQL_GROUNDING_PROMPT)
+        self.assertNotIn("maintenance cost", SQL_GROUNDING_PROMPT.lower())
+        self.assertNotIn("operational_metrics", SQL_GROUNDING_PROMPT.lower())
         report = sql_grounding_provider_health_report(PROJECT_ROOT, self.env)
         self.assertTrue(report["provider_enabled"])
         self.assertNotIn("key", json.dumps(report).lower())
