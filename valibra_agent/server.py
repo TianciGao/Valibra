@@ -16,9 +16,10 @@ from shared.config import (
     settings,
 )
 from valibra_agent.adk_runtime import AdkRuntime
+from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG3-Shadow")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG4-Shadow")
 runtime = AdkRuntime()
 
 
@@ -43,6 +44,7 @@ def _configuration_summary() -> Dict[str, Any]:
 
     preset_report = active_model_preset_report()
     normalized = normalized_system_agent_config()
+    grounding_provider = sql_grounding_provider_health_report(PROJECT_ROOT)
     return {
         "dataset": settings.dataset,
         "prompt_version": settings.prompt_version,
@@ -65,8 +67,20 @@ def _configuration_summary() -> Dict[str, Any]:
         "grounding_enabled": True,
         "grounding_core": "sql_grounding_v1",
         "grounding_mode": "shadow",
-        "grounding_updater": "deterministic_passthrough",
-        "grounding_provider_enabled": False,
+        "grounding_updater": grounding_provider["effective_updater_mode"],
+        "grounding_requested_updater_mode": grounding_provider[
+            "requested_updater_mode"
+        ],
+        "grounding_effective_updater_mode": grounding_provider[
+            "effective_updater_mode"
+        ],
+        "grounding_provider_configuration_valid": grounding_provider[
+            "provider_configuration_valid"
+        ],
+        "grounding_provider_enabled": grounding_provider["provider_enabled"],
+        "grounding_provider_configuration_error_type": grounding_provider[
+            "configuration_error_type"
+        ],
         "grounding_prompt_view_effective_mode": "shadow",
         "prompt_view_injection_enabled": False,
         # Health reports configuration, not whether a particular request has
@@ -78,10 +92,10 @@ def _configuration_summary() -> Dict[str, Any]:
 
 
 def _variant(summary: Dict[str, Any]) -> str:
-    """Return the frozen SG3 service identity."""
+    """Return the SG4 SQL Grounding Shadow service identity."""
 
     del summary
-    return "SQL-Grounding-V1-SG3-Shadow"
+    return "SQL-Grounding-V1-SG4-Shadow"
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:

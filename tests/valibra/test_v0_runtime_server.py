@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -198,12 +199,15 @@ class HttpContractTests(unittest.TestCase):
         fake_runtime.cleanup_session.assert_awaited_once()
 
     def test_health_identifies_sql_grounding_v1_shadow_without_credentials(self):
-        with TestClient(valibra_server.app) as client:
+        with (
+            patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}, clear=False),
+            TestClient(valibra_server.app) as client,
+        ):
             response = client.get("/health")
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["service"], "valibra_agent")
-        self.assertEqual(body["variant"], "SQL-Grounding-V1-SG3-Shadow")
+        self.assertEqual(body["variant"], "SQL-Grounding-V1-SG4-Shadow")
         self.assertTrue(body["configuration_summary"]["grounding_enabled"])
         self.assertEqual(
             body["configuration_summary"]["grounding_mode"],
@@ -211,7 +215,7 @@ class HttpContractTests(unittest.TestCase):
         )
         self.assertEqual(
             body["configuration_summary"]["grounding_updater"],
-            "deterministic_passthrough",
+            "passthrough",
         )
         self.assertEqual(
             body["configuration_summary"]["grounding_core"],

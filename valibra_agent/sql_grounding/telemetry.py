@@ -38,6 +38,14 @@ class GroundingLLMTelemetry(ContractModel):
     timed_out: bool = False
     error_type: str | None = Field(default=None, max_length=128)
 
+    provider_reported_cost: float | None = Field(default=None, ge=0.0)
+    model: str = Field(default="", max_length=256)
+    provider: str = Field(default="", max_length=128)
+    credential_source: Literal["", "direct", "file"] = ""
+    raw_private_audit_ref: str = Field(default="", max_length=1024)
+    provider_may_continue_after_cancel: bool | None = None
+    provider_may_bill_after_cancel: bool | None = None
+
     request_sha256: str = Field(pattern=r"^(?:|[0-9a-f]{64})$")
     response_sha256: str = Field(pattern=r"^(?:|[0-9a-f]{64})$")
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -48,6 +56,10 @@ class GroundingLLMTelemetry(ContractModel):
     def validate_shape(self) -> "GroundingLLMTelemetry":
         if not math.isfinite(self.latency_ms):
             raise ValueError("latency must be finite")
+        if self.provider_reported_cost is not None and not math.isfinite(
+            self.provider_reported_cost
+        ):
+            raise ValueError("provider reported cost must be finite")
         if self.timed_out != (self.status == "timed_out"):
             raise ValueError("timed_out must match telemetry status")
         if self.status == "succeeded" and self.error_type is not None:
@@ -57,6 +69,11 @@ class GroundingLLMTelemetry(ContractModel):
                 self.usage.total_tokens,
                 self.latency_ms,
                 bool(self.response_sha256),
+                self.provider_reported_cost is not None,
+                bool(self.model),
+                bool(self.provider),
+                bool(self.credential_source),
+                bool(self.raw_private_audit_ref),
             )
         ):
             raise ValueError("a non-attempted call cannot report provider results")

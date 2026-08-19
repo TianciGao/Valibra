@@ -1,10 +1,10 @@
 """SQL Grounding V1 shadow callbacks around the frozen B0 callbacks.
 
-SG3 observes the real ADK lifecycle and drives the new four-dimensional
-``sql_grounding`` service with a deterministic local passthrough updater.  It
+SG4 observes the real ADK lifecycle and drives the new four-dimensional
+``sql_grounding`` service with an opt-in real Provider or local passthrough.  It
 never changes the model request, model response, tool protocol, Bird-Coin,
-submit state machine, or official trajectory.  Control, Attempt Gate, model
-Provider calls, and active View injection are deliberately absent.
+submit state machine, or official trajectory.  Control, Attempt Gate, and
+active View injection are deliberately absent.
 """
 
 from __future__ import annotations
@@ -17,7 +17,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import ParseError
+
 from shared.audit import to_jsonable
+from shared.config import PROJECT_ROOT
 from valibra_agent.sql_grounding.models import (
     SQL_GROUNDING_RUNTIME_KEY,
     GroundingLLMResponse,
@@ -42,6 +47,9 @@ from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT_SHA256,
     GroundingUpdaterResult,
+    build_real_sql_grounding_updater,
+    load_sql_grounding_llm_config,
+    requested_sql_grounding_updater_mode,
 )
 
 if TYPE_CHECKING:
@@ -63,6 +71,7 @@ SHADOW_AUDIT_KEY = "valibra_sql_grounding_shadow"
 GROUNDING_VIEW_AUDIT_KEY = "valibra_sql_grounding_view"
 GROUNDING_UPDATE_AUDIT_KEY = "valibra_sql_grounding_update"
 GROUNDING_ERROR_AUDIT_KEY = "valibra:sql_grounding_error_audits"
+GROUNDING_PROVIDER_CALL_COUNT_KEY = "valibra:sql_grounding_provider_calls"
 
 # The frozen P6 export module imports these names at module load.  They are
 # retained only so that historical, read-only export code remains importable;
@@ -105,7 +114,7 @@ _BUDGET_PREFIX = "\nBudget remaining: "
 
 
 class _PassthroughSQLGroundingUpdater:
-    """Production SG3 updater: no I/O, no Provider, and no State guesswork."""
+    """Default SG4 updater: no I/O, no Provider, and no State guesswork."""
 
     async def propose(
         self,
@@ -134,7 +143,10 @@ class _PassthroughSQLGroundingUpdater:
         )
 
 
-_SQL_GROUNDING_UPDATER: Any = _PassthroughSQLGroundingUpdater()
+_PASSTHROUGH_SQL_GROUNDING_UPDATER = _PassthroughSQLGroundingUpdater()
+# Tests may replace this exact object with a deterministic fake.  Production
+# resolves the real client only when the explicit mode is exactly ``llm``.
+_SQL_GROUNDING_UPDATER: Any = _PASSTHROUGH_SQL_GROUNDING_UPDATER
 
 
 @dataclass(slots=True)
@@ -598,13 +610,44 @@ async def _handle_observation(
             service_status="skipped_control_not_active",
             observation=observation,
         )
+    if observation.observation_type == "tool_error":
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="skipped_tool_error_audit_only",
+            observation=observation,
+        )
+    if observation.observation_type == "user_answer":
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="skipped_affected_dimensions_unfrozen",
+            observation=observation,
+        )
+    try:
+        updater = _resolve_sql_grounding_updater()
+        if _uses_real_provider_adapter():
+            llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
+            calls = _provider_call_count(state)
+            if calls >= llm_config.max_calls_per_task:
+                return _ObservationResult(
+                    runtime=active_runtime,
+                    service_status="skipped_provider_call_limit",
+                    observation=observation,
+                )
+    except Exception:
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="degraded_configuration",
+            observation=observation,
+        )
     context = _build_validation_context(state, observation)
     service_result = await process_sql_grounding_observation(
         active_runtime,
         observation,
         context,
-        _SQL_GROUNDING_UPDATER,
+        updater,
     )
+    if service_result.llm_telemetry.attempted and _uses_real_provider_adapter():
+        state[GROUNDING_PROVIDER_CALL_COUNT_KEY] = _provider_call_count(state) + 1
     return _ObservationResult(
         runtime=service_result.runtime,
         service_status=service_result.state_update.status,
@@ -620,6 +663,26 @@ def _build_validation_context(
     bound = _ACTIVE_TURN_MESSAGE.get()
     if bound is None or bound.task_id != _task_id(state):
         raise ValueError("current bound query is required for ValidationContext")
+    known_tables: set[str] = set()
+    known_columns: set[str] = set()
+    supported_knowledge: set[tuple[str, str]] = set()
+    for event in _completed_sql_grounding_trajectory(state):
+        _project_official_evidence(
+            tool_name=event["tool_name"],
+            observation_type=event["observation_type"],
+            content=event["content"],
+            known_tables=known_tables,
+            known_columns=known_columns,
+            supported_knowledge=supported_knowledge,
+        )
+    _project_official_evidence(
+        tool_name=observation.tool_name,
+        observation_type=observation.observation_type,
+        content=observation.content,
+        known_tables=known_tables,
+        known_columns=known_columns,
+        supported_knowledge=supported_knowledge,
+    )
     return ValidationContext(
         current_query=_user_message_query(bound.message),
         follow_up_query=(
@@ -630,12 +693,180 @@ def _build_validation_context(
         ),
         latest_observation_id=observation.observation_id,
         official_trajectory_observation_ids=_official_trajectory_refs(state),
-        # Production SG3 is deliberately fail-closed: no inferred identifiers
-        # or knowledge enter this transient context.
-        known_tables=frozenset(),
-        known_columns=frozenset(),
-        supported_domain_knowledge=frozenset(),
+        known_tables=frozenset(known_tables),
+        known_columns=frozenset(known_columns),
+        supported_domain_knowledge=frozenset(supported_knowledge),
     )
+
+
+def _resolve_sql_grounding_updater() -> Any:
+    requested = requested_sql_grounding_updater_mode()
+    if requested == "":
+        return _SQL_GROUNDING_UPDATER
+    if requested != "llm":
+        raise ValueError("invalid GROUNDING_UPDATER_MODE")
+    if _SQL_GROUNDING_UPDATER is not _PASSTHROUGH_SQL_GROUNDING_UPDATER:
+        return _SQL_GROUNDING_UPDATER
+    return build_real_sql_grounding_updater(PROJECT_ROOT)
+
+
+def _is_real_provider_mode() -> bool:
+    return requested_sql_grounding_updater_mode() == "llm"
+
+
+def _uses_real_provider_adapter() -> bool:
+    return (
+        _is_real_provider_mode()
+        and _SQL_GROUNDING_UPDATER is _PASSTHROUGH_SQL_GROUNDING_UPDATER
+    )
+
+
+def _provider_call_count(state: Any) -> int:
+    value = state.get(GROUNDING_PROVIDER_CALL_COUNT_KEY, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("invalid SQL Grounding Provider call counter")
+    return value
+
+
+def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...]:
+    result: list[dict[str, Any]] = []
+    trajectory = state.get("tool_trajectory", [])
+    if not isinstance(trajectory, list):
+        return ()
+    for event in trajectory:
+        if not isinstance(event, dict):
+            continue
+        audit = event.get(SHADOW_AUDIT_KEY)
+        tool_name = event.get("tool")
+        if not isinstance(audit, dict) or not isinstance(tool_name, str):
+            continue
+        observation_type = audit.get("observation_type")
+        observation_id = audit.get("observation_id")
+        if not isinstance(observation_type, str) or not isinstance(observation_id, str):
+            continue
+        result.append(
+            {
+                "tool_name": tool_name,
+                "observation_type": observation_type,
+                "content": event.get("result"),
+            }
+        )
+    return tuple(result[-512:])
+
+
+def _project_official_evidence(
+    *,
+    tool_name: str | None,
+    observation_type: str,
+    content: Any,
+    known_tables: set[str],
+    known_columns: set[str],
+    supported_knowledge: set[tuple[str, str]],
+) -> None:
+    if observation_type == "schema" and tool_name == "get_schema":
+        try:
+            tables, columns = _parse_schema_projection(content)
+        except ValueError:
+            return
+        known_tables.update(tables)
+        known_columns.update(columns)
+        return
+    if observation_type == "knowledge" and tool_name == "get_knowledge_definition":
+        definition = _exact_knowledge_definition(content)
+        if definition is not None:
+            supported_knowledge.add(("business_rule", definition))
+
+
+def _parse_schema_projection(content: Any) -> tuple[frozenset[str], frozenset[str]]:
+    """Project only explicit CREATE TABLE DDL; sample rows are never inspected."""
+
+    if not isinstance(content, str) or not content:
+        raise ValueError("schema content must be text")
+    statements: list[str] = []
+    active: list[str] | None = None
+    in_sample_rows = False
+    for line in content.splitlines():
+        if active is None and re.match(
+            r'^\s*(?:First|"First")\s+3\s+rows\s*:',
+            line,
+            re.IGNORECASE,
+        ):
+            in_sample_rows = True
+            continue
+        if in_sample_rows:
+            if line.strip() == "...":
+                in_sample_rows = False
+            continue
+        if active is None:
+            if re.match(r'^\s*(?:CREATE|"CREATE")\s+TABLE\b', line, re.IGNORECASE):
+                active = [line]
+            continue
+        active.append(line)
+        if re.match(r"^\s*\);\s*$", line):
+            statements.append("\n".join(active))
+            active = None
+    if active is not None or not statements:
+        raise ValueError("schema contains no complete CREATE TABLE DDL")
+    tables: set[str] = set()
+    columns: set[str] = set()
+    for statement in statements:
+        normalized = re.sub(
+            r'^\s*"CREATE"\s+TABLE\b',
+            "CREATE TABLE",
+            statement,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(
+            r'(?m)^(\s*)"(PRIMARY|FOREIGN)"\s+KEY\b',
+            r"\1\2 KEY",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        try:
+            parsed = sqlglot.parse_one(normalized, read="postgres")
+        except ParseError as exc:
+            raise ValueError("schema DDL parse failed") from exc
+        if not isinstance(parsed, exp.Create) or str(parsed.args.get("kind", "")).upper() != "TABLE":
+            raise ValueError("schema entry is not CREATE TABLE")
+        schema = parsed.this
+        if not isinstance(schema, exp.Schema) or not isinstance(schema.this, exp.Table):
+            raise ValueError("CREATE TABLE has no structured schema")
+        table = _ddl_table_identifier(schema.this)
+        if table in tables:
+            raise ValueError("duplicate CREATE TABLE identifier")
+        tables.add(table)
+        for definition in schema.expressions:
+            if isinstance(definition, exp.ColumnDef):
+                name = definition.name
+                if not name:
+                    raise ValueError("schema column has no identifier")
+                columns.add(f"{table}.{name}")
+    return frozenset(tables), frozenset(columns)
+
+
+def _ddl_table_identifier(table: exp.Table) -> str:
+    parts = [part for part in (table.db, table.name) if part]
+    if not parts or len(parts) > 2:
+        raise ValueError("unsupported CREATE TABLE identifier")
+    return ".".join(parts)
+
+
+def _exact_knowledge_definition(content: Any) -> str | None:
+    value = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict) or set(value).isdisjoint({"definition"}):
+        return None
+    definition = value.get("definition")
+    if not isinstance(definition, str) or not definition or definition != definition.strip():
+        return None
+    if len(definition) > 2_048:
+        return None
+    return definition
 
 
 def _ensure_runtime(state: Any) -> tuple[GroundingRuntime, bool]:
@@ -676,12 +907,28 @@ def _observation_audit(result: _ObservationResult) -> dict[str, Any]:
     }
     if result.service_result is not None:
         update = result.service_result.state_update
+        llm = result.service_result.llm_telemetry
         audit.update(
             {
                 "changed_dimensions": list(update.changed_dimensions),
                 "focus_before": update.focus_before,
                 "focus_after": update.focus_after,
-                "provider_attempted": result.service_result.llm_telemetry.attempted,
+                "provider_attempted": llm.attempted,
+                "provider_status": llm.status,
+                "provider_error_type": llm.error_type,
+                "provider_model": llm.model,
+                "provider_name": llm.provider,
+                "credential_source": llm.credential_source,
+                "provider_reported_cost": llm.provider_reported_cost,
+                "provider_latency_ms": llm.latency_ms,
+                "provider_usage": llm.usage.model_dump(mode="json"),
+                "provider_request_sha256": llm.request_sha256,
+                "provider_response_sha256": llm.response_sha256,
+                "raw_private_audit_ref": llm.raw_private_audit_ref,
+                "provider_may_continue_after_cancel": (
+                    llm.provider_may_continue_after_cancel
+                ),
+                "provider_may_bill_after_cancel": llm.provider_may_bill_after_cancel,
                 "service_error_type": update.error_type,
             }
         )

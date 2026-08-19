@@ -5,6 +5,7 @@ import copy
 import hashlib
 import inspect
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -32,6 +33,20 @@ PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
 QUERY = "Show the maintenance cost."
+_ORIGINAL_GROUNDING_UPDATER_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
+
+
+def setUpModule():
+    # SG3 regression is the explicit empty-mode passthrough control.  Do not
+    # let a developer's local SG4 .env turn an offline test into Provider I/O.
+    os.environ.pop("GROUNDING_UPDATER_MODE", None)
+
+
+def tearDownModule():
+    if _ORIGINAL_GROUNDING_UPDATER_MODE is None:
+        os.environ.pop("GROUNDING_UPDATER_MODE", None)
+    else:
+        os.environ["GROUNDING_UPDATER_MODE"] = _ORIGINAL_GROUNDING_UPDATER_MODE
 
 
 def state(task_id: str = "sg3-task", *, budget: float = 10.0) -> dict:
