@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG2",
+  "status": "PASS",
+  "start_head": "77c903d94962eac8fc336ba7e3e21ff0a0be1bf3",
+  "branch": "research/sql-grounding-v1",
+  "checkpoint": "sqlg-v1-sg1.2-pass",
+  "pipeline": [
+    "Observation",
+    "injected_fake_client",
+    "strict_JSON_and_Form",
+    "ValidationContext",
+    "StateDiffAuthorization",
+    "atomic_State_and_focus_replace",
+    "GroundingRuntime"
+  ],
+  "frozen_sha256": {
+    "prompt": "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962",
+    "form_schema": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration": "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
+  },
+  "tests": {
+    "focused_passed": 30,
+    "focused_total": 30,
+    "sg1_regression_passed": 39,
+    "sg1_regression_total": 39,
+    "full_passed": 445,
+    "full_total": 445,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "fake_flows": {
+    "A_simple_p1": "PASS",
+    "B_solar_panel_style": "PASS",
+    "C_invalid_response_atomic_rollback": "PASS",
+    "D_focus_only_revision_noop": "PASS",
+    "E_p2_operation_only_noop": "PASS",
+    "F_p2_new_database_concept_incremental": "PASS",
+    "G_repair_targeted_dimension_only": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "scope_review": {
+    "system_agent_diff": false,
+    "grounding_callbacks_diff": false,
+    "valibra_agent_agent_diff": false,
+    "legacy_requirement_grounding_diff": false,
+    "sg1_2_models_or_expression_diff": false,
+    "adk_or_provider_wiring": false,
+    "sg3_started": false,
+    "sensitive_findings": 0,
+    "large_files_over_1_mib": 0
+  },
+  "source_sha256": {
+    "valibra_agent/sql_grounding/__init__.py": "9855a75114731fe1b531736e4ff0fe938cb603af4952c23eb79e25185ff888f8",
+    "valibra_agent/sql_grounding/observations.py": "fe7c240d55297c7ac96e8de20bd0c61d7fcd3c64af801bfdd2942d0974a48f53",
+    "valibra_agent/sql_grounding/updater.py": "d5605fb3fcf7103d82ce9bf81cfb2371f110f06693db34ccf1e6cc449765f524",
+    "valibra_agent/sql_grounding/service.py": "a87e1545c5c558c4ac04c1fd582a05d6ed34f72902b1767016f786eeb8b928ba",
+    "valibra_agent/sql_grounding/control.py": "096d9b5e661cbcd6230d63c7126ef913615d261d8cdf5b7ea44d3329020630c3",
+    "valibra_agent/sql_grounding/prompt_view.py": "7e4d9a0f7225805db5cb8f6a039af63c71f036b6bfa2452167bb3892253db1e6",
+    "valibra_agent/sql_grounding/telemetry.py": "519bc351a44767112777da6de0b5e54dc382751a588db0aed185a0214a5645cb",
+    "tests/valibra/test_sg2_sql_grounding_kernel.py": "541655977193fd4e4623383ffdc1c91257f890bd6e6f262460b2bcf6cc2ea7da"
+  }
+}
