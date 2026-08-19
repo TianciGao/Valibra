@@ -1,0 +1,56 @@
+{
+  "branch": "research/sql-grounding-v1",
+  "external_calls": {
+    "benchmark": 0,
+    "bird_external_tools": 0,
+    "database": 0,
+    "grounding_provider": 0,
+    "http": 0,
+    "system_agent_provider": 0,
+    "user_simulator": 0
+  },
+  "frozen_sha256": {
+    "configuration": "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e",
+    "form_schema": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "prompt": "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
+  },
+  "gate": {
+    "blocked": false,
+    "mode": "shadow"
+  },
+  "injection": {
+    "atomic_pair": true,
+    "control_hint": {
+      "active": true,
+      "max_chars": 1024,
+      "max_tokens_cl100k": 256
+    },
+    "grounding_view": {
+      "active": true,
+      "max_chars": 4096,
+      "max_items": 96,
+      "max_tokens_cl100k": 1024
+    },
+    "order": [
+      "base_system_instruction",
+      "grounding_view_block",
+      "control_hint_block"
+    ]
+  },
+  "source_sha256": {
+    "tests/valibra/test_sg6a_sql_grounding_active_view.py": "d3ca9b46c718680cf4a0332a2038ed9ebc77868f5dfc4b5787cf1b319a87a077",
+    "valibra_agent/grounding_callbacks.py": "c7fd5e16802c84914b8ed6f0c66c4584cc13807bd89a745c616d0f4d0b0f5f10",
+    "valibra_agent/server.py": "c842651a50289c1027aaae04c77c0696eace8f0f6571a7cbcee05b65a56ccef7"
+  },
+  "start_head": "89150e671bfbf373e01d9d97398f9d17e0b3ad6c",
+  "status": "PASS",
+  "tests": {
+    "compileall": "PASS",
+    "diff_check": "PASS",
+    "full": "428/428 PASS",
+    "pip_check": "PASS",
+    "sg1_sg2_regression": "73/73 PASS",
+    "sg3_sg6a_regression": "58/58 PASS",
+    "sg6a_focused": "12/12 PASS"
+  }
+}

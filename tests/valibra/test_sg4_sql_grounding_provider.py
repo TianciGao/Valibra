@@ -661,13 +661,13 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view["request_unchanged"])
         self.assertEqual(current["budget_remaining"], 10.0)
 
-    def test_health_truthfully_reports_shadow_and_no_control(self):
+    def test_health_truthfully_reports_active_visibility_and_shadow_gate(self):
         with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}, clear=False):
             summary = _configuration_summary()
         self.assertEqual(summary["grounding_core"], "sql_grounding_v1")
         self.assertEqual(summary["grounding_updater"], "passthrough")
-        self.assertFalse(summary["prompt_view_injection_enabled"])
-        self.assertFalse(summary["control_enabled"])
+        self.assertTrue(summary["prompt_view_injection_enabled"])
+        self.assertTrue(summary["control_enabled"])
         self.assertFalse(summary["attempt_gate_enabled"])
 
     async def test_schema_metadata_and_exact_knowledge_update_with_transient_context(self):

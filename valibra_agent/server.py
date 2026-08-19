@@ -19,7 +19,7 @@ from valibra_agent.adk_runtime import AdkRuntime
 from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG5-Shadow")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG6a-Active")
 runtime = AdkRuntime()
 
 
@@ -66,7 +66,7 @@ def _configuration_summary() -> Dict[str, Any]:
         },
         "grounding_enabled": True,
         "grounding_core": "sql_grounding_v1",
-        "grounding_mode": "shadow",
+        "grounding_mode": "active_view",
         "grounding_updater": grounding_provider["effective_updater_mode"],
         "grounding_requested_updater_mode": grounding_provider[
             "requested_updater_mode"
@@ -81,26 +81,26 @@ def _configuration_summary() -> Dict[str, Any]:
         "grounding_provider_configuration_error_type": grounding_provider[
             "configuration_error_type"
         ],
-        "grounding_prompt_view_effective_mode": "shadow",
-        "prompt_view_injection_enabled": False,
-        # Health reports configuration, not whether a particular request has
-        # already run. Per-call truth lives in the bounded Callback audit.
-        "prompt_view_injected": False,
-        "control_mode": "shadow",
-        "control_hint_injection_enabled": False,
+        "grounding_prompt_view_effective_mode": "active",
+        "prompt_view_injection_enabled": True,
+        # These booleans report configured active injection.  Per-call truth
+        # (including fail-open suppression) lives in the bounded Callback audit.
+        "prompt_view_injected": True,
+        "control_mode": "active_hint",
+        "control_hint_injection_enabled": True,
         "attempt_gate_mode": "shadow",
         "attempt_gate_blocking_enabled": False,
-        # Retained compatibility fields: neither Control nor Gate is active.
-        "control_enabled": False,
+        # Compatibility: the advisory Hint is active; the Gate is not.
+        "control_enabled": True,
         "attempt_gate_enabled": False,
     }
 
 
 def _variant(summary: Dict[str, Any]) -> str:
-    """Return the SG5 SQL Grounding Control Shadow service identity."""
+    """Return the SG6a Active View service identity."""
 
     del summary
-    return "SQL-Grounding-V1-SG5-Control-Shadow"
+    return "SQL-Grounding-V1-SG6a-Active-View"
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:

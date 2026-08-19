@@ -641,15 +641,17 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SG5HealthAndFreezeTests(unittest.TestCase):
-    def test_health_reports_shadow_modes_truthfully(self):
+    def test_health_reports_active_visibility_and_shadow_gate_truthfully(self):
         summary = server._configuration_summary()
-        self.assertEqual(summary["control_mode"], "shadow")
-        self.assertFalse(summary["control_hint_injection_enabled"])
+        self.assertEqual(summary["grounding_prompt_view_effective_mode"], "active")
+        self.assertTrue(summary["prompt_view_injection_enabled"])
+        self.assertEqual(summary["control_mode"], "active_hint")
+        self.assertTrue(summary["control_hint_injection_enabled"])
         self.assertEqual(summary["attempt_gate_mode"], "shadow")
         self.assertFalse(summary["attempt_gate_blocking_enabled"])
-        self.assertFalse(summary["control_enabled"])
+        self.assertTrue(summary["control_enabled"])
         self.assertFalse(summary["attempt_gate_enabled"])
-        self.assertEqual(server._variant(summary), "SQL-Grounding-V1-SG5-Control-Shadow")
+        self.assertEqual(server._variant(summary), "SQL-Grounding-V1-SG6a-Active-View")
 
     def test_sg4_contract_hashes_are_unchanged(self):
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)

@@ -641,12 +641,12 @@ class SG3SourceAndFreezeTests(unittest.TestCase):
             },
         )
 
-    def test_source_uses_only_new_core_and_no_active_view_or_gate_blocking(self):
+    def test_source_uses_only_new_core_and_gate_remains_non_blocking(self):
         source = inspect.getsource(grounding_callbacks)
         self.assertNotIn("requirement_grounding", source)
         self.assertNotIn('"valibra:grounding_runtime"', source)
-        for forbidden in ("LiteLLM", "append_instructions"):
-            self.assertNotIn(forbidden, source)
+        self.assertNotIn("LiteLLM", source)
+        self.assertIn("append_instructions", source)
         self.assertIn("transition_grounding_stage", source)
         self.assertIn("evaluate_first_submit_gate", source)
         self.assertIn("render_control_hint", source)

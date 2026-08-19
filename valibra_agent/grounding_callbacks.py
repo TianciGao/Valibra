@@ -1,14 +1,15 @@
-"""SQL Grounding V1 shadow callbacks around the frozen B0 callbacks.
+"""SQL Grounding V1 callbacks around the frozen B0 callbacks.
 
-SG5 observes Control decisions in the real ADK lifecycle while keeping both
-the Control Hint and first-submit Attempt Gate non-active.  Baseline remains
-the only execution fact source: this module never changes the model request,
-model response, tool protocol, Bird-Coin, submit execution, or official
-trajectory.
+SG6a injects the bounded four-dimensional Grounding View and Control Hint into
+the model system instruction.  The first-submit Attempt Gate remains SG5
+shadow-only.  Baseline remains the only execution fact source: this module
+never changes model contents, model responses, tool protocol, Bird-Coin,
+submit execution, or the official trajectory.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -43,7 +44,12 @@ from valibra_agent.sql_grounding.observations import (
     SQLGroundingObservation,
     build_sql_grounding_observation,
 )
-from valibra_agent.sql_grounding.prompt_view import render_grounding_view
+from valibra_agent.sql_grounding.prompt_view import (
+    DEFAULT_MAX_VIEW_CHARS,
+    DEFAULT_MAX_VIEW_TOKENS,
+    count_grounding_view_tokens,
+    render_grounding_view,
+)
 from valibra_agent.sql_grounding.service import (
     SQLGroundingServiceResult,
     process_sql_grounding_observation,
@@ -88,6 +94,19 @@ GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY = (
     "valibra:frame_initialization_legacy_unknown"
 )
 REQUIREMENT_VIEW_AUDIT_KEY = GROUNDING_VIEW_AUDIT_KEY
+
+GROUNDING_VIEW_BEGIN = "[VALIBRA GROUNDING VIEW BEGIN]"
+GROUNDING_VIEW_END = "[VALIBRA GROUNDING VIEW END]"
+CONTROL_HINT_BEGIN = "[VALIBRA CONTROL HINT BEGIN]"
+CONTROL_HINT_END = "[VALIBRA CONTROL HINT END]"
+_ACTIVE_CONTEXT_MARKERS = (
+    GROUNDING_VIEW_BEGIN,
+    GROUNDING_VIEW_END,
+    CONTROL_HINT_BEGIN,
+    CONTROL_HINT_END,
+)
+_MAX_CONTROL_HINT_CHARS = 1_024
+_MAX_CONTROL_HINT_TOKENS = 256
 
 _MAX_ARGS_SUMMARY_CHARS = 768
 _MAX_AUDIT_BYTES = 4_096
@@ -259,7 +278,7 @@ async def before_model_callback(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
 ) -> LlmResponse | None:
-    """Observe one bound query and render a non-injected four-dimensional View."""
+    """Update Shadow State, atomically inject View + Hint, then call B0 once."""
 
     state = getattr(callback_context, "state", None)
     model_call_count = _model_call_count(state)
@@ -267,8 +286,9 @@ async def before_model_callback(
     update_audit: dict[str, Any] | None = None
     control_audit: dict[str, Any] | None = None
     view_audit: dict[str, Any] = {
-        "mode": "shadow",
+        "mode": "active",
         "injected": False,
+        "injection_status": "not_attempted",
     }
     try:
         request_before = _request_sha256(llm_request)
@@ -284,6 +304,17 @@ async def before_model_callback(
                 control_status="failed_open" if degraded else "succeeded",
                 error_type="RuntimeValidationError" if degraded else None,
             )
+            hint = render_control_hint(runtime.focus_dimension)
+            hint_tokens = count_grounding_view_tokens(hint.text)
+            control_audit.update(
+                {
+                    "mode": "active_hint",
+                    "control_hint_tokens_cl100k": hint_tokens,
+                    "control_hint_tokens": hint_tokens,
+                    "control_hint_injected": False,
+                    "injection_status": "not_attempted",
+                }
+            )
             view_audit.update(
                 {
                     "grounding_revision": runtime.grounding_revision,
@@ -294,22 +325,78 @@ async def before_model_callback(
                     ),
                     "view_sha256": view.sha256,
                     "chars": view.char_count,
+                    "view_chars": view.char_count,
                     "tokens_cl100k": view.token_count,
+                    "view_tokens": view.token_count,
                     "included_items": view.included_items,
                     "omitted_items": view.omitted_items,
                     "runtime_degraded": degraded,
                 }
             )
-        view_audit["request_sha256_after_shadow"] = _request_sha256(
+            if degraded:
+                view_audit.update(
+                    {
+                        "injection_status": "failed_open",
+                        "error_type": "RuntimeValidationError",
+                    }
+                )
+                control_audit.update(
+                    {
+                        "injection_status": "failed_open",
+                        "control_hint_injected": False,
+                    }
+                )
+            if not degraded:
+                injection = _inject_active_grounding_context(
+                    llm_request,
+                    view_text=view.text,
+                    control_hint_text=hint.text,
+                )
+                view_audit.update(
+                    {
+                        "injected": True,
+                        "injection_status": "succeeded",
+                        "injection_block_sha256": injection[
+                            "grounding_view_block_sha256"
+                        ],
+                        "view_block_sha256": injection[
+                            "grounding_view_block_sha256"
+                        ],
+                        "request_changed_only_system_instruction": True,
+                    }
+                )
+                control_audit.update(
+                    {
+                        "control_hint_injected": True,
+                        "injection_status": "succeeded",
+                        "control_hint_block_sha256": injection[
+                            "control_hint_block_sha256"
+                        ],
+                        "request_changed_only_system_instruction": True,
+                    }
+                )
+        view_audit["request_sha256_after_injection"] = _request_sha256(
             llm_request
         )
     except Exception as exc:
-        view_audit.update(
-            {
-                "error_type": type(exc).__name__[:128],
-                "runtime_degraded": True,
-            }
-        )
+        view_audit["error_type"] = type(exc).__name__[:128]
+        view_audit["injection_status"] = "failed_open"
+        view_audit.setdefault("runtime_degraded", True)
+        try:
+            view_audit["request_sha256_after_injection"] = _request_sha256(
+                llm_request
+            )
+        except Exception:
+            pass
+        if control_audit is not None:
+            control_audit.update(
+                {
+                    "control_status": "failed_open",
+                    "control_hint_injected": False,
+                    "injection_status": "failed_open",
+                    "error_type": type(exc).__name__[:128],
+                }
+            )
         if state is not None:
             _append_error_audit(
                 state,
@@ -328,7 +415,7 @@ async def before_model_callback(
         view_audit["request_unchanged"] = bool(
             request_before is not None
             and request_before
-            == view_audit.get("request_sha256_after_shadow")
+            == view_audit.get("request_sha256_after_injection")
             == request_after
         )
         if state is not None:
@@ -1588,6 +1675,143 @@ def _request_sha256(llm_request: Any) -> str:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _active_context_block(begin: str, text: str, end: str) -> str:
+    if not isinstance(text, str) or not text:
+        raise ValueError("active Valibra context text must be non-empty")
+    if any(marker in text for marker in _ACTIVE_CONTEXT_MARKERS):
+        raise ValueError("active Valibra context contains a reserved marker")
+    return f"{begin}\n{text}\n{end}"
+
+
+def _strip_active_grounding_context(value: str) -> str:
+    """Remove one complete trailing View/Hint pair; reject all ambiguity."""
+
+    if not isinstance(value, str):
+        raise TypeError("LlmRequest system_instruction must be a string")
+    counts = {marker: value.count(marker) for marker in _ACTIVE_CONTEXT_MARKERS}
+    if not any(counts.values()):
+        return value
+    if any(count != 1 for count in counts.values()):
+        raise ValueError("duplicate or incomplete Valibra active context markers")
+
+    view_start = value.find(GROUNDING_VIEW_BEGIN)
+    suffix = value[view_start:]
+    pattern = re.compile(
+        rf"{re.escape(GROUNDING_VIEW_BEGIN)}\n"
+        rf"(?P<view>.*?)\n{re.escape(GROUNDING_VIEW_END)}\n\n"
+        rf"{re.escape(CONTROL_HINT_BEGIN)}\n"
+        rf"(?P<hint>.*?)\n{re.escape(CONTROL_HINT_END)}",
+        re.DOTALL,
+    )
+    match = pattern.fullmatch(suffix)
+    if match is None:
+        raise ValueError("malformed or cross-nested Valibra active context")
+    if any(
+        marker in match.group(name)
+        for name in ("view", "hint")
+        for marker in _ACTIVE_CONTEXT_MARKERS
+    ):
+        raise ValueError("Valibra active context contains a marker collision")
+    if view_start == 0:
+        return ""
+    if value[view_start - 2 : view_start] != "\n\n":
+        raise ValueError("Valibra active context is not an appended block pair")
+    return value[: view_start - 2]
+
+
+def _config_without_system_instruction(config: Any) -> Any:
+    cloned = copy.deepcopy(config)
+    setattr(cloned, "system_instruction", None)
+    return to_jsonable(cloned)
+
+
+def _request_without_injection_fields(llm_request: Any) -> Any:
+    cloned = copy.deepcopy(llm_request)
+    cloned.config = None
+    cloned.contents = []
+    return to_jsonable(cloned)
+
+
+def _restore_llm_request(llm_request: Any, original: Any) -> None:
+    fields = getattr(type(llm_request), "model_fields", None)
+    if not isinstance(fields, dict):
+        raise TypeError("LlmRequest must expose Pydantic model fields")
+    for field in fields:
+        setattr(llm_request, field, copy.deepcopy(getattr(original, field)))
+
+
+def _inject_active_grounding_context(
+    llm_request: Any,
+    *,
+    view_text: str,
+    control_hint_text: str,
+) -> dict[str, str]:
+    """Atomically leave exactly one current View followed by one Hint block."""
+
+    append = getattr(llm_request, "append_instructions", None)
+    config = getattr(llm_request, "config", None)
+    if not callable(append) or config is None:
+        raise TypeError("LlmRequest.append_instructions is required")
+    system_instruction = getattr(config, "system_instruction", None)
+    if system_instruction is not None and not isinstance(system_instruction, str):
+        raise TypeError("LlmRequest system_instruction must be a string")
+    if len(view_text) > DEFAULT_MAX_VIEW_CHARS:
+        raise ValueError("Grounding View exceeds the character limit")
+    if count_grounding_view_tokens(view_text) > DEFAULT_MAX_VIEW_TOKENS:
+        raise ValueError("Grounding View exceeds the token limit")
+    if len(control_hint_text) > _MAX_CONTROL_HINT_CHARS:
+        raise ValueError("Control Hint exceeds the character limit")
+    if count_grounding_view_tokens(control_hint_text) > _MAX_CONTROL_HINT_TOKENS:
+        raise ValueError("Control Hint exceeds the token limit")
+
+    view_block = _active_context_block(
+        GROUNDING_VIEW_BEGIN,
+        view_text,
+        GROUNDING_VIEW_END,
+    )
+    hint_block = _active_context_block(
+        CONTROL_HINT_BEGIN,
+        control_hint_text,
+        CONTROL_HINT_END,
+    )
+    original_request = copy.deepcopy(llm_request)
+    original_contents = copy.deepcopy(getattr(llm_request, "contents", None))
+    original_non_system = _config_without_system_instruction(config)
+    original_non_injection = _request_without_injection_fields(llm_request)
+    try:
+        base_instruction = _strip_active_grounding_context(system_instruction or "")
+        config.system_instruction = base_instruction or None
+        returned_contents = append([view_block, hint_block])
+        if returned_contents:
+            raise RuntimeError("append_instructions returned unexpected user contents")
+        if getattr(llm_request, "contents", None) != original_contents:
+            raise RuntimeError("append_instructions modified request contents")
+        if _config_without_system_instruction(config) != original_non_system:
+            raise RuntimeError("active context changed non-system generation config")
+        if _request_without_injection_fields(llm_request) != original_non_injection:
+            raise RuntimeError("active context changed another model request field")
+
+        final_instruction = getattr(config, "system_instruction", None)
+        if not isinstance(final_instruction, str):
+            raise RuntimeError("append_instructions produced no string instruction")
+        expected = (
+            f"{base_instruction}\n\n{view_block}\n\n{hint_block}"
+            if base_instruction
+            else f"{view_block}\n\n{hint_block}"
+        )
+        if final_instruction != expected:
+            raise RuntimeError("active context injection did not preserve exact order")
+        if _strip_active_grounding_context(final_instruction) != base_instruction:
+            raise RuntimeError("active context injection was not reversible")
+        return {
+            "grounding_view_block_sha256": _sha256_text(view_block),
+            "control_hint_block_sha256": _sha256_text(hint_block),
+        }
+    except BaseException:
+        _restore_llm_request(llm_request, original_request)
+        raise
 
 
 def _attach_model_call_audit(

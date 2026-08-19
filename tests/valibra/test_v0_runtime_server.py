@@ -198,7 +198,7 @@ class HttpContractTests(unittest.TestCase):
         fake_runtime.run_turn.assert_awaited_once()
         fake_runtime.cleanup_session.assert_awaited_once()
 
-    def test_health_identifies_sql_grounding_v1_shadow_without_credentials(self):
+    def test_health_identifies_sg6a_active_visibility_without_credentials(self):
         with (
             patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}, clear=False),
             TestClient(valibra_server.app) as client,
@@ -207,11 +207,11 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["service"], "valibra_agent")
-        self.assertEqual(body["variant"], "SQL-Grounding-V1-SG5-Control-Shadow")
+        self.assertEqual(body["variant"], "SQL-Grounding-V1-SG6a-Active-View")
         self.assertTrue(body["configuration_summary"]["grounding_enabled"])
         self.assertEqual(
             body["configuration_summary"]["grounding_mode"],
-            "shadow",
+            "active_view",
         )
         self.assertEqual(
             body["configuration_summary"]["grounding_updater"],
@@ -224,15 +224,15 @@ class HttpContractTests(unittest.TestCase):
         self.assertFalse(
             body["configuration_summary"]["grounding_provider_enabled"]
         )
-        self.assertFalse(body["configuration_summary"]["control_enabled"])
+        self.assertTrue(body["configuration_summary"]["control_enabled"])
         self.assertFalse(
             body["configuration_summary"]["attempt_gate_enabled"]
         )
         self.assertEqual(
             body["configuration_summary"]["control_mode"],
-            "shadow",
+            "active_hint",
         )
-        self.assertFalse(
+        self.assertTrue(
             body["configuration_summary"]["control_hint_injection_enabled"]
         )
         self.assertEqual(
@@ -242,10 +242,10 @@ class HttpContractTests(unittest.TestCase):
         self.assertFalse(
             body["configuration_summary"]["attempt_gate_blocking_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             body["configuration_summary"]["prompt_view_injected"]
         )
-        self.assertFalse(
+        self.assertTrue(
             body["configuration_summary"]["prompt_view_injection_enabled"]
         )
         self.assertEqual(len(body["configuration_sha256"]), 64)
