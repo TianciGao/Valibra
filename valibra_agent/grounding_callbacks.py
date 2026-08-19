@@ -1,10 +1,10 @@
 """SQL Grounding V1 shadow callbacks around the frozen B0 callbacks.
 
-SG4 observes the real ADK lifecycle and drives the new four-dimensional
-``sql_grounding`` service with an opt-in real Provider or local passthrough.  It
-never changes the model request, model response, tool protocol, Bird-Coin,
-submit state machine, or official trajectory.  Control, Attempt Gate, and
-active View injection are deliberately absent.
+SG5 observes Control decisions in the real ADK lifecycle while keeping both
+the Control Hint and first-submit Attempt Gate non-active.  Baseline remains
+the only execution fact source: this module never changes the model request,
+model response, tool protocol, Bird-Coin, submit execution, or official
+trajectory.
 """
 
 from __future__ import annotations
@@ -30,6 +30,13 @@ from valibra_agent.sql_grounding.models import (
     ValidationContext,
     canonical_json,
     sql_grounding_state_sha256,
+)
+from valibra_agent.sql_grounding.control import (
+    StageEvent,
+    evaluate_first_submit_gate,
+    render_control_hint,
+    tool_directions_for_focus,
+    transition_grounding_stage,
 )
 from valibra_agent.sql_grounding.observations import (
     ObservationType,
@@ -70,6 +77,7 @@ GROUNDING_SEQUENCE_KEY = "valibra:sql_grounding_sequence"
 SHADOW_AUDIT_KEY = "valibra_sql_grounding_shadow"
 GROUNDING_VIEW_AUDIT_KEY = "valibra_sql_grounding_view"
 GROUNDING_UPDATE_AUDIT_KEY = "valibra_sql_grounding_update"
+GROUNDING_CONTROL_AUDIT_KEY = "valibra_sql_grounding_control"
 GROUNDING_ERROR_AUDIT_KEY = "valibra:sql_grounding_error_audits"
 GROUNDING_PROVIDER_CALL_COUNT_KEY = "valibra:sql_grounding_provider_calls"
 
@@ -165,6 +173,7 @@ class _PendingToolCall:
     args_digest: str
     args_summary: str
     sequence: int
+    control_gate_audit: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -174,18 +183,27 @@ class _PendingToolCall:
             "args_digest": self.args_digest,
             "args_summary": self.args_summary,
             "sequence": self.sequence,
+            "control_gate_audit": self.control_gate_audit,
         }
 
     @classmethod
     def from_json(cls, payload: Any) -> "_PendingToolCall":
-        if not isinstance(payload, dict) or set(payload) != {
+        if not isinstance(payload, dict) or set(payload) not in ({
             "function_call_id",
             "tool_name",
             "phase_before",
             "args_digest",
             "args_summary",
             "sequence",
-        }:
+        }, {
+            "function_call_id",
+            "tool_name",
+            "phase_before",
+            "args_digest",
+            "args_summary",
+            "sequence",
+            "control_gate_audit",
+        }):
             raise ValueError("invalid SQL Grounding pending record")
         record = cls(**payload)
         if not _IDENTIFIER_RE.fullmatch(record.function_call_id):
@@ -200,6 +218,10 @@ class _PendingToolCall:
             raise ValueError("pending args summary is too large")
         if not isinstance(record.sequence, int) or not 1 <= record.sequence <= _MAX_SEQUENCE:
             raise ValueError("invalid pending sequence")
+        if record.control_gate_audit is not None:
+            if not isinstance(record.control_gate_audit, dict):
+                raise ValueError("invalid pending Control audit")
+            _require_bounded_audit(record.control_gate_audit)
         return record
 
 
@@ -209,6 +231,12 @@ class _ObservationResult:
     service_status: str
     observation: SQLGroundingObservation
     service_result: SQLGroundingServiceResult | None = None
+    control_events: tuple[dict[str, str], ...] = ()
+    control_status: Literal["not_applicable", "succeeded", "failed_open"] = (
+        "not_applicable"
+    )
+    control_error_type: str | None = None
+    official_outcome: str | None = None
 
 
 _ACTIVE_TURN_MESSAGE: ContextVar[_BoundTurnMessage | None] = ContextVar(
@@ -237,6 +265,7 @@ async def before_model_callback(
     model_call_count = _model_call_count(state)
     request_before: str | None = None
     update_audit: dict[str, Any] | None = None
+    control_audit: dict[str, Any] | None = None
     view_audit: dict[str, Any] = {
         "mode": "shadow",
         "injected": False,
@@ -250,6 +279,11 @@ async def before_model_callback(
             runtime, later_degraded = _ensure_runtime(state)
             degraded = degraded or later_degraded
             view = render_grounding_view(runtime.grounding_state)
+            control_audit = _control_audit_for_runtime(
+                runtime,
+                control_status="failed_open" if degraded else "succeeded",
+                error_type="RuntimeValidationError" if degraded else None,
+            )
             view_audit.update(
                 {
                     "grounding_revision": runtime.grounding_revision,
@@ -313,6 +347,13 @@ async def before_model_callback(
                         GROUNDING_UPDATE_AUDIT_KEY,
                         update_audit,
                     )
+                if control_audit is not None:
+                    _attach_model_call_audit(
+                        state,
+                        model_call_index,
+                        GROUNDING_CONTROL_AUDIT_KEY,
+                        control_audit,
+                    )
     except Exception as exc:
         if state is not None:
             _append_error_audit(
@@ -341,9 +382,58 @@ async def before_tool_callback(
     args: dict,
     tool_context: ToolContext,
 ) -> dict | None:
-    """Let B0 own budget rejection, then register one exact pending call."""
+    """Evaluate a shadow gate before B0 cost, then register an exact call."""
 
     from system_agent import callbacks as baseline_callbacks
+
+    state = getattr(tool_context, "state", None)
+    tool_name = _safe_tool_name(tool)
+    control_gate_audit: dict[str, Any] | None = None
+    if state is not None and tool_name == "submit_sql":
+        try:
+            runtime, degraded = _ensure_runtime(state)
+            first_submit = _is_first_official_submit(state)
+            gate = evaluate_first_submit_gate(
+                runtime,
+                first_submit=first_submit,
+            )
+            control_gate_audit = {
+                "control_status": "failed_open" if degraded else "succeeded",
+                "stage_before": runtime.stage,
+                "attempt_gate": {
+                    "applicable": gate.applicable,
+                    "open": gate.open,
+                    "reason": gate.reason,
+                    "would_block": gate.applicable and not gate.open,
+                    "blocked": False,
+                    "first_submit": first_submit,
+                },
+            }
+            if degraded:
+                control_gate_audit["error_type"] = "RuntimeValidationError"
+            _require_bounded_audit(control_gate_audit)
+        except Exception as exc:
+            control_gate_audit = {
+                "control_status": "failed_open",
+                "stage_before": None,
+                "attempt_gate": {
+                    "applicable": False,
+                    "open": True,
+                    "reason": "control_evaluation_failed",
+                    "would_block": False,
+                    "blocked": False,
+                    "first_submit": None,
+                },
+                "error_type": type(exc).__name__[:128],
+            }
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "before_tool_control",
+                    exc,
+                    function_call_id=_valid_context_identifier(tool_context),
+                ),
+            )
 
     baseline_result = await baseline_callbacks.before_tool_callback(
         tool,
@@ -352,7 +442,6 @@ async def before_tool_callback(
     )
     if baseline_result is not None:
         return baseline_result
-    state = getattr(tool_context, "state", None)
     if state is None:
         return baseline_result
     try:
@@ -366,6 +455,7 @@ async def before_tool_callback(
             args_digest=_sha256_text(args_json),
             args_summary=_bounded_args_summary(args_json),
             sequence=_next_sequence(state),
+            control_gate_audit=control_gate_audit,
         )
         _add_pending(state, pending)
     except Exception as exc:
@@ -413,6 +503,8 @@ async def after_tool_callback(
         else None
     )
     audit: dict[str, Any]
+    control_audit: dict[str, Any] | None = None
+    pending: _PendingToolCall | None = None
     try:
         function_call_id = _require_function_call_id(tool_context)
         pending = _pop_pending(state, function_call_id)
@@ -443,34 +535,23 @@ async def after_tool_callback(
                 function_call_id=function_call_id,
                 private_raw_ref=private_ref,
             )
-            result = await _handle_observation(state, observation)
-            runtime = result.runtime
-            follow_up_audit: dict[str, Any] | None = None
             phase_after = _phase(
                 state.get("current_phase", pending.phase_before)
             )
-            if (
-                tool_name == "submit_sql"
-                and observation_type == "submission"
-                and pending.phase_before == 1
-                and phase_after == 2
-            ):
-                follow_up = _extract_submit_follow_up(tool_response)
-                follow_up_observation = build_sql_grounding_observation(
-                    task_id=_task_id(state),
-                    phase=2,
-                    sequence=_next_sequence(state),
-                    observation_type="p2_follow_up",
-                    content=follow_up,
-                    summary="official Phase-2 follow-up observed",
-                    private_raw_ref=private_ref,
-                )
-                follow_up_result = await _handle_observation(
+            if tool_name == "submit_sql":
+                result, follow_up_audit = await _handle_submit_observation(
                     state,
-                    follow_up_observation,
+                    observation,
+                    pending=pending,
+                    phase_after=phase_after,
+                    observation_type=observation_type,
+                    tool_response=tool_response,
+                    private_ref=private_ref,
                 )
-                runtime = follow_up_result.runtime
-                follow_up_audit = _observation_audit(follow_up_result)
+            else:
+                result = await _handle_observation(state, observation)
+                follow_up_audit = None
+            runtime = result.runtime
             audit = _observation_audit(result)
             audit.update(
                 {
@@ -485,6 +566,10 @@ async def after_tool_callback(
             )
             if follow_up_audit is not None:
                 audit["p2_follow_up"] = follow_up_audit
+            control_audit = _control_audit_for_observation(
+                result,
+                gate_audit=pending.control_gate_audit,
+            )
             _store_runtime(state, runtime)
     except Exception as exc:
         _cleanup_pending_best_effort(state, tool_context)
@@ -497,12 +582,27 @@ async def after_tool_callback(
             "error_type": type(exc).__name__[:128],
             **_runtime_audit(runtime),
         }
+        control_audit = _control_audit_for_runtime(
+            runtime,
+            control_status="failed_open",
+            error_type=type(exc).__name__[:128],
+            gate_audit=(
+                pending.control_gate_audit if pending is not None else None
+            ),
+        )
         _append_error_audit(state, audit)
     finally:
         _cleanup_pending_best_effort(state, tool_context)
         if audit_index is not None:
             try:
                 _attach_tool_audit(state, audit_index, audit)
+                if control_audit is not None:
+                    _attach_tool_audit(
+                        state,
+                        audit_index,
+                        control_audit,
+                        key=GROUNDING_CONTROL_AUDIT_KEY,
+                    )
             except Exception as exc:
                 _append_error_audit(
                     state,
@@ -598,16 +698,137 @@ async def _consume_bound_user_message(
     return _observation_audit(result)
 
 
+async def _handle_submit_observation(
+    state: Any,
+    observation: SQLGroundingObservation,
+    *,
+    pending: _PendingToolCall,
+    phase_after: Literal[1, 2],
+    observation_type: ObservationType,
+    tool_response: Any,
+    private_ref: str | None,
+) -> tuple[_ObservationResult, dict[str, Any] | None]:
+    """Apply only official submit facts; a shadow-closed gate never transitions."""
+
+    runtime, _ = _ensure_runtime(state)
+    outcome, event, outcome_error = _official_submit_control_event(
+        state,
+        phase_before=pending.phase_before,
+        phase_after=phase_after,
+        observation_type=observation_type,
+    )
+    gate = pending.control_gate_audit or {}
+    attempt_gate = gate.get("attempt_gate", {})
+    would_block = bool(
+        isinstance(attempt_gate, dict) and attempt_gate.get("would_block") is True
+    )
+    if would_block:
+        return (
+            _ObservationResult(
+                runtime=runtime,
+                service_status="skipped_shadow_gate_would_block",
+                observation=observation,
+                control_status="succeeded",
+                official_outcome=outcome,
+            ),
+            None,
+        )
+    if outcome_error is not None or event is None:
+        return (
+            _ObservationResult(
+                runtime=runtime,
+                service_status="skipped_inconsistent_official_submit_state",
+                observation=observation,
+                control_status="failed_open",
+                control_error_type=outcome_error or "OfficialSubmitStateError",
+                official_outcome=outcome,
+            ),
+            None,
+        )
+
+    transitioned, transition = _apply_control_event(runtime, event)
+    if event == "official_submit_failed":
+        repaired = await _handle_observation(state, observation, transitioned)
+        return (
+            _ObservationResult(
+                runtime=repaired.runtime,
+                service_status=repaired.service_status,
+                observation=observation,
+                service_result=repaired.service_result,
+                control_events=(transition, *repaired.control_events),
+                control_status=repaired.control_status,
+                control_error_type=repaired.control_error_type,
+                official_outcome=outcome,
+            ),
+            None,
+        )
+
+    follow_up_audit: dict[str, Any] | None = None
+    final_runtime = transitioned
+    if event == "official_p2_follow_up":
+        try:
+            follow_up = _extract_submit_follow_up(tool_response)
+            follow_up_observation = build_sql_grounding_observation(
+                task_id=_task_id(state),
+                phase=2,
+                sequence=_next_sequence(state),
+                observation_type="p2_follow_up",
+                content=follow_up,
+                summary="official Phase-2 follow-up observed",
+                private_raw_ref=private_ref,
+            )
+            follow_up_result = await _handle_observation(
+                state,
+                follow_up_observation,
+                transitioned,
+            )
+            final_runtime = follow_up_result.runtime
+            follow_up_audit = _observation_audit(follow_up_result)
+        except Exception as exc:
+            return (
+                _ObservationResult(
+                    runtime=transitioned,
+                    service_status="skipped_control_lifecycle_only",
+                    observation=observation,
+                    control_events=(transition,),
+                    control_status="failed_open",
+                    control_error_type=type(exc).__name__[:128],
+                    official_outcome=outcome,
+                ),
+                None,
+            )
+    return (
+        _ObservationResult(
+            runtime=final_runtime,
+            service_status="skipped_control_lifecycle_only",
+            observation=observation,
+            control_events=(transition,),
+            control_status="succeeded",
+            official_outcome=outcome,
+        ),
+        follow_up_audit,
+    )
+
+
 async def _handle_observation(
     state: Any,
     observation: SQLGroundingObservation,
     runtime: GroundingRuntime | None = None,
 ) -> _ObservationResult:
     active_runtime = runtime if runtime is not None else _ensure_runtime(state)[0]
-    if observation.observation_type in {"submission", "p2_follow_up"}:
+    if observation.observation_type == "p2_follow_up":
         return _ObservationResult(
             runtime=active_runtime,
-            service_status="skipped_control_not_active",
+            service_status="skipped_affected_dimensions_unfrozen",
+            observation=observation,
+        )
+    if (
+        observation.observation_type == "submission"
+        and active_runtime.stage != "REPAIR"
+    ):
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="skipped_control_lifecycle_only",
             observation=observation,
         )
     if observation.observation_type == "tool_error":
@@ -632,27 +853,162 @@ async def _handle_observation(
                     runtime=active_runtime,
                     service_status="skipped_provider_call_limit",
                     observation=observation,
+                    control_status="failed_open",
+                    control_error_type="ProviderCallLimit",
                 )
-    except Exception:
+    except Exception as exc:
         return _ObservationResult(
             runtime=active_runtime,
             service_status="degraded_configuration",
             observation=observation,
+            control_status="failed_open",
+            control_error_type=type(exc).__name__[:128],
         )
-    context = _build_validation_context(state, observation)
-    service_result = await process_sql_grounding_observation(
-        active_runtime,
-        observation,
-        context,
-        updater,
-    )
+    try:
+        context = _build_validation_context(state, observation)
+        service_result = await process_sql_grounding_observation(
+            active_runtime,
+            observation,
+            context,
+            updater,
+        )
+    except Exception as exc:
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="degraded_service_boundary",
+            observation=observation,
+            control_status="failed_open",
+            control_error_type=type(exc).__name__[:128],
+        )
     if service_result.llm_telemetry.attempted and _uses_real_provider_adapter():
         state[GROUNDING_PROVIDER_CALL_COUNT_KEY] = _provider_call_count(state) + 1
+    candidate = service_result.runtime
+    control_events: tuple[dict[str, str], ...] = ()
+    control_status: Literal["not_applicable", "succeeded", "failed_open"]
+    control_error_type: str | None = None
+    if service_result.state_update.status in {"accepted", "noop"}:
+        control_status = "succeeded"
+        try:
+            candidate, control_events = _advance_ready_control_stage(
+                state,
+                candidate,
+            )
+        except Exception as exc:
+            control_status = "failed_open"
+            control_error_type = type(exc).__name__[:128]
+    else:
+        control_status = "failed_open"
+        control_error_type = service_result.state_update.error_type
     return _ObservationResult(
-        runtime=service_result.runtime,
+        runtime=candidate,
         service_status=service_result.state_update.status,
         observation=observation,
         service_result=service_result,
+        control_events=control_events,
+        control_status=control_status,
+        control_error_type=control_error_type,
+    )
+
+
+def _apply_control_event(
+    runtime: GroundingRuntime,
+    event: StageEvent,
+) -> tuple[GroundingRuntime, dict[str, str]]:
+    candidate = transition_grounding_stage(runtime, event)
+    return candidate, {
+        "event": event,
+        "stage_before": runtime.stage,
+        "stage_after": candidate.stage,
+    }
+
+
+def _advance_ready_control_stage(
+    state: Any,
+    runtime: GroundingRuntime,
+) -> tuple[GroundingRuntime, tuple[dict[str, str], ...]]:
+    event: StageEvent | None = None
+    if (
+        runtime.stage == "INITIAL_GROUNDING"
+        and runtime.grounding_state.all_dimensions_evaluated
+        and runtime.focus_dimension == "none"
+    ):
+        event = "grounding_completed"
+    elif (
+        runtime.stage == "REPAIR"
+        and runtime.grounding_state.all_dimensions_evaluated
+        and runtime.focus_dimension == "none"
+    ):
+        event = (
+            "repair_completed_p1"
+            if _phase(state.get("current_phase", 1)) == 1
+            else "repair_completed_p2"
+        )
+    if event is None:
+        return runtime, ()
+    candidate, record = _apply_control_event(runtime, event)
+    return candidate, (record,)
+
+
+def _official_submit_control_event(
+    state: Any,
+    *,
+    phase_before: Literal[1, 2],
+    phase_after: Literal[1, 2],
+    observation_type: ObservationType,
+) -> tuple[str, StageEvent | None, str | None]:
+    """Classify only frozen Official Session facts; never parse reward or prose."""
+
+    if observation_type == "tool_error":
+        return "tool_error", None, "OfficialToolError"
+    phase1_completed = _official_bool(state, "phase1_completed")
+    phase2_completed = _official_bool(state, "phase2_completed")
+    task_done = _official_bool(state, "task_done")
+    if phase_before == 1:
+        if (
+            task_done
+            and phase1_completed
+            and not phase2_completed
+            and phase_after == 2
+        ):
+            return "task_completed_p1", "official_task_completed", None
+        if (
+            not task_done
+            and phase1_completed
+            and not phase2_completed
+            and phase_after == 2
+        ):
+            return "p1_follow_up", "official_p2_follow_up", None
+        if (
+            not task_done
+            and not phase1_completed
+            and not phase2_completed
+            and phase_after == 1
+        ):
+            return "p1_failed", "official_submit_failed", None
+    else:
+        if task_done and phase2_completed and phase_after == 2:
+            return "task_completed_p2", "official_task_completed", None
+        if not task_done and not phase2_completed and phase_after == 2:
+            return "p2_failed", "official_submit_failed", None
+    return "inconsistent_official_state", None, "OfficialSubmitStateError"
+
+
+def _official_bool(state: Any, key: str) -> bool:
+    value = state.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"official {key} must be boolean")
+    return value
+
+
+def _is_first_official_submit(state: Any) -> bool:
+    """Use only completed Official trajectory entries before the current call."""
+
+    trajectory = state.get("tool_trajectory", [])
+    if not isinstance(trajectory, list):
+        raise ValueError("official tool_trajectory must be a list")
+    return not any(
+        isinstance(event, dict) and event.get("tool") == "submit_sql"
+        for event in trajectory
     )
 
 
@@ -945,6 +1301,72 @@ def _runtime_audit(runtime: GroundingRuntime) -> dict[str, Any]:
     }
 
 
+def _control_audit_for_observation(
+    result: _ObservationResult,
+    *,
+    gate_audit: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return _control_audit_for_runtime(
+        result.runtime,
+        control_status=result.control_status,
+        error_type=result.control_error_type,
+        events=result.control_events,
+        gate_audit=gate_audit,
+        official_outcome=result.official_outcome,
+    )
+
+
+def _control_audit_for_runtime(
+    runtime: GroundingRuntime,
+    *,
+    control_status: Literal["not_applicable", "succeeded", "failed_open"],
+    error_type: str | None = None,
+    events: tuple[dict[str, str], ...] = (),
+    gate_audit: dict[str, Any] | None = None,
+    official_outcome: str | None = None,
+) -> dict[str, Any]:
+    hint = render_control_hint(runtime.focus_dimension)
+    gate = gate_audit or {}
+    attempt_gate = gate.get("attempt_gate")
+    if not isinstance(attempt_gate, dict):
+        attempt_gate = {
+            "applicable": False,
+            "open": True,
+            "reason": "not_applicable",
+            "would_block": False,
+            "blocked": False,
+            "first_submit": None,
+        }
+    stage_before = gate.get("stage_before")
+    if not isinstance(stage_before, str):
+        stage_before = events[0]["stage_before"] if events else runtime.stage
+    effective_status = (
+        "failed_open"
+        if gate.get("control_status") == "failed_open"
+        else control_status
+    )
+    audit: dict[str, Any] = {
+        "mode": "shadow",
+        "control_status": effective_status,
+        "stage_before": stage_before,
+        "stage_after": runtime.stage,
+        "event": events[-1]["event"] if events else None,
+        "events": [dict(item) for item in events],
+        "focus_dimension": runtime.focus_dimension,
+        "tool_directions": list(tool_directions_for_focus(runtime.focus_dimension)),
+        "control_hint_sha256": hint.sha256,
+        "control_hint_chars": len(hint.text),
+        "control_hint_injected": False,
+        "attempt_gate": dict(attempt_gate),
+        "official_outcome": official_outcome,
+    }
+    effective_error = error_type or gate.get("error_type")
+    if isinstance(effective_error, str):
+        audit["error_type"] = effective_error[:128]
+    _require_bounded_audit(audit)
+    return audit
+
+
 def _load_pending(state: Any) -> dict[str, _PendingToolCall]:
     payload = state.get(GROUNDING_PENDING_KEY, {})
     if not isinstance(payload, dict) or len(payload) > _MAX_PENDING:
@@ -1192,6 +1614,8 @@ def _attach_tool_audit(
     state: Any,
     index: int,
     metadata: dict[str, Any],
+    *,
+    key: str = SHADOW_AUDIT_KEY,
 ) -> None:
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list) or not 0 <= index < len(trajectory):
@@ -1202,7 +1626,7 @@ def _attach_tool_audit(
         return
     updated = list(trajectory)
     updated_event = dict(event)
-    updated_event[SHADOW_AUDIT_KEY] = metadata
+    updated_event[key] = metadata
     updated[index] = updated_event
     state["tool_trajectory"] = updated
 

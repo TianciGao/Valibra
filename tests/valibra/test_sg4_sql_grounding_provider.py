@@ -682,8 +682,8 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         after_schema = SQLGroundingState(
             tables=("operational_metrics",),
             join_keys=(),
-            column_mapping=(),
-            domain_knowledge=(),
+            column_mapping=None,
+            domain_knowledge=None,
         )
         after_metadata = after_schema.model_copy(
             update={
@@ -693,7 +693,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
                         targets=("operational_metrics.maintcost",),
                     ),
                 )
-            }
+            },
         )
         after_knowledge = SQLGroundingState(
             tables=after_metadata.tables,
@@ -706,10 +706,12 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         updater = _QueueUpdater(
             [
                 GroundingLLMResponse(
-                    sql_grounding_state=after_schema, next_focus_dimension="none"
+                    sql_grounding_state=after_schema,
+                    next_focus_dimension="column_mapping",
                 ),
                 GroundingLLMResponse(
-                    sql_grounding_state=after_metadata, next_focus_dimension="none"
+                    sql_grounding_state=after_metadata,
+                    next_focus_dimension="domain_knowledge",
                 ),
                 GroundingLLMResponse(
                     sql_grounding_state=after_knowledge, next_focus_dimension="none"

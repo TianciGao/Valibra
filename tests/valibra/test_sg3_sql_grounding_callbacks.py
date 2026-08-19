@@ -407,6 +407,7 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         valibra_event = dict(valibra_state["tool_trajectory"][0])
         self.assertIn(grounding_callbacks.SHADOW_AUDIT_KEY, valibra_event)
         valibra_event.pop(grounding_callbacks.SHADOW_AUDIT_KEY)
+        valibra_event.pop(grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY)
         self.assertEqual(valibra_event, baseline_state["tool_trajectory"][0])
 
     async def test_same_name_calls_pair_out_of_order_by_exact_id(self):
@@ -493,8 +494,18 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         serialized = json.dumps(current)
         self.assertNotIn("private outage details", serialized)
 
-    async def test_submit_follow_up_is_captured_without_control_transition(self):
+    async def test_submit_follow_up_is_captured_with_official_control_transition(self):
         current = state("sg3-submit")
+        current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = GroundingRuntime(
+            stage="SQL_ATTEMPT",
+            focus_dimension="none",
+            grounding_state=SQLGroundingState(
+                tables=(),
+                join_keys=(),
+                column_mapping=(),
+                domain_knowledge=(),
+            ),
+        ).model_dump(mode="json")
         self.bind(current)
         tool = SimpleNamespace(name="submit_sql")
         call_context = context(current, "call-submit")
@@ -505,6 +516,7 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_after(tool, args, tool_context, tool_response):
             del tool, args
+            tool_context.state["phase1_completed"] = True
             tool_context.state["current_phase"] = 2
             tool_context.state["tool_trajectory"].append({"result": tool_response})
             return "same override"
@@ -523,13 +535,13 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(returned, "same override")
         audit = current["tool_trajectory"][0][grounding_callbacks.SHADOW_AUDIT_KEY]
-        self.assertEqual(audit["service_status"], "skipped_control_not_active")
+        self.assertEqual(audit["service_status"], "skipped_control_lifecycle_only")
         self.assertEqual(
             audit["p2_follow_up"]["service_status"],
-            "skipped_control_not_active",
+            "skipped_affected_dimensions_unfrozen",
         )
         self.assertEqual(audit["p2_follow_up"]["observation_type"], "p2_follow_up")
-        self.assertEqual(runtime(current).stage, "INITIAL_GROUNDING")
+        self.assertEqual(runtime(current).stage, "P2_INCREMENTAL")
 
     async def test_scripted_schema_update_flows_callback_service_atomically(self):
         current = state("sg3-scripted")
@@ -629,18 +641,15 @@ class SG3SourceAndFreezeTests(unittest.TestCase):
             },
         )
 
-    def test_source_uses_only_new_core_and_no_control_or_active_view(self):
+    def test_source_uses_only_new_core_and_no_active_view_or_gate_blocking(self):
         source = inspect.getsource(grounding_callbacks)
         self.assertNotIn("requirement_grounding", source)
         self.assertNotIn('"valibra:grounding_runtime"', source)
-        for forbidden in (
-            "transition_grounding_stage",
-            "evaluate_first_submit_gate",
-            "render_control_hint",
-            "LiteLLM",
-            "append_instructions",
-        ):
+        for forbidden in ("LiteLLM", "append_instructions"):
             self.assertNotIn(forbidden, source)
+        self.assertIn("transition_grounding_stage", source)
+        self.assertIn("evaluate_first_submit_gate", source)
+        self.assertIn("render_control_hint", source)
 
     def test_frozen_hashes_and_production_passthrough_are_unchanged(self):
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)

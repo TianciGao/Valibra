@@ -19,7 +19,7 @@ from valibra_agent.adk_runtime import AdkRuntime
 from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG4-Shadow")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG5-Shadow")
 runtime = AdkRuntime()
 
 
@@ -86,16 +86,21 @@ def _configuration_summary() -> Dict[str, Any]:
         # Health reports configuration, not whether a particular request has
         # already run. Per-call truth lives in the bounded Callback audit.
         "prompt_view_injected": False,
+        "control_mode": "shadow",
+        "control_hint_injection_enabled": False,
+        "attempt_gate_mode": "shadow",
+        "attempt_gate_blocking_enabled": False,
+        # Retained compatibility fields: neither Control nor Gate is active.
         "control_enabled": False,
         "attempt_gate_enabled": False,
     }
 
 
 def _variant(summary: Dict[str, Any]) -> str:
-    """Return the SG4 SQL Grounding Shadow service identity."""
+    """Return the SG5 SQL Grounding Control Shadow service identity."""
 
     del summary
-    return "SQL-Grounding-V1-SG4-Shadow"
+    return "SQL-Grounding-V1-SG5-Control-Shadow"
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:

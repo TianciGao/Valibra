@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG5",
+  "status": "PASS",
+  "branch": "research/sql-grounding-v1",
+  "start_head": "12ae7b54c08cd6a77b2fbbeff9f131888e8a9978",
+  "checkpoint": "sqlg-v1-sg4-pass",
+  "mode": {
+    "control": "shadow",
+    "control_hint_injected": false,
+    "attempt_gate": "shadow",
+    "attempt_gate_blocking": false,
+    "prompt_view_injected": false
+  },
+  "frozen_contract_sha256": {
+    "prompt": "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594",
+    "form": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration": "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
+  },
+  "tests": {
+    "focused": {"passed": 15, "total": 15},
+    "sg1_through_sg5_regression": {"passed": 119, "total": 119},
+    "full_unittest": {"passed": 416, "total": 416},
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "affected_dimensions_boundary": "P2 follow-up and user_answer remain fail-closed; no judge, planner, or inferred affected dimensions were added.",
+  "source_sha256": {
+    "valibra_agent/grounding_callbacks.py": "6376fff19ba765e4c65f3c90de13b6b06b5104caae8563ec020de7a37afef582",
+    "valibra_agent/server.py": "0a015932f4d12c66fc67da05af978bf88a7120df325d7c3557dcf2fb6cd0613a",
+    "valibra_agent/sql_grounding/control.py": "6d9d0dca3db217b91a89f3cbc2853ef8c11f104567aac1efc2566d8dee335b17",
+    "valibra_agent/sql_grounding/service.py": "afe2c5747254c329b6a663a059ae25897344e14bb2099e009d0c6314413d2ea4",
+    "valibra_agent/sql_grounding/updater.py": "0ca717b3781069a8ab3e403acf2d54fe9802df20eda1ef5c21eda1514da7b505",
+    "tests/valibra/test_sg5_sql_grounding_control_shadow.py": "a104c6fe76bd82bd5cdadd4194c56b7ff813bd701edd7c452cd3ec4b9c99edc9"
+  }
+}
