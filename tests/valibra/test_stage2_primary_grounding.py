@@ -269,7 +269,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     grounding_callbacks,
                     "load_sql_grounding_llm_config",
-                    return_value=SimpleNamespace(max_calls_per_task=2),
+                    return_value=SimpleNamespace(max_calls_per_task=4),
                 ),
             ):
                 events = [

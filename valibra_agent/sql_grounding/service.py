@@ -219,26 +219,40 @@ def _validate_service_inputs(
             "knowledge_definitions",
             "current_state",
         }
+        p2_fields = primary_fields | {"follow_up"}
         repair_fields = primary_fields | {
             "execute_sql_evidence",
             "submit_failure",
         }
+        p2_repair_fields = repair_fields | {"follow_up"}
         primary = (
             runtime.stage == "INITIAL_GROUNDING"
             and observation.phase == 1
             and observation.observation_type == "knowledge"
             and observation.tool_name == "get_all_knowledge_definitions"
         )
+        p2_follow_up = (
+            runtime.stage == "P2_INCREMENTAL"
+            and observation.phase == 2
+            and observation.observation_type == "p2_follow_up"
+        )
         repair = (
             runtime.stage == "REPAIR"
             and observation.observation_type == "submission"
             and observation.tool_name == "submit_sql"
         )
-        if not primary and not repair:
+        if not primary and not p2_follow_up and not repair:
             raise SQLGroundingValidationError(
-                "bundled Grounding requires Primary bootstrap or REPAIR submission"
+                "bundled Grounding requires P1 Primary, P2 follow-up, or REPAIR"
             )
-        expected_fields = primary_fields if primary else repair_fields
+        if primary:
+            expected_fields = primary_fields
+        elif p2_follow_up:
+            expected_fields = p2_fields
+        elif observation.phase == 2:
+            expected_fields = p2_repair_fields
+        else:
+            expected_fields = repair_fields
         if set(grounding_input) != expected_fields:
             raise SQLGroundingValidationError(
                 "bundled Grounding input has an invalid field set"
@@ -253,6 +267,11 @@ def _validate_service_inputs(
             raise SQLGroundingValidationError(
                 "bundled Grounding current_state differs from Runtime"
             )
+        if p2_follow_up or (repair and observation.phase == 2):
+            if grounding_input.get("follow_up") != context.follow_up_query:
+                raise SQLGroundingValidationError(
+                    "P2 Grounding follow_up differs from ValidationContext"
+                )
         if repair:
             _validate_repair_bundle(grounding_input, observation)
     # The strict model performs de-duplication and canonical ordering checks.

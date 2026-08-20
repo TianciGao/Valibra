@@ -26,9 +26,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "137f8b917a7e39f6ce4a5b8d885f09dabc0737d3d23dd321ec7ffcd5e73fe373"
+PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "d641974ee9a3a08d439b9ad349a33eec889f9b47de9ea38730cee0f1ef42d224"
+CONFIG_SHA = "01f022e0235d23ac669d81742bd374840b3de2d77cd8166f1a28a5c5d37b22ea"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -382,26 +382,36 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second_gate["applicable"])
         self.assertEqual(second_gate["reason"], "subsequent_submit_not_gated")
 
-    async def test_p1_success_follow_up_uses_only_official_state_and_skips_refresh(self):
+    async def test_p1_success_follow_up_grounds_once_without_rebootstrap(self):
         current = task_state("sg5-p2-follow-up")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
+        updater = QueueUpdater(
+            GroundingLLMResponse(
+                sql_grounding_state=grounded_state(),
+                next_focus_dimension="none",
+            )
+        )
         tool = SimpleNamespace(name="submit_sql")
         call = tool_context(current, "p1-pass")
-        await grounding_callbacks.before_tool_callback(tool, {"sql": "S"}, call)
-        current["phase1_completed"] = True
-        current["current_phase"] = 2
-        raw = "passed\nFollow-up question: Add active users.\nBudget remaining: 9"
-        await grounding_callbacks.after_tool_callback(tool, {"sql": "S"}, call, raw)
+        with patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater):
+            await grounding_callbacks.before_tool_callback(tool, {"sql": "S"}, call)
+            current["phase1_completed"] = True
+            current["current_phase"] = 2
+            raw = "passed\nFollow-up question: Add active users.\nBudget remaining: 9"
+            await grounding_callbacks.after_tool_callback(tool, {"sql": "S"}, call, raw)
 
         final = load_runtime(current)
         self.assertEqual(final.stage, "P2_INCREMENTAL")
-        audit = current["tool_trajectory"][0][grounding_callbacks.SHADOW_AUDIT_KEY]
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.observation_types, ["p2_follow_up"])
+        audit = current["tool_trajectory"][-1][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(
             audit["p2_follow_up"]["service_status"],
-            "skipped_affected_dimensions_unfrozen",
+            "accepted",
         )
-        control = current["tool_trajectory"][0][
+        control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertEqual(control["official_outcome"], "p1_follow_up")

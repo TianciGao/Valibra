@@ -29,9 +29,9 @@ from valibra_agent.sql_grounding.updater import (
     GroundingUpdaterResult,
 )
 
-PROMPT_SHA = "137f8b917a7e39f6ce4a5b8d885f09dabc0737d3d23dd321ec7ffcd5e73fe373"
+PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "d641974ee9a3a08d439b9ad349a33eec889f9b47de9ea38730cee0f1ef42d224"
+CONFIG_SHA = "01f022e0235d23ac669d81742bd374840b3de2d77cd8166f1a28a5c5d37b22ea"
 QUERY = "Show the maintenance cost."
 _ORIGINAL_GROUNDING_UPDATER_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 
@@ -498,6 +498,31 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_submit_follow_up_is_captured_with_official_control_transition(self):
         current = state("sg3-submit")
+        current["tool_trajectory"].extend(
+            [
+                {
+                    "type": "tool",
+                    "tool": "get_schema",
+                    "phase": 1,
+                    "args": {},
+                    "result": "CREATE TABLE users (\n  active BOOLEAN\n);",
+                },
+                {
+                    "type": "tool",
+                    "tool": "get_all_column_meanings",
+                    "phase": 1,
+                    "args": {},
+                    "result": "{}",
+                },
+                {
+                    "type": "tool",
+                    "tool": "get_all_knowledge_definitions",
+                    "phase": 1,
+                    "args": {},
+                    "result": "[]",
+                },
+            ]
+        )
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = GroundingRuntime(
             stage="SQL_ATTEMPT",
             focus_dimension="none",
@@ -536,11 +561,11 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 tool, {"sql": "SELECT 1"}, call_context, raw
             )
         self.assertEqual(returned, "same override")
-        audit = current["tool_trajectory"][0][grounding_callbacks.SHADOW_AUDIT_KEY]
+        audit = current["tool_trajectory"][-1][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(audit["service_status"], "skipped_control_lifecycle_only")
         self.assertEqual(
             audit["p2_follow_up"]["service_status"],
-            "skipped_affected_dimensions_unfrozen",
+            "noop",
         )
         self.assertEqual(audit["p2_follow_up"]["observation_type"], "p2_follow_up")
         self.assertEqual(runtime(current).stage, "P2_INCREMENTAL")
