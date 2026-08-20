@@ -55,10 +55,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+PROMPT_SHA = "137f8b917a7e39f6ce4a5b8d885f09dabc0737d3d23dd321ec7ffcd5e73fe373"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
+CONFIG_SHA = "d641974ee9a3a08d439b9ad349a33eec889f9b47de9ea38730cee0f1ef42d224"
 QUERY = "What is the maintenance cost?"
 
 
@@ -679,7 +679,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["attempt_gate_mode"], "active_first_submit")
         self.assertTrue(summary["attempt_gate_budget_liveness_bypass"])
 
-    async def test_schema_metadata_and_exact_knowledge_update_with_transient_context(self):
+    async def test_intermediate_evidence_never_calls_provider_after_stage3(self):
         current = {
             "task_id": "sg4-fake-tools",
             "current_phase": 1,
@@ -787,11 +787,14 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
                 )
         finally:
             grounding_callbacks._reset_turn_message(token)
-        self.assertEqual(updater.calls, 3)
-        self.assertEqual(first.runtime.grounding_revision, 1)
-        self.assertEqual(second.runtime.grounding_revision, 2)
-        self.assertEqual(third.runtime.grounding_revision, 3)
-        self.assertEqual(third.runtime.grounding_state, after_knowledge)
+        self.assertEqual(updater.calls, 0)
+        self.assertEqual(first.service_status, "stored_official_evidence_only")
+        self.assertEqual(second.service_status, "stored_official_evidence_only")
+        self.assertEqual(third.service_status, "stored_official_evidence_only")
+        self.assertEqual(first.runtime.grounding_revision, 0)
+        self.assertEqual(second.runtime.grounding_revision, 0)
+        self.assertEqual(third.runtime.grounding_revision, 0)
+        self.assertEqual(third.runtime.grounding_state, SQLGroundingState())
 
     async def test_invalid_response_and_ineligible_observations_preserve_runtime(self):
         current = {
@@ -844,8 +847,8 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         finally:
             grounding_callbacks._reset_turn_message(token)
         self.assertEqual(rejected.runtime, initial)
-        self.assertEqual(rejected.service_status, "rejected")
-        self.assertEqual(invalid.calls, 1)
+        self.assertEqual(rejected.service_status, "stored_official_evidence_only")
+        self.assertEqual(invalid.calls, 0)
 
 
 class _ScriptedUpdater:

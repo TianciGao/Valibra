@@ -1300,7 +1300,49 @@ async def _handle_submit_observation(
         allow_initial_forced_exit=liveness_bypass,
     )
     if event == "official_submit_failed":
-        repaired = await _handle_observation(state, observation, transitioned)
+        if _official_submit_count(state) != 1 or private_ref is None:
+            return (
+                _ObservationResult(
+                    runtime=transitioned,
+                    service_status="skipped_subsequent_submit_no_repair",
+                    observation=observation,
+                    control_events=(transition,),
+                    control_status="succeeded",
+                    official_outcome=outcome,
+                ),
+                None,
+            )
+        try:
+            bound = _ACTIVE_TURN_MESSAGE.get()
+            if bound is None or bound.task_id != _task_id(state):
+                raise ValueError(
+                    "current bound query is required for Repair Grounding"
+                )
+            grounding_input = _build_repair_grounding_request(
+                state,
+                query=_user_message_query(bound.message),
+                runtime=transitioned,
+                observation=observation,
+            )
+            repaired = await _handle_observation(
+                state,
+                observation,
+                transitioned,
+                grounding_input=grounding_input,
+            )
+        except Exception as exc:
+            return (
+                _ObservationResult(
+                    runtime=transitioned,
+                    service_status="degraded_repair_bundle",
+                    observation=observation,
+                    control_events=(transition,),
+                    control_status="failed_open",
+                    control_error_type=type(exc).__name__[:128],
+                    official_outcome=outcome,
+                ),
+                None,
+            )
         return (
             _ObservationResult(
                 runtime=repaired.runtime,
@@ -1426,13 +1468,10 @@ async def _handle_observation_serialized(
             service_status="skipped_provider_no_state_evidence",
             observation=observation,
         )
-    if (
-        grounding_input is None
-        and not _observation_supports_current_focus(active_runtime, observation)
-    ):
+    if grounding_input is None:
         return _ObservationResult(
             runtime=active_runtime,
-            service_status="skipped_provider_no_state_evidence",
+            service_status="stored_official_evidence_only",
             observation=observation,
         )
     provider_mode = _is_real_provider_mode()
@@ -1441,13 +1480,16 @@ async def _handle_observation_serialized(
         if provider_mode:
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
-            if grounding_input is not None and calls != 0:
+            expected_calls = (
+                0 if active_runtime.stage == "INITIAL_GROUNDING" else 1
+            )
+            if calls != expected_calls:
                 return _ObservationResult(
                     runtime=active_runtime,
-                    service_status="skipped_primary_already_attempted",
+                    service_status="skipped_bundled_call_sequence",
                     observation=observation,
                     control_status="failed_open",
-                    control_error_type="PrimaryProviderAlreadyAttempted",
+                    control_error_type="BundledProviderCallSequenceError",
                 )
             if calls >= llm_config.max_calls_per_task:
                 return _ObservationResult(
@@ -1519,27 +1561,6 @@ async def _handle_observation_serialized(
         control_status=control_status,
         control_error_type=control_error_type,
     )
-
-
-def _observation_supports_current_focus(
-    runtime: GroundingRuntime,
-    observation: SQLGroundingObservation,
-) -> bool:
-    """Apply the frozen, evidence-aware Provider scheduling policy."""
-
-    if observation.observation_type == "submission":
-        return runtime.stage == "REPAIR"
-    tool_name = observation.tool_name
-    if not isinstance(tool_name, str) or runtime.focus_dimension == "none":
-        return False
-    directions = set(tool_directions_for_focus(runtime.focus_dimension))
-    # A knowledge-name list is discovery metadata, not canonical business-rule
-    # evidence.  The current deterministic projection also supports only the
-    # exact singular definition response, so the bulk definition tool remains
-    # fail-closed until such a parser is explicitly frozen.
-    directions.discard("get_all_external_knowledge_names")
-    directions.discard("get_all_knowledge_definitions")
-    return tool_name in directions
 
 
 def _apply_control_event(
@@ -1647,6 +1668,19 @@ def _is_first_official_submit(state: Any) -> bool:
     return not any(
         isinstance(event, dict) and event.get("tool") == "submit_sql"
         for event in trajectory
+    )
+
+
+def _official_submit_count(state: Any) -> int:
+    """Count only actual submit entries written by the frozen Baseline."""
+
+    trajectory = state.get("tool_trajectory", [])
+    if not isinstance(trajectory, list):
+        raise ValueError("official tool_trajectory must be a list")
+    return sum(
+        1
+        for event in trajectory
+        if isinstance(event, dict) and event.get("tool") == "submit_sql"
     )
 
 
@@ -1872,6 +1906,71 @@ def _build_grounding_request(
     }
 
 
+def _build_repair_grounding_request(
+    state: Any,
+    *,
+    query: str,
+    runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+) -> dict[str, Any]:
+    """Rebuild the one allowed Repair bundle from Official trajectory facts."""
+
+    if runtime.stage != "REPAIR" or observation.observation_type != "submission":
+        raise ValueError("Repair bundle requires a submission in REPAIR")
+    if not isinstance(query, str) or not query or query != query.strip():
+        raise ValueError("bounded original query is required")
+    events = _completed_sql_grounding_trajectory(state)
+    bootstrap = _bootstrap_evidence_events(state)
+    by_tool = {event["tool_name"]: event["content"] for event in bootstrap}
+    _parse_schema_projection(by_tool["get_schema"])
+    _exact_all_column_meanings(by_tool["get_all_column_meanings"])
+    _exact_knowledge_definitions(by_tool["get_all_knowledge_definitions"])
+
+    execute_evidence = [
+        _repair_trajectory_record(event)
+        for event in events
+        if event["tool_name"] == "execute_sql"
+    ]
+    submissions = [event for event in events if event["tool_name"] == "submit_sql"]
+    if len(submissions) != 1:
+        raise ValueError("Repair is allowed only for the first actual submit")
+    submit_failure = _repair_trajectory_record(submissions[0])
+    if submit_failure["result"] != observation.content:
+        raise ValueError("current submit failure differs from Official trajectory")
+    return {
+        "query": query,
+        "schema": by_tool["get_schema"],
+        "column_meanings": by_tool["get_all_column_meanings"],
+        "knowledge_definitions": by_tool["get_all_knowledge_definitions"],
+        "current_state": runtime.grounding_state.model_dump(mode="json"),
+        "execute_sql_evidence": execute_evidence,
+        "submit_failure": submit_failure,
+    }
+
+
+def _repair_trajectory_record(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only the exact Official fields needed by the bounded Repair."""
+
+    index = event.get("trajectory_index")
+    phase = event.get("phase")
+    args = event.get("args")
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or isinstance(phase, bool)
+        or phase not in {1, 2}
+        or not isinstance(args, dict)
+    ):
+        raise ValueError("Official Repair trajectory event has invalid fields")
+    return {
+        "trajectory_index": index,
+        "phase": phase,
+        "args": to_jsonable(args),
+        "result": to_jsonable(event.get("content")),
+    }
+
+
 def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...]:
     """Reconstruct trusted evidence from Official events, never shadow presence."""
 
@@ -1895,6 +1994,8 @@ def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...
                 "tool_name": tool_name,
                 "observation_type": observation_type,
                 "content": content,
+                "phase": event.get("phase"),
+                "args": event.get("args"),
                 "trajectory_index": index,
                 "private_raw_ref": f"session://tool_trajectory/{index}",
                 "raw_digest": _sha256_text(canonical_json(to_jsonable(content))),

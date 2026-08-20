@@ -103,6 +103,10 @@ Markdown，也不要添加额外字段。
 1. Primary Grounding 输入恰好包含 query、schema、column_meanings、
    knowledge_definitions、current_state 五个字段。请一次查看完整输入，尽可能在一次响应中
    同时完成 tables、join_keys、column_mapping、domain_knowledge 四个维度。
+   Repair Grounding 输入恰好比 Primary 多 execute_sql_evidence 和 submit_failure 两个字段。
+   execute_sql_evidence 按 Official trajectory 顺序提供此前全部 execute_sql 的 args/result；
+   submit_failure 提供第一次 actual submit_sql 的 args/result。Repair 必须综合这些已有证据修正
+   四维，不得要求重新调用 bootstrap 工具，也不得假定存在第三次 Grounding 调用。
 2. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
    得到 schema 支持。绝不能持久化简写别名或臆造名称。
 3. column_mapping 中的普通字段必须得到 schema 支持；JSON / JSONB target 的真实列必须来自
@@ -591,7 +595,7 @@ def _build_request(
             "original_query": original_query,
         }
     else:
-        input_payload = _validated_primary_grounding_input(
+        input_payload = _validated_bundled_grounding_input(
             grounding_input,
             runtime=runtime,
             original_query=original_query,
@@ -621,52 +625,66 @@ def _build_request(
     return request
 
 
-def _validated_primary_grounding_input(
+def _validated_bundled_grounding_input(
     grounding_input: Mapping[str, Any],
     *,
     runtime: GroundingRuntime,
     original_query: str,
 ) -> dict[str, Any]:
-    """Copy and validate the exact five-field ephemeral Primary input."""
+    """Copy and validate the exact ephemeral Primary or Repair bundle."""
 
-    expected = {
+    primary_fields = {
         "query",
         "schema",
         "column_meanings",
         "knowledge_definitions",
         "current_state",
     }
+    repair_fields = primary_fields | {"execute_sql_evidence", "submit_failure"}
+    expected = repair_fields if runtime.stage == "REPAIR" else primary_fields
     if not isinstance(grounding_input, Mapping) or set(grounding_input) != expected:
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     payload = dict(grounding_input)
     if payload["query"] != original_query or payload["query"] != original_query.strip():
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     if payload["current_state"] != runtime.grounding_state.model_dump(mode="json"):
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if runtime.stage == "REPAIR":
+        execute_evidence = payload["execute_sql_evidence"]
+        submit_failure = payload["submit_failure"]
+        if not isinstance(execute_evidence, list) or not isinstance(
+            submit_failure, dict
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     try:
         canonical_json(payload)
     except (TypeError, ValueError, RecursionError) as exc:
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry) from exc
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry) from exc
     return payload
 
 

@@ -29,9 +29,9 @@ from valibra_agent.sql_grounding.updater import (
     GroundingUpdaterResult,
 )
 
-PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+PROMPT_SHA = "137f8b917a7e39f6ce4a5b8d885f09dabc0737d3d23dd321ec7ffcd5e73fe373"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
+CONFIG_SHA = "d641974ee9a3a08d439b9ad349a33eec889f9b47de9ea38730cee0f1ef42d224"
 QUERY = "Show the maintenance cost."
 _ORIGINAL_GROUNDING_UPDATER_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 
@@ -372,7 +372,7 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["raw_digest"], raw_digest(original))
         self.assertNotEqual(audit["raw_digest"], raw_digest(override))
         self.assertEqual(
-            audit["service_status"], "skipped_provider_no_state_evidence"
+            audit["service_status"], "stored_official_evidence_only"
         )
         self.assertEqual(current[grounding_callbacks.GROUNDING_PENDING_KEY], {})
 
@@ -545,7 +545,7 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audit["p2_follow_up"]["observation_type"], "p2_follow_up")
         self.assertEqual(runtime(current).stage, "P2_INCREMENTAL")
 
-    async def test_scripted_schema_update_flows_callback_service_atomically(self):
+    async def test_schema_result_is_evidence_only_after_stage3(self):
         current = state("sg3-scripted")
         self.bind(current)
         tool = SimpleNamespace(name="get_schema")
@@ -598,12 +598,12 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await grounding_callbacks.after_tool_callback(
                 tool, {}, call_context, {"tables": ["operational_metrics"]}
             )
-        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.calls, 0)
         updated = runtime(current)
-        self.assertEqual(updated.grounding_revision, 1)
-        self.assertEqual(updated.grounding_state, target_state)
+        self.assertEqual(updated.grounding_revision, 0)
+        self.assertEqual(updated.grounding_state, SQLGroundingState())
         audit = current["tool_trajectory"][0][grounding_callbacks.SHADOW_AUDIT_KEY]
-        self.assertEqual(audit["service_status"], "accepted")
+        self.assertEqual(audit["service_status"], "stored_official_evidence_only")
 
         request = {"model_visible": "unchanged"}
         before = copy.deepcopy(request)
@@ -622,7 +622,10 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         view_audit = current["system_agent_llm_calls"][0][
             grounding_callbacks.GROUNDING_VIEW_AUDIT_KEY
         ]
-        self.assertEqual(view_audit["view_sha256"], render_grounding_view(target_state).sha256)
+        self.assertEqual(
+            view_audit["view_sha256"],
+            render_grounding_view(updated.grounding_state).sha256,
+        )
         self.assertFalse(view_audit["injected"])
 
 
