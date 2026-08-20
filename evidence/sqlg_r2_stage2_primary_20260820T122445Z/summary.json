@@ -1,0 +1,54 @@
+{
+  "stage": "R2 Stage 2 Primary Grounding",
+  "status": "PASS",
+  "external_calls": {
+    "benchmark": 0,
+    "database": 0,
+    "http": 0,
+    "provider": 0,
+    "user_simulator": 0
+  },
+  "frozen_contract": {
+    "configuration_sha256": "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360",
+    "form_schema_sha256": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "prompt_sha256": "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+  },
+  "primary_grounding": {
+    "bootstrap_tools": [
+      "get_schema",
+      "get_all_column_meanings",
+      "get_all_knowledge_definitions"
+    ],
+    "dimensions_updated_together": [
+      "tables",
+      "join_keys",
+      "column_mapping",
+      "domain_knowledge"
+    ],
+    "input_fields": [
+      "query",
+      "schema",
+      "column_meanings",
+      "knowledge_definitions",
+      "current_state"
+    ],
+    "provider_calls_in_lifecycle_test": 1,
+    "revision_after_atomic_update": 1
+  },
+  "source_sha256": {
+    "tests/valibra/test_stage2_primary_grounding.py": "3cb36de05173610d37fdaca6a7cc7f976a6d21fae87a6efbd13ccf4262eb6231",
+    "valibra_agent/grounding_callbacks.py": "1c1859caa89e7e284fe300bed8684ac7ab2abed1fbc06bd873e842ec74e5331d",
+    "valibra_agent/sql_grounding/models.py": "b66f6c5e0a25947c742a846b3b83377f2b13d88f520d755da4353790dc85d9d2",
+    "valibra_agent/sql_grounding/service.py": "a06af046c147625c07877ff60a8a8c78852717c8e976bb83b4af74097ab23621",
+    "valibra_agent/sql_grounding/updater.py": "47fdebd967ae09844c0d057df4bd5ec6dc00419fc14b259c7019887c356c2bc1"
+  },
+  "tests": {
+    "cross_stage_passed": 81,
+    "cross_stage_total": 81,
+    "focused_passed": 81,
+    "focused_total": 81,
+    "tracked_full_passed": 432,
+    "tracked_full_total": 432
+  },
+  "stage3_started": false
+}

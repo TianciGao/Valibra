@@ -38,9 +38,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "3bf5c2bea92725bde9965fad0f66d6bf429cfba7d7fd8f43ec9c2c84fbd79c2b"
+PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "866d0e41c2be88d2cf5888f23cad8d8b5e4dc8b14f6220e38cfc9253189fb820"
+CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
 QUERY = "Show the maintenance cost."
 _ORIGINAL_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 

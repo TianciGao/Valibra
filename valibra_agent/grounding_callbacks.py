@@ -182,8 +182,9 @@ class _PassthroughSQLGroundingUpdater:
         *,
         original_query: str,
         follow_up_query: str | None = None,
+        grounding_input: Mapping[str, Any] | None = None,
     ) -> GroundingUpdaterResult:
-        del observation, original_query, follow_up_query
+        del observation, original_query, follow_up_query, grounding_input
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
                 sql_grounding_state=runtime.grounding_state,
@@ -944,30 +945,71 @@ async def after_tool_callback(
                 bootstrap_tool_result = True
                 bootstrap_tool_succeeded = observation_type != "tool_error"
                 runtime, degraded = _ensure_runtime(state)
-                audit = {
-                    "service_status": (
-                        "stored_bootstrap_tool_error"
-                        if observation_type == "tool_error"
-                        else "stored_bootstrap_evidence"
-                    ),
-                    "function_call_id": function_call_id,
-                    "tool_name": tool_name,
-                    "observation_type": observation_type,
-                    "phase_before": pending.phase_before,
-                    "phase_after": phase_after,
-                    "args_digest": pending.args_digest,
-                    "raw_digest": _sha256_text(canonical_json(raw_content)),
-                    "private_raw_ref": private_ref,
-                    "official_error": observation_type == "tool_error",
-                    "provider_attempted": False,
-                    **_runtime_audit(runtime),
-                }
-                control_audit = _control_audit_for_runtime(
-                    runtime,
-                    control_status="failed_open" if degraded else "succeeded",
-                    error_type="RuntimeValidationError" if degraded else None,
-                    gate_audit=pending.control_gate_audit,
-                )
+                if (
+                    bootstrap_tool_succeeded
+                    and tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]
+                    and not degraded
+                ):
+                    observation = build_sql_grounding_observation(
+                        task_id=_task_id(state),
+                        phase=pending.phase_before,
+                        sequence=_next_sequence(state),
+                        observation_type=observation_type,
+                        content=raw_content,
+                        summary="complete Official bootstrap evidence observed",
+                        tool_name=tool_name,
+                        function_call_id=function_call_id,
+                        private_raw_ref=private_ref,
+                    )
+                    bound = _ACTIVE_TURN_MESSAGE.get()
+                    if bound is None or bound.task_id != _task_id(state):
+                        raise ValueError(
+                            "current bound query is required for Primary Grounding"
+                        )
+                    grounding_input = _build_grounding_request(
+                        state,
+                        query=_user_message_query(bound.message),
+                        runtime=runtime,
+                    )
+                    result = await _handle_observation(
+                        state,
+                        observation,
+                        grounding_input=grounding_input,
+                    )
+                    runtime = result.runtime
+                    audit = _observation_audit(result)
+                    audit["primary_grounding_triggered"] = True
+                    audit["bootstrap_evidence_complete"] = True
+                    control_audit = _control_audit_for_observation(
+                        result,
+                        gate_audit=pending.control_gate_audit,
+                    )
+                else:
+                    audit = {
+                        "service_status": (
+                            "stored_bootstrap_tool_error"
+                            if observation_type == "tool_error"
+                            else "stored_bootstrap_evidence"
+                        ),
+                        "function_call_id": function_call_id,
+                        "tool_name": tool_name,
+                        "observation_type": observation_type,
+                        "phase_before": pending.phase_before,
+                        "phase_after": phase_after,
+                        "args_digest": pending.args_digest,
+                        "raw_digest": _sha256_text(canonical_json(raw_content)),
+                        "private_raw_ref": private_ref,
+                        "official_error": observation_type == "tool_error",
+                        "provider_attempted": False,
+                        "bootstrap_evidence_complete": False,
+                        **_runtime_audit(runtime),
+                    }
+                    control_audit = _control_audit_for_runtime(
+                        runtime,
+                        control_status="failed_open" if degraded else "succeeded",
+                        error_type="RuntimeValidationError" if degraded else None,
+                        gate_audit=pending.control_gate_audit,
+                    )
                 _store_runtime(state, runtime)
             else:
                 observation = build_sql_grounding_observation(
@@ -1324,6 +1366,8 @@ async def _handle_observation(
     state: Any,
     observation: SQLGroundingObservation,
     runtime: GroundingRuntime | None = None,
+    *,
+    grounding_input: Mapping[str, Any] | None = None,
 ) -> _ObservationResult:
     async with _serialized_task_grounding(state) as synchronization:
         # Ordinary sibling callbacks must re-read after waiting.  An explicit
@@ -1335,6 +1379,7 @@ async def _handle_observation(
             observation,
             active_runtime,
             synchronization,
+            grounding_input=grounding_input,
         )
         _store_runtime(state, result.runtime)
         return result
@@ -1345,6 +1390,8 @@ async def _handle_observation_serialized(
     observation: SQLGroundingObservation,
     active_runtime: GroundingRuntime,
     synchronization: _TaskGroundingSynchronization,
+    *,
+    grounding_input: Mapping[str, Any] | None = None,
 ) -> _ObservationResult:
     if observation.observation_type == "p2_follow_up":
         return _ObservationResult(
@@ -1379,7 +1426,10 @@ async def _handle_observation_serialized(
             service_status="skipped_provider_no_state_evidence",
             observation=observation,
         )
-    if not _observation_supports_current_focus(active_runtime, observation):
+    if (
+        grounding_input is None
+        and not _observation_supports_current_focus(active_runtime, observation)
+    ):
         return _ObservationResult(
             runtime=active_runtime,
             service_status="skipped_provider_no_state_evidence",
@@ -1391,6 +1441,14 @@ async def _handle_observation_serialized(
         if provider_mode:
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
+            if grounding_input is not None and calls != 0:
+                return _ObservationResult(
+                    runtime=active_runtime,
+                    service_status="skipped_primary_already_attempted",
+                    observation=observation,
+                    control_status="failed_open",
+                    control_error_type="PrimaryProviderAlreadyAttempted",
+                )
             if calls >= llm_config.max_calls_per_task:
                 return _ObservationResult(
                     runtime=active_runtime,
@@ -1421,6 +1479,7 @@ async def _handle_observation_serialized(
                 observation,
                 context,
                 updater,
+                grounding_input=grounding_input,
             )
         finally:
             synchronization.provider_slot_reserved = False
@@ -1600,6 +1659,7 @@ def _build_validation_context(
         raise ValueError("current bound query is required for ValidationContext")
     known_tables: set[str] = set()
     known_columns: set[str] = set()
+    supported_json_paths: set[tuple[str, tuple[str, ...]]] = set()
     supported_knowledge: set[tuple[str, str]] = set()
     for event in _completed_sql_grounding_trajectory(state):
         _project_official_evidence(
@@ -1608,6 +1668,7 @@ def _build_validation_context(
             content=event["content"],
             known_tables=known_tables,
             known_columns=known_columns,
+            supported_json_paths=supported_json_paths,
             supported_knowledge=supported_knowledge,
         )
     _project_official_evidence(
@@ -1616,6 +1677,7 @@ def _build_validation_context(
         content=observation.content,
         known_tables=known_tables,
         known_columns=known_columns,
+        supported_json_paths=supported_json_paths,
         supported_knowledge=supported_knowledge,
     )
     return ValidationContext(
@@ -1630,6 +1692,7 @@ def _build_validation_context(
         official_trajectory_observation_ids=_official_trajectory_refs(state),
         known_tables=frozenset(known_tables),
         known_columns=frozenset(known_columns),
+        supported_json_paths=frozenset(supported_json_paths),
         supported_domain_knowledge=frozenset(supported_knowledge),
     )
 
@@ -1848,6 +1911,7 @@ def _project_official_evidence(
     known_tables: set[str],
     known_columns: set[str],
     supported_knowledge: set[tuple[str, str]],
+    supported_json_paths: set[tuple[str, tuple[str, ...]]] | None = None,
 ) -> None:
     if observation_type == "schema" and tool_name == "get_schema":
         try:
@@ -1856,6 +1920,13 @@ def _project_official_evidence(
             return
         known_tables.update(tables)
         known_columns.update(columns)
+        return
+    if observation_type == "metadata" and tool_name == "get_all_column_meanings":
+        if supported_json_paths is None:
+            return
+        supported_json_paths.update(
+            _column_meaning_json_paths(content, known_columns=known_columns)
+        )
         return
     if observation_type == "knowledge" and tool_name == "get_knowledge_definition":
         definition = _exact_knowledge_definition(content)
@@ -2021,6 +2092,67 @@ def _exact_knowledge_definitions(content: Any) -> tuple[str, ...]:
             raise ValueError("bulk knowledge entry has no canonical definition")
         definitions.append(definition)
     return tuple(definitions)
+
+
+def _column_meaning_json_paths(
+    content: Any,
+    *,
+    known_columns: set[str],
+) -> frozenset[tuple[str, tuple[str, ...]]]:
+    """Project only explicit fields_meaning paths for known schema columns."""
+
+    value = _exact_all_column_meanings(content)
+    result: set[tuple[str, tuple[str, ...]]] = set()
+    for raw_column, meaning in value.items():
+        if not isinstance(raw_column, str):
+            continue
+        parts = raw_column.split("|")
+        if len(parts) >= 3:
+            column = ".".join(parts[-2:])
+            _collect_fields_meaning_paths(
+                column,
+                meaning,
+                known_columns=known_columns,
+                result=result,
+            )
+            continue
+        if raw_column in {item.rsplit(".", 1)[0] for item in known_columns} and isinstance(
+            meaning, dict
+        ):
+            for column_name, column_meaning in meaning.items():
+                if isinstance(column_name, str):
+                    _collect_fields_meaning_paths(
+                        f"{raw_column}.{column_name}",
+                        column_meaning,
+                        known_columns=known_columns,
+                        result=result,
+                    )
+    return frozenset(result)
+
+
+def _collect_fields_meaning_paths(
+    column: str,
+    meaning: Any,
+    *,
+    known_columns: set[str],
+    result: set[tuple[str, tuple[str, ...]]],
+) -> None:
+    if column not in known_columns or not isinstance(meaning, dict):
+        return
+    fields = meaning.get("fields_meaning")
+    if not isinstance(fields, dict):
+        return
+
+    def visit(node: dict[str, Any], prefix: tuple[str, ...]) -> None:
+        for key, child in node.items():
+            if not isinstance(key, str) or not key or key != key.strip():
+                continue
+            path = prefix + (key,)
+            result.add((column, path))
+            if isinstance(child, dict):
+                visit(child, path)
+
+    visit(fields, ())
 
 
 def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

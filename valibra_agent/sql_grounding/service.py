@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -47,6 +48,7 @@ async def process_sql_grounding_observation(
     updater: SQLGroundingUpdater,
     *,
     affected_dimensions: tuple[GroundingDimension, ...] = (),
+    grounding_input: Mapping[str, Any] | None = None,
 ) -> SQLGroundingServiceResult:
     """Propose, validate, and atomically accept a complete State plus focus.
 
@@ -57,12 +59,19 @@ async def process_sql_grounding_observation(
 
     old_sha = sql_grounding_state_sha256(runtime.grounding_state)
     try:
-        _validate_service_inputs(runtime, observation, context, affected_dimensions)
+        _validate_service_inputs(
+            runtime,
+            observation,
+            context,
+            affected_dimensions,
+            grounding_input,
+        )
         updater_result = await updater.propose(
             runtime,
             observation,
             original_query=context.current_query,
             follow_up_query=context.follow_up_query,
+            grounding_input=grounding_input,
         )
     except GroundingUpdaterError as exc:
         return SQLGroundingServiceResult(
@@ -101,6 +110,7 @@ async def process_sql_grounding_observation(
             runtime,
             observation,
             affected_dimensions=affected_dimensions,
+            primary_grounding=grounding_input is not None,
         )
         changed = validate_grounding_state_transition(
             runtime.grounding_state,
@@ -165,6 +175,7 @@ def _validate_service_inputs(
     observation: SQLGroundingObservation,
     context: ValidationContext,
     affected_dimensions: tuple[GroundingDimension, ...],
+    grounding_input: Mapping[str, Any] | None,
 ) -> None:
     if context.latest_observation_id != observation.observation_id:
         raise SQLGroundingValidationError(
@@ -195,6 +206,40 @@ def _validate_service_inputs(
         raise SQLGroundingValidationError(
             "explicit affected_dimensions are only valid for new user semantics"
         )
+    if grounding_input is not None:
+        if affected_dimensions:
+            raise SQLGroundingValidationError(
+                "Primary Grounding cannot combine affected_dimensions"
+            )
+        if (
+            runtime.stage != "INITIAL_GROUNDING"
+            or observation.phase != 1
+            or observation.observation_type != "knowledge"
+            or observation.tool_name != "get_all_knowledge_definitions"
+        ):
+            raise SQLGroundingValidationError(
+                "Primary Grounding requires the final Phase-1 bootstrap Observation"
+            )
+        if set(grounding_input) != {
+            "query",
+            "schema",
+            "column_meanings",
+            "knowledge_definitions",
+            "current_state",
+        }:
+            raise SQLGroundingValidationError(
+                "Primary Grounding input must contain exactly five fields"
+            )
+        if grounding_input.get("query") != context.current_query:
+            raise SQLGroundingValidationError(
+                "Primary Grounding query differs from ValidationContext"
+            )
+        if grounding_input.get("current_state") != runtime.grounding_state.model_dump(
+            mode="json"
+        ):
+            raise SQLGroundingValidationError(
+                "Primary Grounding current_state differs from Runtime"
+            )
     # The strict model performs de-duplication and canonical ordering checks.
     StateDiffAuthorization(
         stage=runtime.stage,
@@ -207,7 +252,13 @@ def _authorization_for_observation(
     observation: SQLGroundingObservation,
     *,
     affected_dimensions: tuple[GroundingDimension, ...],
+    primary_grounding: bool,
 ) -> StateDiffAuthorization:
+    if primary_grounding:
+        return StateDiffAuthorization(
+            stage=runtime.stage,
+            authorized_dimensions=GROUNDING_DIMENSIONS,
+        )
     observation_type = observation.observation_type
     if observation_type == "schema":
         dimensions: tuple[GroundingDimension, ...] = (

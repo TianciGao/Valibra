@@ -439,6 +439,7 @@ class ValidationContext:
     follow_up_query: str | None = None
     known_tables: frozenset[str] = frozenset()
     known_columns: frozenset[str] = frozenset()
+    supported_json_paths: frozenset[tuple[str, tuple[str, ...]]] = frozenset()
     supported_domain_knowledge: frozenset[tuple[str, str]] = frozenset()
 
     def __post_init__(self) -> None:
@@ -449,6 +450,14 @@ class ValidationContext:
         )
         object.__setattr__(self, "known_tables", frozenset(self.known_tables))
         object.__setattr__(self, "known_columns", frozenset(self.known_columns))
+        object.__setattr__(
+            self,
+            "supported_json_paths",
+            frozenset(
+                (str(column), tuple(path))
+                for column, path in self.supported_json_paths
+            ),
+        )
         object.__setattr__(
             self,
             "supported_domain_knowledge",
@@ -486,6 +495,17 @@ class ValidationContext:
             _require_table_identifier(table)
         for column in self.known_columns:
             _validate_context_column(column, self.known_tables)
+        for column, path in self.supported_json_paths:
+            if column not in self.known_columns:
+                raise ValueError("supported JSON path must belong to a known column")
+            if not path:
+                raise ValueError("supported JSON path must contain at least one key")
+            for key in path:
+                _require_bounded_text(
+                    key,
+                    label="supported JSON path key",
+                    maximum=MAX_IDENTIFIER_CHARS,
+                )
         for kind, content in self.supported_domain_knowledge:
             if kind not in {"business_rule", "runtime_state", "database_capability"}:
                 raise ValueError("unsupported domain knowledge kind in context")
@@ -1012,7 +1032,58 @@ def _validate_expression_identifiers(
     ]
     if not resolved:
         raise SQLGroundingValidationError("expression must reference a known column")
+    _validate_json_path_evidence(
+        expression,
+        context=context,
+        local_aliases=local_aliases,
+    )
     return frozenset(column.rsplit(".", 1)[0] for column in resolved)
+
+
+def _validate_json_path_evidence(
+    expression: exp.Expression,
+    *,
+    context: ValidationContext,
+    local_aliases: dict[str, str],
+) -> None:
+    """Require every outer JSON path to exist in Official fields_meaning."""
+
+    json_nodes = tuple(
+        node
+        for node in expression.walk()
+        if isinstance(node, (exp.JSONExtract, exp.JSONExtractScalar))
+        and not isinstance(node.parent, (exp.JSONExtract, exp.JSONExtractScalar))
+    )
+    for node in json_nodes:
+        column, path = _json_path_reference(node)
+        resolved = _resolve_column(column, context, local_aliases=local_aliases)
+        if (resolved, path) not in context.supported_json_paths:
+            raise SQLGroundingValidationError(
+                "JSON path lacks an allowed Official column-meaning source"
+            )
+
+
+def _json_path_reference(
+    expression: exp.Expression,
+) -> tuple[exp.Column, tuple[str, ...]]:
+    if isinstance(expression, (exp.JSONExtract, exp.JSONExtractScalar)):
+        column, prefix = _json_path_reference(expression.this)
+        path = expression.args.get("expression")
+        if not isinstance(path, exp.JSONPath):
+            raise SQLGroundingValidationError("JSON path is not a fixed key path")
+        keys = tuple(
+            str(part.this)
+            for part in path.expressions
+            if isinstance(part, exp.JSONPathKey)
+        )
+        if not keys:
+            raise SQLGroundingValidationError("JSON path is not a fixed key path")
+        return column, prefix + keys
+    if isinstance(expression, (exp.Cast, exp.Paren)):
+        return _json_path_reference(expression.this)
+    if isinstance(expression, exp.Column):
+        return expression, ()
+    raise SQLGroundingValidationError("JSON path must originate from a known column")
 
 
 def validate_sql_grounding_state(

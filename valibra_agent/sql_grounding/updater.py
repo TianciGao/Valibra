@@ -100,9 +100,18 @@ Markdown，也不要添加额外字段。
 - 不要添加以上未列出的任何字段。
 
 持久化四维状态的规则：
-1. 只能使用最新合法观测（即输入中的 latest_observation）已经支持的真实、完全限定的数据库标识符。绝不能持久化
-   简写别名或臆造的名称。
-2. join_keys 和 column_mapping 的 targets 必须是符合 Valibra 受限字段/关联表达式合同的
+1. Primary Grounding 输入恰好包含 query、schema、column_meanings、
+   knowledge_definitions、current_state 五个字段。请一次查看完整输入，尽可能在一次响应中
+   同时完成 tables、join_keys、column_mapping、domain_knowledge 四个维度。
+2. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
+   得到 schema 支持。绝不能持久化简写别名或臆造名称。
+3. column_mapping 中的普通字段必须得到 schema 支持；JSON / JSONB target 的真实列必须来自
+   schema，其路径 key 必须来自 column_meanings 中该列的 fields_meaning。
+4. domain_knowledge.content 必须逐字复制自 knowledge_definitions 中的 Official BIRD definition。
+   不能从 schema、column_meanings 或模型常识中改写或臆造知识。
+5. 对非 Primary 的兼容离线调用，只能使用 latest_observation 已经支持的真实、完全限定数据库
+   标识符；该兼容入口不会扩大任何维度授权。
+6. join_keys 和 column_mapping 的 targets 必须是符合 Valibra 受限字段/关联表达式合同的
    规范化 PostgreSQL 表达式。它们不是自由 SQL，不能包含语句、注释、任意函数或未经
    批准的 AST 结构。
    输出的每个 join_keys 表达式和 column_mapping target，都必须已经采用 sqlglot 26.16.4
@@ -111,19 +120,19 @@ Markdown，也不要添加额外字段。
    -> 和 ->> 的两侧都必须各有一个 ASCII 空格。仅用于展示语法的示例：
    t.c -> 'key' ->> 'leaf'。这个示例只展示格式；除非当前合法观测支持其中的
    标识符或字面量，否则绝不能复制它们。
-3. 每个 column_mapping.phrase 都必须是原始用户问题 original_query 或追问 follow_up 中
+7. 每个 column_mapping.phrase 都必须是原始用户问题 query / original_query 或追问 follow_up 中
    非空、逐字连续的子串。
    不要改写 phrase。
-4. domain_knowledge.kind 只能是 business_rule、runtime_state 或 database_capability。
-   每个新增或修改后的非空 domain_knowledge.content，都必须逐字复制自最新合法观测中的
-   Official BIRD 规范知识陈述。已有且通过验证的 content 只能原样保留。
+8. domain_knowledge.kind 只能是 business_rule、runtime_state 或 database_capability。
+   每个新增或修改后的非空 domain_knowledge.content，都必须逐字复制自 knowledge_definitions
+   或最新合法观测中的 Official BIRD 规范知识陈述。已有且通过验证的 content 只能原样保留。
    绝不能改写或臆造知识。
-5. 保留所有未受最新合法 Observation 影响的现有维度和条目。不要清空或替换未受影响的维度。
-6. null 表示尚未评估；[] 表示已经评估且不需要；非空数组包含通过验证的结果。
-7. 在 INITIAL_GROUNDING 阶段，只要任一维度仍为 null，next_focus_dimension 就必须是
+9. Primary Grounding 可以同时提出四个维度；其他调用必须保留所有未经授权的现有维度和条目。
+10. null 表示尚未评估；[] 表示已经评估且不需要；非空数组包含通过验证的结果。
+11. 在 INITIAL_GROUNDING 阶段，只要任一维度仍为 null，next_focus_dimension 就必须是
    tables、join_keys、column_mapping 或 domain_knowledge。四个维度全部完成评估后，
    next_focus_dimension 必须是 none。
-8. 在 REPAIR 阶段，即使状态已经完整，也可以重新聚焦任一维度。只有当最新合法观测
+12. 在 REPAIR 阶段，即使状态已经完整，也可以重新聚焦任一维度。只有当最新合法观测
    没有给出明确的继续补充数据库 Grounding 信息的需要时，才使用 none。
 
 不要输出 score、confidence、ambiguity、reasoning、Evidence 摘要、SQL plan、Bird-Coin、
@@ -212,6 +221,8 @@ class GroundingLLMRequest(ContractModel):
     prompt: str = Field(min_length=1, max_length=32_768)
     input_json: str = Field(min_length=1, max_length=MAX_GROUNDING_REQUEST_CHARS)
     response_schema: dict[str, Any]
+    observation_id: str = Field(default="", max_length=256)
+    observation_type: str = Field(default="", max_length=64)
 
 
 class GroundingClientResponse(ContractModel):
@@ -444,6 +455,7 @@ class SQLGroundingUpdater:
         *,
         original_query: str,
         follow_up_query: str | None = None,
+        grounding_input: Mapping[str, Any] | None = None,
     ) -> GroundingUpdaterResult:
         """Return a typed proposal without mutating Runtime or Observation."""
 
@@ -452,6 +464,7 @@ class SQLGroundingUpdater:
             observation,
             original_query=original_query,
             follow_up_query=follow_up_query,
+            grounding_input=grounding_input,
         )
         request_sha = hashlib.sha256(canonical_json(request).encode("utf-8")).hexdigest()
         started = time.perf_counter()
@@ -567,14 +580,22 @@ def _build_request(
     *,
     original_query: str,
     follow_up_query: str | None,
+    grounding_input: Mapping[str, Any] | None,
 ) -> GroundingLLMRequest:
-    input_payload = {
-        "current_sql_grounding_state": runtime.grounding_state.model_dump(mode="json"),
-        "current_stage": runtime.stage,
-        "follow_up": follow_up_query,
-        "latest_observation": observation_for_updater(observation),
-        "original_query": original_query,
-    }
+    if grounding_input is None:
+        input_payload = {
+            "current_sql_grounding_state": runtime.grounding_state.model_dump(mode="json"),
+            "current_stage": runtime.stage,
+            "follow_up": follow_up_query,
+            "latest_observation": observation_for_updater(observation),
+            "original_query": original_query,
+        }
+    else:
+        input_payload = _validated_primary_grounding_input(
+            grounding_input,
+            runtime=runtime,
+            original_query=original_query,
+        )
     input_json = canonical_json(input_payload)
     if len(input_json) > MAX_GROUNDING_REQUEST_CHARS:
         telemetry = _telemetry(
@@ -587,6 +608,8 @@ def _build_request(
         prompt=SQL_GROUNDING_PROMPT,
         input_json=input_json,
         response_schema=SQL_GROUNDING_FORM_SCHEMA,
+        observation_id=observation.observation_id,
+        observation_type=observation.observation_type,
     )
     if len(canonical_json(request)) > MAX_GROUNDING_REQUEST_CHARS:
         telemetry = _telemetry(
@@ -596,6 +619,55 @@ def _build_request(
         )
         raise GroundingUpdaterError("request_too_large", telemetry)
     return request
+
+
+def _validated_primary_grounding_input(
+    grounding_input: Mapping[str, Any],
+    *,
+    runtime: GroundingRuntime,
+    original_query: str,
+) -> dict[str, Any]:
+    """Copy and validate the exact five-field ephemeral Primary input."""
+
+    expected = {
+        "query",
+        "schema",
+        "column_meanings",
+        "knowledge_definitions",
+        "current_state",
+    }
+    if not isinstance(grounding_input, Mapping) or set(grounding_input) != expected:
+        telemetry = _telemetry(
+            attempted=False,
+            status="rejected",
+            error_type="primary_input_invalid",
+        )
+        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+    payload = dict(grounding_input)
+    if payload["query"] != original_query or payload["query"] != original_query.strip():
+        telemetry = _telemetry(
+            attempted=False,
+            status="rejected",
+            error_type="primary_input_invalid",
+        )
+        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+    if payload["current_state"] != runtime.grounding_state.model_dump(mode="json"):
+        telemetry = _telemetry(
+            attempted=False,
+            status="rejected",
+            error_type="primary_input_invalid",
+        )
+        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+    try:
+        canonical_json(payload)
+    except (TypeError, ValueError, RecursionError) as exc:
+        telemetry = _telemetry(
+            attempted=False,
+            status="rejected",
+            error_type="primary_input_invalid",
+        )
+        raise GroundingUpdaterError("primary_input_invalid", telemetry) from exc
+    return payload
 
 
 def normalize_grounding_transport(
@@ -1012,15 +1084,18 @@ def _build_provider_request(
 def _request_observation_identity(request: GroundingLLMRequest) -> tuple[str, str]:
     """Extract only bounded audit identity from the internally built input."""
 
-    try:
-        payload = json.loads(request.input_json)
-        latest = payload["latest_observation"]
-        observation_id = latest["observation_id"]
-        observation_type = latest["observation_type"]
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise SQLGroundingProviderError(
-            "SQL Grounding request observation identity invalid"
-        ) from exc
+    observation_id = request.observation_id
+    observation_type = request.observation_type
+    if not observation_id or not observation_type:
+        try:
+            payload = json.loads(request.input_json)
+            latest = payload["latest_observation"]
+            observation_id = latest["observation_id"]
+            observation_type = latest["observation_type"]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise SQLGroundingProviderError(
+                "SQL Grounding request observation identity invalid"
+            ) from exc
     if (
         not isinstance(observation_id, str)
         or not observation_id

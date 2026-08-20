@@ -101,6 +101,23 @@ def validation_context() -> ValidationContext:
         official_trajectory_observation_ids=("obs-schema-1", "obs-knowledge-1"),
         known_tables=tables,
         known_columns=columns,
+        supported_json_paths=frozenset(
+            {
+                (
+                    "electrical_performance.elec_perf_snapshot",
+                    ("power",),
+                ),
+                (
+                    "electrical_performance.elec_perf_snapshot",
+                    ("power", "power_now_w"),
+                ),
+                ("metrics.session_telemetry", ("activity_pattern",)),
+                (
+                    "metrics.session_telemetry",
+                    ("activity_pattern", "hourly_observed"),
+                ),
+            }
+        ),
         supported_domain_knowledge=frozenset(
             {
                 (

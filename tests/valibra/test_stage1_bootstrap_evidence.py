@@ -5,6 +5,7 @@ import json
 import os
 import unittest
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -19,10 +20,18 @@ from shared.audit import to_jsonable
 from valibra_agent import grounding_callbacks
 from valibra_agent.sql_grounding.models import (
     DomainKnowledge,
+    GroundingLLMResponse,
     GroundingRuntime,
     SQLGroundingState,
     ValidationContext,
     validate_sql_grounding_state,
+)
+from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
+from valibra_agent.sql_grounding.updater import (
+    SQL_GROUNDING_CONFIGURATION_SHA256,
+    SQL_GROUNDING_FORM_SCHEMA_SHA256,
+    SQL_GROUNDING_PROMPT_SHA256,
+    GroundingUpdaterResult,
 )
 
 
@@ -76,13 +85,29 @@ def _state(task_id: str) -> dict[str, Any]:
     }
 
 
-class _ForbiddenGroundingUpdater:
+class _NoProviderPrimaryUpdater:
     calls = 0
 
-    async def propose(self, *args: Any, **kwargs: Any) -> Any:
-        del args, kwargs
+    async def propose(self, runtime: GroundingRuntime, *args: Any, **kwargs: Any) -> Any:
+        del args
         self.calls += 1
-        raise AssertionError("Stage 1 must not call the Grounding updater")
+        self.grounding_input = kwargs["grounding_input"]
+        return GroundingUpdaterResult(
+            response=GroundingLLMResponse(
+                sql_grounding_state=runtime.grounding_state,
+                next_focus_dimension=runtime.focus_dimension,
+            ),
+            telemetry=GroundingLLMTelemetry(
+                attempted=False,
+                status="succeeded",
+                request_sha256="",
+                response_sha256="",
+                prompt_sha256=SQL_GROUNDING_PROMPT_SHA256,
+                form_schema_sha256=SQL_GROUNDING_FORM_SCHEMA_SHA256,
+                configuration_sha256=SQL_GROUNDING_CONFIGURATION_SHA256,
+            ),
+            transport_normalization="none",
+        )
 
 
 class _FinalLocalModel(BaseLlm):
@@ -106,7 +131,7 @@ class _FinalLocalModel(BaseLlm):
 
 
 class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_adk_collects_three_official_tools_without_grounding(self):
+    async def test_real_adk_collects_three_official_tools_before_primary(self):
         executions: list[str] = []
 
         def get_schema() -> str:
@@ -122,7 +147,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             return KNOWLEDGE_DEFINITIONS
 
         model = _FinalLocalModel(model="stage1-local")
-        updater = _ForbiddenGroundingUpdater()
+        updater = _NoProviderPrimaryUpdater()
         agent = LlmAgent(
             name="stage1_bootstrap_agent",
             model=model,
@@ -161,6 +186,11 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
                     "_SQL_GROUNDING_UPDATER",
                     updater,
                 ),
+                patch.object(
+                    grounding_callbacks,
+                    "load_sql_grounding_llm_config",
+                    return_value=SimpleNamespace(max_calls_per_task=2),
+                ),
             ):
                 events = [
                     event
@@ -187,7 +217,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             executions,
             list(grounding_callbacks._BOOTSTRAP_TOOL_SEQUENCE),
         )
-        self.assertEqual(updater.calls, 0)
+        self.assertEqual(updater.calls, 1)
         self.assertEqual(
             state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0),
             0,
@@ -203,17 +233,26 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         exact_audits = state[grounding_callbacks.GROUNDING_TOOL_AUDITS_KEY]
         self.assertEqual(len(exact_audits), 3)
+        ordered_audits = [exact_audits[key] for key in sorted(exact_audits)]
+        self.assertEqual(
+            [
+                record[grounding_callbacks.SHADOW_AUDIT_KEY]["service_status"]
+                for record in ordered_audits
+            ],
+            ["stored_bootstrap_evidence", "stored_bootstrap_evidence", "noop"],
+        )
         self.assertTrue(
             all(
-                record[grounding_callbacks.SHADOW_AUDIT_KEY][
-                    "service_status"
-                ]
-                == "stored_bootstrap_evidence"
-                and not record[grounding_callbacks.SHADOW_AUDIT_KEY][
+                not record[grounding_callbacks.SHADOW_AUDIT_KEY][
                     "provider_attempted"
                 ]
-                for record in exact_audits.values()
+                for record in ordered_audits
             )
+        )
+        self.assertTrue(
+            ordered_audits[-1][grounding_callbacks.SHADOW_AUDIT_KEY][
+                "primary_grounding_triggered"
+            ]
         )
         self.assertEqual(state[grounding_callbacks.GROUNDING_PENDING_KEY], {})
 

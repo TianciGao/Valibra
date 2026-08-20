@@ -50,12 +50,12 @@ from valibra_agent.sql_grounding import updater as updater_module
 
 
 OLD_PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
-PROMPT_SHA = "3bf5c2bea92725bde9965fad0f66d6bf429cfba7d7fd8f43ec9c2c84fbd79c2b"
+PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
 PRE_PROMPT_FIX_R1_CONFIG_SHA = "af6c8d9378da50a2d167e6bdf6f247dc0978691a21dd82c2fcc6dadbd9ee0bf7"
 CANONICAL_PROMPT_90S_CONFIG_SHA = "f6f674db77cf2a811802155738e20297fc2ecbd0b86a5d369c20e3bf64c032f7"
-CONFIG_SHA = "866d0e41c2be88d2cf5888f23cad8d8b5e4dc8b14f6220e38cfc9253189fb820"
+CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -590,6 +590,14 @@ class SG7R1EvidenceAndAuditTests(unittest.IsolatedAsyncioTestCase):
                     "plant_record.sitetie",
                     "plants.sitekey",
                     "plants.sitelabel",
+                }
+            ),
+            supported_json_paths=frozenset(
+                {
+                    (
+                        "electrical_performance.elec_perf_snapshot",
+                        ("power", "power_now_w"),
+                    )
                 }
             ),
         )
