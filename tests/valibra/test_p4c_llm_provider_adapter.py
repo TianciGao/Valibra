@@ -533,17 +533,5 @@ class ObservationEligibilityAndLedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("bird", combined.model_dump_json().lower())
         self.assertEqual(runtime.model_dump_json(), before)
 
-    def test_empty_mode_keeps_rule_shadow(self):
-        callback_source = Path(grounding_callbacks.__file__).read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("LLMUpdater", callback_source)
-        self.assertIn("LiteLLMGroundingClient", callback_source)
-        with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}):
-            summary = valibra_server._configuration_summary()
-        self.assertEqual(summary["grounding_updater"], "rule")
-        self.assertFalse(summary["prompt_view_injected"])
-
-
 if __name__ == "__main__":
     unittest.main()

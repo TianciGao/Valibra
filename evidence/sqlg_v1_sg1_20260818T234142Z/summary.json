@@ -1,0 +1,60 @@
+{
+  "result": "PASS",
+  "stage": "SG1",
+  "branch": "research/sql-grounding-v1",
+  "start_head": "045ea8f3e0b1a470050314c63677cfc529ed32b9",
+  "rollback_tag": "sqlg-v1-sg0-pass",
+  "runtime_keys": {
+    "legacy_requirement": "valibra:grounding_runtime",
+    "sql_grounding_v1": "valibra:sql_grounding_runtime",
+    "automatic_migration": false
+  },
+  "state_dimensions": [
+    "tables",
+    "join_keys",
+    "column_mapping",
+    "domain_knowledge"
+  ],
+  "grounding_stages": [
+    "INITIAL_GROUNDING",
+    "SQL_ATTEMPT",
+    "REPAIR",
+    "P2_INCREMENTAL",
+    "DONE"
+  ],
+  "focus_dimensions": [
+    "tables",
+    "join_keys",
+    "column_mapping",
+    "domain_knowledge",
+    "none"
+  ],
+  "sqlglot_version": "26.16.4",
+  "tests": {
+    "focused": {"passed": 22, "total": 22},
+    "full_unittest": {"passed": 398, "total": 398},
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "scope_review": {
+    "system_agent_changed": false,
+    "requirement_grounding_changed": false,
+    "callbacks_changed": false,
+    "dependencies_changed": false,
+    "sg2_modules_created": false,
+    "validation_context_persisted": false
+  },
+  "source_sha256": {
+    "valibra_agent/sql_grounding/__init__.py": "6c8b2e2b82dc922d6f074e4f81fa5f58cde5ca83a722c09ded5ff58eeaead2c2",
+    "valibra_agent/sql_grounding/models.py": "420d9614672f3c19724325265f2f96c975121328a152ddaeed1adc682f1e0d96",
+    "tests/valibra/test_sg1_sql_grounding_models.py": "127192d4968edc4f7ec0b8c3ea2b56c03f7a0f9442afc4560009c28968ada1f2"
+  }
+}

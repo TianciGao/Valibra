@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG1.2",
+  "status": "PASS",
+  "start_head": "a1c00c8a3c2786f2547b8f77bebad9380e836bfa",
+  "branch": "research/sql-grounding-v1",
+  "legacy_rollback": {
+    "tag": "p7.1d-pass",
+    "commit": "22dbf71de443843ec2945fc929022e79f50a3d2e"
+  },
+  "integration_branch": {
+    "name": "research/main",
+    "github_head_before_sg1_2": "18c3b46c786fd15fe6fb861254b855b1e5874318",
+    "source": "merged PR #1"
+  },
+  "same_table_relation": {
+    "audit_cases": [
+      "global_index=493; database=planets_data_11",
+      "global_index=511; database=planets_data_M_9"
+    ],
+    "canonical_shape": "LAG(real_table.record_id) OVER (PARTITION BY real_table.column ORDER BY real_table.order_column) <> real_table.record_id",
+    "accepted_fixture": "LAG(orbital_characteristics.orbitalref) OVER (PARTITION BY planets.hostlink ORDER BY orbital_characteristics.period) <> orbital_characteristics.orbitalref",
+    "rejected_legacy_fixture": "stars.rn = stars.rn - 1"
+  },
+  "initial_focus_contract": {
+    "any_dimension_null": "focus must be one of tables/join_keys/column_mapping/domain_knowledge",
+    "all_dimensions_evaluated": "focus must be none",
+    "repair_behavior_changed": false
+  },
+  "tests": {
+    "focused_passed": 39,
+    "focused_total": 39,
+    "full_passed": 415,
+    "full_total": 415,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "audit_sources": [
+    "/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results/final_full_glm47_matched_32768_adk_0001_0600_20260803T090235Z/grounding_four_dimension_audit_20260818T140954Z/uncovered.tsv",
+    "/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results/final_full_glm47_matched_32768_adk_0001_0600_20260803T090235Z/tool_returns_per_task_20260818T110732Z/tasks/0493_planets_data_11.json",
+    "/home/user/code/BIRD-Interact/BIRD-Interact-ADK/results/final_full_glm47_matched_32768_adk_0001_0600_20260803T090235Z/tool_returns_per_task_20260818T110732Z/tasks/0511_planets_data_M_9.json"
+  ],
+  "source_sha256": {
+    "AGENTS.md": "a8424b59fa493f3b7fa1371e43c2d75dc269501b67a9c9b24c56afb748ec46f2",
+    "valibra_agent/sql_grounding/models.py": "61337e21fcb5033250f7f17c2e9aa34fbcd50619bb6e08cd35b36a5e575231be",
+    "valibra_agent/sql_grounding/__init__.py": "2b5747811293019f119356141271de793e0dc6aabc68cfd09d316d5f7793c602",
+    "tests/valibra/test_sg1_sql_grounding_models.py": "71cd72f2589ea6f8b443b7e0127ad26521d9886efee7008f5fd833c377ee49f3"
+  },
+  "sensitive_findings": 0,
+  "large_files_over_1_mib": 0,
+  "sg2_started": false
+}

@@ -16,13 +16,10 @@ from shared.config import (
     settings,
 )
 from valibra_agent.adk_runtime import AdkRuntime
-from valibra_agent.grounding_callbacks import (
-    grounding_prompt_view_status,
-    grounding_updater_status,
-)
+from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="BIRD-Interact Valibra Agent", version="P4.3c-Active-View")
+app = FastAPI(title="BIRD-Interact Valibra Agent", version="SQLG-V1-SG6b-Active")
 runtime = AdkRuntime()
 
 
@@ -47,10 +44,7 @@ def _configuration_summary() -> Dict[str, Any]:
 
     preset_report = active_model_preset_report()
     normalized = normalized_system_agent_config()
-    updater_status = grounding_updater_status()
-    view_status = grounding_prompt_view_status()
-    view_mode = view_status["effective_mode"]
-    injection_enabled = view_mode == "active"
+    grounding_provider = sql_grounding_provider_health_report(PROJECT_ROOT)
     return {
         "dataset": settings.dataset,
         "prompt_version": settings.prompt_version,
@@ -71,43 +65,42 @@ def _configuration_summary() -> Dict[str, Any]:
             "postgresql": settings.pg_port,
         },
         "grounding_enabled": True,
-        "grounding_mode": view_mode,
-        "grounding_updater": updater_status["effective_mode"],
-        "grounding_requested_updater": updater_status["requested_mode"],
-        "grounding_configuration_valid": updater_status[
-            "configuration_valid"
+        "grounding_core": "sql_grounding_v1",
+        "grounding_mode": "active_view",
+        "grounding_updater": grounding_provider["effective_updater_mode"],
+        "grounding_requested_updater_mode": grounding_provider[
+            "requested_updater_mode"
         ],
-        "grounding_configuration_error_type": updater_status["error_type"],
-        "grounding_prompt_view_requested_mode": view_status[
-            "requested_mode"
+        "grounding_effective_updater_mode": grounding_provider[
+            "effective_updater_mode"
         ],
-        "grounding_prompt_view_effective_mode": view_mode,
-        "grounding_prompt_view_configuration_valid": view_status[
-            "configuration_valid"
+        "grounding_provider_configuration_valid": grounding_provider[
+            "provider_configuration_valid"
         ],
-        "grounding_prompt_view_error_type": view_status["error_type"],
-        "prompt_view_injection_enabled": injection_enabled,
-        # Health reports configuration, not whether a particular request has
-        # already run. Per-call truth lives in the bounded Callback audit.
-        "prompt_view_injected": False,
+        "grounding_provider_enabled": grounding_provider["provider_enabled"],
+        "grounding_provider_configuration_error_type": grounding_provider[
+            "configuration_error_type"
+        ],
+        "grounding_prompt_view_effective_mode": "active",
+        "prompt_view_injection_enabled": True,
+        # These booleans report configured active injection.  Per-call truth
+        # (including fail-open suppression) lives in the bounded Callback audit.
+        "prompt_view_injected": True,
+        "control_mode": "active_hint",
+        "control_hint_injection_enabled": True,
+        "attempt_gate_mode": "active_first_submit",
+        "attempt_gate_blocking_enabled": True,
+        "attempt_gate_budget_liveness_bypass": True,
+        "control_enabled": True,
+        "attempt_gate_enabled": True,
     }
 
 
 def _variant(summary: Dict[str, Any]) -> str:
-    """同时公开 Updater 与 Prompt View 两个正交模式。"""
+    """Return the SG6b Active Gate service identity."""
 
-    updater = summary.get("grounding_updater")
-    updater_label = {
-        "rule": "Rule",
-        "llm": "LLM",
-    }.get(updater, "Invalid-Grounding-Config")
-    view = summary.get("grounding_prompt_view_effective_mode")
-    view_label = {
-        "off": "Off",
-        "shadow": "Shadow",
-        "active": "Active",
-    }.get(view, "Invalid-View-Config")
-    return f"P4.3c-{updater_label}-{view_label}"
+    del summary
+    return "SQL-Grounding-V1-SG6b-Active-Gate"
 
 
 def _summary_sha256(summary: Dict[str, Any]) -> str:

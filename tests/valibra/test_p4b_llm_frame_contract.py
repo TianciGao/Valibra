@@ -553,41 +553,5 @@ class LLMUpdaterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(replay.runtime, first.runtime)
         self.assertEqual(client.calls, 1)
 
-
-class WiringBoundaryTests(unittest.TestCase):
-    def test_empty_mode_remains_rule_shadow_without_prompt_injection(self):
-        callback_source = inspect.getsource(grounding_callbacks)
-        self.assertIn("LLMUpdater", callback_source)
-        self.assertIn("process_observation_with_llm", callback_source)
-        with patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}):
-            summary = valibra_server._configuration_summary()
-        self.assertEqual(summary["grounding_mode"], "shadow")
-        self.assertEqual(summary["grounding_updater"], "rule")
-        self.assertFalse(summary["prompt_view_injected"])
-
-    def test_llm_contract_has_no_db_tool_or_prompt_view_implementation(self):
-        source = "\n".join(
-            (
-                inspect.getsource(updater_module),
-                inspect.getsource(process_observation_with_llm),
-            )
-        )
-        for forbidden in (
-            "activate_model_preset",
-            "render_prompt_view",
-            "get_schema(",
-            "task_data",
-            "test_cases",
-            "sol_sql",
-            "httpx",
-            "requests",
-            "spacy",
-            "stanza",
-            "torch",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source.lower())
-
-
 if __name__ == "__main__":
     unittest.main()

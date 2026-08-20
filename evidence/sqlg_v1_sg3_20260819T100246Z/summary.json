@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "stage": "SG3",
+  "status": "PASS",
+  "branch": "research/sql-grounding-v1",
+  "start_head": "9695abbfe1d66fcfb343f55b38d031e36564f46f",
+  "checkpoint": "sqlg-v1-sg2.1-pass",
+  "semantic_core": "valibra_agent.sql_grounding",
+  "runtime_key": "valibra:sql_grounding_runtime",
+  "legacy_runtime_key_accessed": false,
+  "provider_enabled": false,
+  "view_mode": "shadow",
+  "view_injected": false,
+  "control_enabled": false,
+  "attempt_gate_enabled": false,
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http_service": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "frozen_sha256": {
+    "prompt": "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962",
+    "form": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration": "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
+  },
+  "tests": {
+    "sg3_focused": {"passed": 29, "total": 29},
+    "sg2_regression": {"passed": 34, "total": 34},
+    "sg1_regression": {"passed": 39, "total": 39},
+    "full_unittest": {"passed": 386, "total": 386, "skipped": 0},
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "source_sha256": {
+    "valibra_agent/grounding_callbacks.py": "2d63b7759154092838d4c9313c0e20e3257699b72ff12fae60fc4ef7be68c18b",
+    "valibra_agent/server.py": "2cc129aaaf441d07e6a5c58a8654451cc0f28e762d057607ff5bc575121ac254",
+    "tests/valibra/test_sg3_sql_grounding_callbacks.py": "ed564cf7868381c4a8ac29a588e242e0762b5f7ffcf1e86d6faeefe17067ee89",
+    "tests/valibra/test_v0_runtime_server.py": "3cda28efb6529600048d117fe6c2912f5e2a215f58848f2915bdf3fbbefd93dd"
+  },
+  "scope_review": {
+    "system_agent_modified": false,
+    "agent_or_adk_runtime_modified": false,
+    "sql_grounding_kernel_modified": false,
+    "requirement_grounding_modified": false,
+    "evaluator_modified": false,
+    "sg4_started": false,
+    "sensitive_information_found": false,
+    "large_files_found": false
+  }
+}

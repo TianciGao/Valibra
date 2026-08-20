@@ -1,0 +1,92 @@
+{
+  "status": "PASS",
+  "hold_checkpoint": "fa9aa8e453e0600f8fece46e07ba99e733a9acdb",
+  "prompt_revision": true,
+  "old_prompt_sha256": "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962",
+  "new_prompt_sha256": "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594",
+  "form_schema_sha256": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+  "form_changed": false,
+  "new_configuration_sha256": "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e",
+  "transport": "json_object",
+  "provider_retry_count": 0,
+  "output_repair": false,
+  "smoke_a": {
+    "status": "PASS",
+    "real_http_requests": 1,
+    "raw_column_mapping_field": "targets",
+    "targets_is_array": true,
+    "singular_target_present": false,
+    "strict_form_passed": true,
+    "semantic_validation_passed": true,
+    "atomic_replace_passed": true,
+    "grounding_revision": 1,
+    "usage": {
+      "input_tokens": 900,
+      "output_tokens": 706,
+      "reasoning_tokens": 625,
+      "total_tokens": 1606
+    },
+    "provider_reported_cost": null,
+    "provider_latency_ms": 14367.63626197353,
+    "request_sha256": "8633a016ab81333d59588766af12ba7dfb6cf8afc88563c1c257c0aab3b8b457",
+    "response_sha256": "fd49b1451e7ebce6e8672a925af233d538ae884f53b5a217bcacc6017f2318bc",
+    "private_audit_ref": "research-runtime/sql-grounding-llm/sql-grounding-20260819T125138941850Z-8633a016ab81-5954a9f5.json"
+  },
+  "smoke_b": {
+    "status": "PASS_WITH_OFFLINE_HARNESS_FORENSICS",
+    "real_http_requests": 1,
+    "system_agent_provider_requests": 0,
+    "tools_used": false,
+    "database_calls": 0,
+    "user_simulator_calls": 0,
+    "benchmark_calls": 0,
+    "runtime_strict_valid": true,
+    "grounding_revision": 0,
+    "view_shadow_only": true,
+    "control_decisions": 0,
+    "attempt_gate_decisions": 0,
+    "bird_coin_spent": 0.0,
+    "official_trajectory_unchanged": true,
+    "callback_request_unchanged": true,
+    "adk_post_callback_diff_paths": [
+      "config.labels"
+    ],
+    "usage": {
+      "input_tokens": 876,
+      "output_tokens": 461,
+      "reasoning_tokens": 406,
+      "total_tokens": 1337
+    },
+    "provider_reported_cost": null,
+    "provider_latency_ms": null,
+    "provider_latency_note": "The first harness raised after run_turn before flushing its in-memory latency; no estimate or retry was made.",
+    "request_sha256": "1516476bd1fde92a62da89b9ac1600f192d141297d24175c09c256151654a0ac",
+    "response_sha256": "4b0c1b7300b55ef21765dc0d0b99718d51de4cbf34d666b96bbf415a655443e9",
+    "private_audit_ref": "research-runtime/sql-grounding-llm/sql-grounding-20260819T125535813428Z-1516476bd1fd-59d468d0.json",
+    "offline_replay_real_http_requests": 0,
+    "offline_replay_wall_ms": 23.553
+  },
+  "http_ledger": {
+    "historical_before_prompt_correction": 2,
+    "new_prompt_smoke_a": 1,
+    "new_prompt_smoke_b": 1,
+    "cumulative_real_http_requests": 4
+  },
+  "tests": {
+    "sg1_sg2_sg3_focused_passed": 89,
+    "sg1_sg2_sg3_focused_total": 89,
+    "sg4_focused_passed": 15,
+    "sg4_focused_total": 15,
+    "full_passed": 401,
+    "full_total": 401,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "credential_leakage": false,
+  "system_agent_changed": false,
+  "control_enabled": false,
+  "attempt_gate_enabled": false,
+  "active_view_enabled": false,
+  "sg5_started": false
+}

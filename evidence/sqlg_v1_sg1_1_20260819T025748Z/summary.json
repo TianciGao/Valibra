@@ -1,0 +1,62 @@
+{
+  "result": "PASS",
+  "stage": "SG1.1",
+  "branch": "research/sql-grounding-v1",
+  "start_head": "d60b9ddbe8938ee8b2d8df736364a1a6aeb433a4",
+  "immutable_prior_tag": "sqlg-v1-sg1-pass",
+  "sqlglot_version": "26.16.4",
+  "corrections": {
+    "persisted_hidden_aliases_allowed": false,
+    "correlated_local_alias_must_be_declared": true,
+    "cross_dimension_table_subset_enforced": true,
+    "state_diff_authorization_frozen": true
+  },
+  "correlated_relation_shapes": [
+    "outer_column = (SELECT local_alias.column FROM real_table AS local_alias WHERE local_alias.column = outer_column)",
+    "outer_column = (SELECT MAX(local_alias.column) FROM real_table AS local_alias WHERE local_alias.column = outer_column)"
+  ],
+  "new_correlated_ast_nodes": [
+    "From",
+    "Max",
+    "Select",
+    "Subquery",
+    "Table",
+    "TableAlias",
+    "Where"
+  ],
+  "state_diff_contract": {
+    "initial_grounding": "authorized null-to-evaluated and evidence-authorized correction; evaluated-to-null forbidden",
+    "p2_incremental": "only follow-up-authorized dimensions may change; evaluated-to-null forbidden",
+    "repair": "only repair-authorized dimensions may replace or delete content; evaluated-to-null forbidden",
+    "sql_attempt_and_done": "State changes forbidden",
+    "revision": "unchanged for canonical State NoOp; exactly +1 for authorized canonical State change"
+  },
+  "domain_knowledge_sg2_attention": "Prompt must reproduce an approved canonical (kind, content) pair exactly; no fuzzy matcher is present",
+  "tests": {
+    "focused": {"passed": 37, "total": 37},
+    "full_unittest": {"passed": 413, "total": 413},
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "scope_review": {
+    "system_agent_changed": false,
+    "requirement_grounding_changed": false,
+    "callbacks_changed": false,
+    "dependencies_changed": false,
+    "sg2_modules_created": false,
+    "historical_tags_changed": false
+  },
+  "source_sha256": {
+    "valibra_agent/sql_grounding/models.py": "98c96f5d769618d0c28f849699f07056914303c9ca70c75cf47920c40e9ed2dd",
+    "valibra_agent/sql_grounding/__init__.py": "5d91c4a9c220eb13d360e516576e85005afc0568b7eda72cb6bc2429f88703a0",
+    "tests/valibra/test_sg1_sql_grounding_models.py": "553f9b51aba6308d7292959290d2d12fa7f7f7f698bed6fbfb0e20b77753241a"
+  }
+}

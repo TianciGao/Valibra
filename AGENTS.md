@@ -1,7 +1,8 @@
 # Research Repository Rules
 
-- SQL Grounding V1 的主开发分支固定为 `research/sql-grounding-v1`；后续只向 `origin/research/sql-grounding-v1` 推送。
-- `research/main` 与 annotated tag `p7.1d-pass` 是旧 Requirement Grounding 的稳定基线，不得移动、删除、重建或重写。
+- SQL Grounding V1 的唯一开发分支固定为 `research/sql-grounding-v1`；SG1–SG7 只向 `origin/research/sql-grounding-v1` 推送。
+- annotated tag `p7.1d-pass` 是旧 Requirement Grounding 的不可变 rollback baseline，固定指向 `22dbf71de443843ec2945fc929022e79f50a3d2e`，不得移动、删除、重建或重写。
+- `research/main` 是集成分支，已经通过 PR #1 合入 SG0；它不是旧框架的冻结 rollback 分支。SQL Grounding 阶段不得直接 push、merge 或创建面向 `research/main` 的 PR。
 - 每次完成一个明确授权的任务后，自动执行检查、提交并推送，不需要再次询问是否提交。
 - “完成”是指该任务相关测试通过、差异已经检查，并且没有已知失败。
 - 每个 SG 阶段必须单独验收；未经用户明确授权，不得进入下一阶段。
