@@ -1,0 +1,99 @@
+{
+  "config": {
+    "committed_pre_r1_sha256": "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e",
+    "form_sha256": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "new_180s_sha256": "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61",
+    "r1_90s_canonical_prompt_sha256": "f6f674db77cf2a811802155738e20297fc2ecbd0b86a5d369c20e3bf64c032f7",
+    "r1_90s_pre_prompt_sha256": "af6c8d9378da50a2d167e6bdf6f247dc0978691a21dd82c2fcc6dadbd9ee0bf7",
+    "timeout_seconds": 180
+  },
+  "external_calls": {
+    "benchmark": 0,
+    "database": 0,
+    "grounding_provider": 1,
+    "http_services": 0,
+    "main_agent_provider": 0,
+    "user_simulator": 0
+  },
+  "form_sha256": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+  "phase_a": {
+    "authorization": "pass",
+    "byte_length_delta": 4,
+    "changed_dimensions": [
+      "tables",
+      "join_keys",
+      "column_mapping",
+      "domain_knowledge"
+    ],
+    "changed_json_paths": [
+      "$.sql_grounding_state.column_mapping[0].targets[0]"
+    ],
+    "counterfactual_fixture_only": true,
+    "dimension_counts": {
+      "column_mapping": 2,
+      "domain_knowledge": 0,
+      "join_keys": 2,
+      "tables": 3
+    },
+    "form": "pass",
+    "production_response_repair": false,
+    "revision_after": 1,
+    "revision_before": 0,
+    "semantic": "pass",
+    "service": "accepted",
+    "state_diff": "pass",
+    "state_sha256_after": "4216475ac1c405a1337e1bfe8951e5858ec49ba8479a372e2c071240a6f6dc62",
+    "state_sha256_before": "933d87e4ded53e6f2f7fe9779f0276f33bd159498806536ae6ca443fa71d15e4"
+  },
+  "phase_b": {
+    "authorization": "pass",
+    "canonical_expressions": "all_pass",
+    "dimension_counts": {
+      "column_mapping": 3,
+      "domain_knowledge": 0,
+      "join_keys": 2,
+      "tables": 3
+    },
+    "form": "pass",
+    "http_attempts": 1,
+    "latency_ms": 33951.04341499973,
+    "provider_cost": null,
+    "provider_status": "succeeded",
+    "revision_after": 1,
+    "revision_before": 0,
+    "semantic": "pass",
+    "service": "accepted",
+    "state_sha256_after": "86b27d799c5fd9395fa346fad92232fb16a24a8f94fe3fce68b8c1042361d0c7",
+    "state_sha256_before": "933d87e4ded53e6f2f7fe9779f0276f33bd159498806536ae6ca443fa71d15e4",
+    "tokens": {
+      "input_tokens": 4981,
+      "output_tokens": 2531,
+      "reasoning_tokens": 2320,
+      "total_tokens": 7512
+    },
+    "transport": "json_object"
+  },
+  "prompt_sha256": "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8",
+  "result": "SG7-R1 PASS",
+  "smoke_b": {
+    "bird_coin_parity": "pass",
+    "exact_audit": "2/2",
+    "external_provider_calls": 0,
+    "fake_grounding_calls": 1,
+    "knowledge_name_grounding_calls": 0,
+    "official_tools": 2,
+    "result": "pass"
+  },
+  "source_sha256": {
+    "grounding_callbacks.py": "13b288a22780339a40b7bce74721ff763ab360f3142c176db0df300fe2048954",
+    "test_sg7_r1_root_cause_closure.py": "863be4f6dec8a4bcba0dd426df83dc9a56c7a03fee1f16cddcdc5171b2f7e5ad",
+    "updater.py": "75aef2f4302db1ce9be97de77704d7604ca34ff0e9e9c9aeb2b61d22e8707004"
+  },
+  "tests": {
+    "compileall": "pass",
+    "diff_check": "pass",
+    "focused": "154/154 pass",
+    "full": "463/463 pass",
+    "pip_check": "pass"
+  }
+}

@@ -38,7 +38,7 @@ from valibra_agent.sql_grounding.telemetry import (
 
 MAX_GROUNDING_REQUEST_CHARS = 262_144
 MAX_GROUNDING_RESPONSE_CHARS = 65_536
-DEFAULT_GROUNDING_TIMEOUT_SECONDS = 30.0
+DEFAULT_GROUNDING_TIMEOUT_SECONDS = 180.0
 DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 2
 GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_UPDATER_MODE",
@@ -106,6 +106,14 @@ Rules for the persisted four-dimensional State:
    under Valibra's restricted field/relation expression contract. They are not
    free SQL and cannot contain statements, comments, arbitrary functions, or
    unapproved AST shapes.
+   Every emitted join_keys expression and column_mapping target must already be
+   in the exact lexical form produced by sqlglot 26.16.4 after parsing as
+   PostgreSQL and rendering with expression.sql(dialect="postgres"). Do not
+   emit an equivalent expression with different spacing or formatting. For
+   PostgreSQL JSON / JSONB operators, include one ASCII space on both sides of
+   -> and ->>. Syntax-only example: t.c -> 'key' ->> 'leaf'. This example shows
+   formatting only; never copy its identifiers or literals unless the current
+   legal Observation supports them.
 3. Every column_mapping.phrase is a non-empty verbatim substring of the original
    Query or follow-up. Do not paraphrase the phrase.
 4. domain_knowledge.kind is exactly one of business_rule, runtime_state, or
@@ -243,10 +251,12 @@ class SQLGroundingProviderError(RuntimeError):
         *,
         request_sha256: str = "",
         raw_private_audit_ref: str = "",
+        attempted: bool = False,
     ) -> None:
         super().__init__(reason)
         self.request_sha256 = request_sha256
         self.raw_private_audit_ref = raw_private_audit_ref
+        self.attempted = attempted
 
 
 class LiteLLMSQLGroundingClient:
@@ -267,6 +277,8 @@ class LiteLLMSQLGroundingClient:
         self.config = SQLGroundingProviderConfig.model_validate(provider_config)
         self._environment = environment if environment is not None else os.environ
         self._completion = completion
+        self._last_request_sha256 = ""
+        self._last_private_audit_ref = ""
         if self.llm_config.preset_config.get("model") != self.config.model_id:
             raise ValueError("Grounding model preset and Provider model differ")
 
@@ -280,21 +292,82 @@ class LiteLLMSQLGroundingClient:
         )
         request_sha = _stable_json_sha256(request_audit)
         audit_path = _new_private_audit_path(self.config, request_sha)
+        audit_ref = _private_audit_ref(self.config, audit_path)
+        self._last_request_sha256 = request_sha
+        self._last_private_audit_ref = audit_ref
         completion = self._completion
         if completion is None:
-            import litellm
-
+            try:
+                import litellm
+            except Exception:
+                raise SQLGroundingProviderError(
+                    "SQL Grounding Provider client unavailable",
+                    request_sha256=request_sha,
+                    raw_private_audit_ref=audit_ref,
+                    attempted=False,
+                ) from None
             completion = litellm.acompletion
+        started_at = datetime.now(timezone.utc).isoformat()
+        started = time.perf_counter()
+        observation_id, observation_type = _request_observation_identity(request)
+        initial_audit = {
+            "schema_version": "1.0",
+            "status": "started",
+            "started_at": started_at,
+            "request": request_audit,
+            "request_sha256": request_sha,
+            "prompt_sha256": SQL_GROUNDING_PROMPT_SHA256,
+            "form_schema_sha256": SQL_GROUNDING_FORM_SCHEMA_SHA256,
+            "configuration_sha256": SQL_GROUNDING_CONFIGURATION_SHA256,
+            "model": self.config.model_id,
+            "provider": _provider_endpoint_identity(self.config.api_base),
+            "credential_source": self.config.credential_source,
+            "observation_id": observation_id,
+            "observation_type": observation_type,
+        }
+        try:
+            _write_private_provider_audit(
+                audit_path,
+                initial_audit,
+                api_key=api_key,
+            )
+        except SQLGroundingProviderError:
+            raise
+        except Exception:
+            raise SQLGroundingProviderError(
+                "SQL Grounding private request audit preflight failed",
+                request_sha256=request_sha,
+                raw_private_audit_ref=audit_ref,
+                attempted=False,
+            ) from None
         try:
             response = await completion(**provider_kwargs)
+        except asyncio.CancelledError:
+            _write_private_provider_audit(
+                audit_path,
+                {
+                    **initial_audit,
+                    "status": "timed_out",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "latency_ms": _elapsed_ms(started),
+                    "provider_may_continue_after_cancel": (
+                        self.provider_may_continue_after_cancel
+                    ),
+                    "provider_may_bill_after_cancel": (
+                        self.provider_may_bill_after_cancel
+                    ),
+                },
+                api_key=api_key,
+            )
+            raise
         except Exception as exc:
             _write_private_provider_audit(
                 audit_path,
                 {
-                    "schema_version": "1.0",
+                    **initial_audit,
                     "status": "failed",
-                    "request": request_audit,
-                    "request_sha256": request_sha,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "latency_ms": _elapsed_ms(started),
                     "error_type": type(exc).__name__[:128],
                 },
                 api_key=api_key,
@@ -302,31 +375,35 @@ class LiteLLMSQLGroundingClient:
             raise SQLGroundingProviderError(
                 f"SQL Grounding Provider request failed ({type(exc).__name__[:128]})",
                 request_sha256=request_sha,
-                raw_private_audit_ref=_private_audit_ref(self.config, audit_path),
+                raw_private_audit_ref=audit_ref,
+                attempted=True,
             ) from None
 
         raw_response = _sanitize_audit_value(to_jsonable(response))
         response_sha = _stable_json_sha256(raw_response)
+        usage, cost = _provider_usage(response)
         _write_private_provider_audit(
             audit_path,
             {
-                "schema_version": "1.0",
+                **initial_audit,
                 "status": "succeeded",
-                "request": request_audit,
-                "request_sha256": request_sha,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "latency_ms": _elapsed_ms(started),
                 "response": raw_response,
                 "response_sha256": response_sha,
+                "usage": usage.model_dump(mode="json"),
+                "provider_reported_cost": cost,
             },
             api_key=api_key,
         )
-        usage, cost = _provider_usage(response)
         try:
             content = _provider_response_content(response)
         except SQLGroundingProviderError as exc:
             raise SQLGroundingProviderError(
                 str(exc),
                 request_sha256=request_sha,
-                raw_private_audit_ref=_private_audit_ref(self.config, audit_path),
+                raw_private_audit_ref=audit_ref,
+                attempted=True,
             ) from None
         return GroundingClientResponse(
             content=content,
@@ -337,7 +414,7 @@ class LiteLLMSQLGroundingClient:
             credential_source=self.config.credential_source,
             request_sha256=request_sha,
             response_sha256=response_sha,
-            raw_private_audit_ref=_private_audit_ref(self.config, audit_path),
+            raw_private_audit_ref=audit_ref,
             provider_may_continue_after_cancel=self.provider_may_continue_after_cancel,
             provider_may_bill_after_cancel=self.provider_may_bill_after_cancel,
         )
@@ -391,27 +468,38 @@ class SQLGroundingUpdater:
                 timeout=DEFAULT_GROUNDING_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:
+            metadata = _client_telemetry_metadata(self._client)
             telemetry = _telemetry(
                 attempted=True,
                 status="timed_out",
                 latency_ms=_elapsed_ms(started),
-                request_sha=request_sha,
+                request_sha=(
+                    str(getattr(self._client, "_last_request_sha256", ""))
+                    or request_sha
+                ),
                 error_type="timeout",
-                **_client_telemetry_metadata(self._client),
+                **metadata,
             )
             raise GroundingUpdaterError("timeout", telemetry) from exc
         except SQLGroundingProviderError as exc:
             metadata = _client_telemetry_metadata(self._client)
             metadata["raw_private_audit_ref"] = exc.raw_private_audit_ref
             telemetry = _telemetry(
-                attempted=True,
-                status="failed",
+                attempted=exc.attempted,
+                status="failed" if exc.attempted else "rejected",
                 latency_ms=_elapsed_ms(started),
                 request_sha=exc.request_sha256 or request_sha,
-                error_type="provider_error",
+                error_type=(
+                    "provider_error"
+                    if exc.attempted
+                    else "provider_preflight_error"
+                ),
                 **metadata,
             )
-            raise GroundingUpdaterError("provider_error", telemetry) from exc
+            raise GroundingUpdaterError(
+                telemetry.error_type or "provider_error",
+                telemetry,
+            ) from exc
         except Exception as exc:
             telemetry = _telemetry(
                 attempted=True,
@@ -928,6 +1016,39 @@ def _build_provider_request(
     return request_audit, provider_kwargs
 
 
+def _request_observation_identity(request: GroundingLLMRequest) -> tuple[str, str]:
+    """Extract only bounded audit identity from the internally built input."""
+
+    try:
+        payload = json.loads(request.input_json)
+        latest = payload["latest_observation"]
+        observation_id = latest["observation_id"]
+        observation_type = latest["observation_type"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise SQLGroundingProviderError(
+            "SQL Grounding request observation identity invalid"
+        ) from exc
+    if (
+        not isinstance(observation_id, str)
+        or not observation_id
+        or len(observation_id) > 256
+        or not isinstance(observation_type, str)
+        or not observation_type
+        or len(observation_type) > 64
+    ):
+        raise SQLGroundingProviderError(
+            "SQL Grounding request observation identity invalid"
+        )
+    return observation_id, observation_type
+
+
+def _provider_endpoint_identity(api_base: str) -> str:
+    parsed = urlsplit(api_base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise SQLGroundingProviderError("SQL Grounding Provider endpoint invalid")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def _provider_response_content(response: Any) -> str:
     try:
         choices = _value(response, "choices")
@@ -1128,6 +1249,9 @@ def _client_telemetry_metadata(client: Any) -> dict[str, Any]:
     return {
         "model": str(getattr(config, "model_id", ""))[:256],
         "credential_source": getattr(config, "credential_source", ""),
+        "raw_private_audit_ref": str(
+            getattr(client, "_last_private_audit_ref", "")
+        )[:1024],
         "provider_may_continue_after_cancel": getattr(
             client, "provider_may_continue_after_cancel", None
         ),

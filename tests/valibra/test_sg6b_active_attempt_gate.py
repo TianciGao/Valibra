@@ -41,9 +41,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
+PROMPT_SHA = "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
+CONFIG_SHA = "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -565,10 +565,6 @@ class SG6bActualAdkLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_block_then_grounding_then_open_submit(self):
         updater = QueueUpdater(
-            GroundingLLMResponse(
-                sql_grounding_state=SQLGroundingState(),
-                next_focus_dimension="tables",
-            ),
             GroundingLLMResponse(
                 sql_grounding_state=complete_state(),
                 next_focus_dimension="none",

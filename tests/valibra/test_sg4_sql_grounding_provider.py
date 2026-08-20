@@ -55,9 +55,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
+PROMPT_SHA = "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
+PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
+CONFIG_SHA = "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61"
 QUERY = "What is the maintenance cost?"
 
 
@@ -65,7 +66,7 @@ def environment(key_file: Path | None = None) -> dict[str, str]:
     result = {
         "GROUNDING_UPDATER_MODE": "llm",
         "GROUNDING_MODEL_PRESET": "glm52_high_32768",
-        "GROUNDING_TIMEOUT_SECONDS": "30",
+        "GROUNDING_TIMEOUT_SECONDS": "180",
         "GROUNDING_MAX_TOKENS": "32768",
         "GROUNDING_MAX_CALLS_PER_TASK": "2",
         "GROUNDING_PROMPT_SHA256": PROMPT_SHA,
@@ -648,12 +649,18 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
             grounding_callbacks._reset_turn_message(token)
         self.assertEqual(result, "baseline")
         self.assertEqual(request, original)
-        self.assertEqual(query_updater.calls, 1)
+        self.assertEqual(query_updater.calls, 0)
         runtime = GroundingRuntime.model_validate(
             current[grounding_callbacks.GROUNDING_RUNTIME_KEY]
         )
         self.assertEqual(runtime.grounding_revision, 0)
-        self.assertEqual(runtime.focus_dimension, "column_mapping")
+        self.assertEqual(runtime.focus_dimension, "tables")
+        update = current["system_agent_llm_calls"][0][
+            grounding_callbacks.GROUNDING_UPDATE_AUDIT_KEY
+        ]
+        self.assertEqual(
+            update["service_status"], "skipped_provider_no_state_evidence"
+        )
         view = current["system_agent_llm_calls"][0][
             grounding_callbacks.GROUNDING_VIEW_AUDIT_KEY
         ]
@@ -744,7 +751,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             with (
-                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": ""}),
                 patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater),
             ):
                 first = await grounding_callbacks._handle_observation(
@@ -809,7 +816,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             with (
-                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.dict(os.environ, environment(), clear=False),
                 patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", invalid),
             ):
                 rejected = await grounding_callbacks._handle_observation(

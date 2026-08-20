@@ -38,9 +38,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
+PROMPT_SHA = "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
+CONFIG_SHA = "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61"
 QUERY = "Show the maintenance cost."
 _ORIGINAL_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 
@@ -257,7 +257,7 @@ class SG6aActiveInjectionTests(unittest.IsolatedAsyncioTestCase):
         for marker in grounding_callbacks._ACTIVE_CONTEXT_MARKERS:
             self.assertEqual(instruction.count(marker), 1)
 
-    async def test_current_turn_uses_resulting_state_and_focus(self):
+    async def test_current_turn_user_query_does_not_change_state_or_focus(self):
         current = task_state("sg6a-current-turn")
         active_request = request()
         updater = ScriptedUpdater(
@@ -268,21 +268,21 @@ class SG6aActiveInjectionTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater):
             await run_before_model(current, active_request, query=QUERY)
-        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.calls, 0)
         runtime = GroundingRuntime.model_validate(
             current[grounding_callbacks.GROUNDING_RUNTIME_KEY]
         )
         self.assertEqual(runtime.stage, "INITIAL_GROUNDING")
-        self.assertEqual(runtime.focus_dimension, "column_mapping")
+        self.assertEqual(runtime.focus_dimension, "tables")
         instruction = active_request.config.system_instruction
         self.assertIn("Tables:\n- null", instruction)
-        self.assertIn("Current grounding focus: column_mapping.", instruction)
+        self.assertIn("Current grounding focus: tables.", instruction)
         audit = current["system_agent_llm_calls"][0][
             grounding_callbacks.GROUNDING_VIEW_AUDIT_KEY
         ]
         self.assertEqual(audit["grounding_revision"], 0)
         self.assertEqual(audit["stage"], "INITIAL_GROUNDING")
-        self.assertEqual(audit["focus_dimension"], "column_mapping")
+        self.assertEqual(audit["focus_dimension"], "tables")
 
     async def test_render_occurs_after_current_turn_runtime_is_stored(self):
         current = task_state("sg6a-current-state")
@@ -339,7 +339,7 @@ class SG6aActiveInjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(control["control_hint_injected"])
         self.assertEqual(control["injection_status"], "failed_open")
 
-    async def test_failed_latest_update_injects_previous_valid_runtime(self):
+    async def test_user_query_skip_injects_previous_valid_runtime(self):
         current = task_state("sg6a-update-fail")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = GroundingRuntime(
             stage="SQL_ATTEMPT",
@@ -363,7 +363,9 @@ class SG6aActiveInjectionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(view["injected"])
         self.assertFalse(view["runtime_degraded"])
-        self.assertEqual(update["service_status"], "rejected")
+        self.assertEqual(
+            update["service_status"], "skipped_provider_no_state_evidence"
+        )
 
     async def test_malformed_previous_blocks_fail_open_without_partial_injection(self):
         malformed = (

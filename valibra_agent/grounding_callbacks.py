@@ -10,12 +10,15 @@ still the only source of Official tool, Bird-Coin, and submit lifecycle facts.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
 import math
 import re
+import threading
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -88,6 +91,7 @@ GROUNDING_UPDATE_AUDIT_KEY = "valibra_sql_grounding_update"
 GROUNDING_CONTROL_AUDIT_KEY = "valibra_sql_grounding_control"
 GROUNDING_ERROR_AUDIT_KEY = "valibra:sql_grounding_error_audits"
 GROUNDING_PROVIDER_CALL_COUNT_KEY = "valibra:sql_grounding_provider_calls"
+GROUNDING_TOOL_AUDITS_KEY = "valibra:sql_grounding_tool_audits"
 GROUNDING_BLOCKED_SUBMITS_KEY = "valibra:sql_grounding_blocked_submits"
 GROUNDING_GATE_AUDITS_KEY = "valibra:sql_grounding_gate_audits"
 
@@ -118,6 +122,9 @@ _MAX_ERROR_AUDITS = 64
 _MAX_PENDING = 64
 _MAX_BLOCKED_SUBMITS = 64
 _MAX_GATE_AUDITS = 64
+_MAX_TOOL_AUDITS = 64
+_MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
+_MAX_ACTIVE_TASK_SYNCHRONIZERS = 512
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 
@@ -186,6 +193,45 @@ _PASSTHROUGH_SQL_GROUNDING_UPDATER = _PassthroughSQLGroundingUpdater()
 # Tests may replace this exact object with a deterministic fake.  Production
 # resolves the real client only when the explicit mode is exactly ``llm``.
 _SQL_GROUNDING_UPDATER: Any = _PASSTHROUGH_SQL_GROUNDING_UPDATER
+
+
+@dataclass(slots=True)
+class _TaskGroundingSynchronization:
+    """Process-local glue; never persisted in Runtime or Session State."""
+
+    lock: asyncio.Lock
+    users: int = 0
+    provider_slot_reserved: bool = False
+
+
+_TASK_SYNCHRONIZERS: dict[
+    tuple[int, str], _TaskGroundingSynchronization
+] = {}
+_TASK_SYNCHRONIZERS_GUARD = threading.Lock()
+
+
+@asynccontextmanager
+async def _serialized_task_grounding(state: Any):
+    """Serialize Grounding updates per task while allowing task-level parallelism."""
+
+    task_id = _task_id(state)
+    key = (id(asyncio.get_running_loop()), task_id)
+    with _TASK_SYNCHRONIZERS_GUARD:
+        synchronizer = _TASK_SYNCHRONIZERS.get(key)
+        if synchronizer is None:
+            if len(_TASK_SYNCHRONIZERS) >= _MAX_ACTIVE_TASK_SYNCHRONIZERS:
+                raise RuntimeError("SQL Grounding task synchronizer capacity exhausted")
+            synchronizer = _TaskGroundingSynchronization(lock=asyncio.Lock())
+            _TASK_SYNCHRONIZERS[key] = synchronizer
+        synchronizer.users += 1
+    try:
+        async with synchronizer.lock:
+            yield synchronizer
+    finally:
+        with _TASK_SYNCHRONIZERS_GUARD:
+            synchronizer.users -= 1
+            if synchronizer.users == 0:
+                _TASK_SYNCHRONIZERS.pop(key, None)
 
 
 @dataclass(slots=True)
@@ -922,6 +968,24 @@ async def after_tool_callback(
         _append_error_audit(state, audit)
     finally:
         _cleanup_pending_best_effort(state, tool_context)
+        exact_id = _valid_context_identifier(tool_context)
+        if exact_id is not None:
+            try:
+                _upsert_tool_callback_audit(
+                    state,
+                    exact_id,
+                    shadow_audit=audit,
+                    control_audit=control_audit,
+                )
+            except Exception as exc:
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit(
+                        "after_tool_exact_audit",
+                        exc,
+                        function_call_id=exact_id,
+                    ),
+                )
         if audit_index is not None:
             try:
                 _attach_tool_audit(state, audit_index, audit)
@@ -1014,6 +1078,12 @@ async def on_tool_error_callback(
                 "tool_name": tool_name,
                 "official_exception": True,
             }
+        )
+        _upsert_tool_callback_audit(
+            state,
+            exact_id,
+            shadow_audit=audit,
+            control_audit=None,
         )
         _append_error_audit(state, audit)
     except Exception as callback_error:
@@ -1181,7 +1251,27 @@ async def _handle_observation(
     observation: SQLGroundingObservation,
     runtime: GroundingRuntime | None = None,
 ) -> _ObservationResult:
-    active_runtime = runtime if runtime is not None else _ensure_runtime(state)[0]
+    async with _serialized_task_grounding(state) as synchronization:
+        # Ordinary sibling callbacks must re-read after waiting.  An explicit
+        # Runtime is reserved for a control transition that has not yet been
+        # persisted (submit failure/P2 lifecycle).
+        active_runtime = runtime if runtime is not None else _ensure_runtime(state)[0]
+        result = await _handle_observation_serialized(
+            state,
+            observation,
+            active_runtime,
+            synchronization,
+        )
+        _store_runtime(state, result.runtime)
+        return result
+
+
+async def _handle_observation_serialized(
+    state: Any,
+    observation: SQLGroundingObservation,
+    active_runtime: GroundingRuntime,
+    synchronization: _TaskGroundingSynchronization,
+) -> _ObservationResult:
     if observation.observation_type == "p2_follow_up":
         return _ObservationResult(
             runtime=active_runtime,
@@ -1209,9 +1299,22 @@ async def _handle_observation(
             service_status="skipped_affected_dimensions_unfrozen",
             observation=observation,
         )
+    if observation.observation_type == "user_query":
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="skipped_provider_no_state_evidence",
+            observation=observation,
+        )
+    if not _observation_supports_current_focus(active_runtime, observation):
+        return _ObservationResult(
+            runtime=active_runtime,
+            service_status="skipped_provider_no_state_evidence",
+            observation=observation,
+        )
+    provider_mode = _is_real_provider_mode()
     try:
         updater = _resolve_sql_grounding_updater()
-        if _uses_real_provider_adapter():
+        if provider_mode:
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
             if calls >= llm_config.max_calls_per_task:
@@ -1222,6 +1325,12 @@ async def _handle_observation(
                     control_status="failed_open",
                     control_error_type="ProviderCallLimit",
                 )
+            if synchronization.provider_slot_reserved:
+                raise RuntimeError("duplicate same-task Provider reservation")
+            # The reservation is process-local and occurs while holding the
+            # task lock, before the Provider await.  Persistent call count is
+            # committed only if telemetry confirms that an HTTP attempt began.
+            synchronization.provider_slot_reserved = True
     except Exception as exc:
         return _ObservationResult(
             runtime=active_runtime,
@@ -1231,13 +1340,16 @@ async def _handle_observation(
             control_error_type=type(exc).__name__[:128],
         )
     try:
-        context = _build_validation_context(state, observation)
-        service_result = await process_sql_grounding_observation(
-            active_runtime,
-            observation,
-            context,
-            updater,
-        )
+        try:
+            context = _build_validation_context(state, observation)
+            service_result = await process_sql_grounding_observation(
+                active_runtime,
+                observation,
+                context,
+                updater,
+            )
+        finally:
+            synchronization.provider_slot_reserved = False
     except Exception as exc:
         return _ObservationResult(
             runtime=active_runtime,
@@ -1246,7 +1358,7 @@ async def _handle_observation(
             control_status="failed_open",
             control_error_type=type(exc).__name__[:128],
         )
-    if service_result.llm_telemetry.attempted and _uses_real_provider_adapter():
+    if service_result.llm_telemetry.attempted and provider_mode:
         state[GROUNDING_PROVIDER_CALL_COUNT_KEY] = _provider_call_count(state) + 1
     candidate = service_result.runtime
     control_events: tuple[dict[str, str], ...] = ()
@@ -1274,6 +1386,27 @@ async def _handle_observation(
         control_status=control_status,
         control_error_type=control_error_type,
     )
+
+
+def _observation_supports_current_focus(
+    runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+) -> bool:
+    """Apply the frozen, evidence-aware Provider scheduling policy."""
+
+    if observation.observation_type == "submission":
+        return runtime.stage == "REPAIR"
+    tool_name = observation.tool_name
+    if not isinstance(tool_name, str) or runtime.focus_dimension == "none":
+        return False
+    directions = set(tool_directions_for_focus(runtime.focus_dimension))
+    # A knowledge-name list is discovery metadata, not canonical business-rule
+    # evidence.  The current deterministic projection also supports only the
+    # exact singular definition response, so the bulk definition tool remains
+    # fail-closed until such a parser is explicitly frozen.
+    directions.discard("get_all_external_knowledge_names")
+    directions.discard("get_all_knowledge_definitions")
+    return tool_name in directions
 
 
 def _apply_control_event(
@@ -1457,6 +1590,8 @@ def _provider_call_count(state: Any) -> int:
 
 
 def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...]:
+    """Reconstruct trusted evidence from Official events, never shadow presence."""
+
     result: list[dict[str, Any]] = []
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list):
@@ -1464,19 +1599,19 @@ def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...
     for event in trajectory:
         if not isinstance(event, dict):
             continue
-        audit = event.get(SHADOW_AUDIT_KEY)
         tool_name = event.get("tool")
-        if not isinstance(audit, dict) or not isinstance(tool_name, str):
+        if not isinstance(tool_name, str):
             continue
-        observation_type = audit.get("observation_type")
-        observation_id = audit.get("observation_id")
-        if not isinstance(observation_type, str) or not isinstance(observation_id, str):
+        content = event.get("result")
+        try:
+            observation_type = _classify_tool_observation_type(tool_name, content)
+        except ValueError:
             continue
         result.append(
             {
                 "tool_name": tool_name,
                 "observation_type": observation_type,
-                "content": event.get("result"),
+                "content": content,
             }
         )
     return tuple(result[-512:])
@@ -1952,6 +2087,52 @@ def _upsert_gate_audit(state: Any, audit: dict[str, Any]) -> None:
     state[GROUNDING_GATE_AUDITS_KEY] = records
 
 
+def _load_tool_callback_audits(state: Any) -> dict[str, dict[str, Any]]:
+    payload = state.get(GROUNDING_TOOL_AUDITS_KEY, {})
+    if not isinstance(payload, dict) or len(payload) > _MAX_TOOL_AUDITS:
+        raise ValueError("invalid exact tool callback audit store")
+    records: dict[str, dict[str, Any]] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not _IDENTIFIER_RE.fullmatch(key):
+            raise ValueError("invalid exact tool callback audit key")
+        if not isinstance(value, dict) or value.get("function_call_id") != key:
+            raise ValueError("invalid exact tool callback audit record")
+        encoded = canonical_json(value).encode("utf-8")
+        if len(encoded) > _MAX_TOOL_AUDIT_RECORD_BYTES:
+            raise ValueError("exact tool callback audit record exceeds bound")
+        records[key] = dict(value)
+    return records
+
+
+def _upsert_tool_callback_audit(
+    state: Any,
+    function_call_id: str,
+    *,
+    shadow_audit: dict[str, Any],
+    control_audit: dict[str, Any] | None,
+) -> None:
+    """Persist exact-ID callback glue independently of trajectory timing."""
+
+    if not _IDENTIFIER_RE.fullmatch(function_call_id):
+        raise ValueError("exact tool callback audit requires function_call_id")
+    _require_bounded_audit(shadow_audit)
+    if control_audit is not None:
+        _require_bounded_audit(control_audit)
+    records = _load_tool_callback_audits(state)
+    record: dict[str, Any] = {
+        "function_call_id": function_call_id,
+        SHADOW_AUDIT_KEY: dict(shadow_audit),
+    }
+    if control_audit is not None:
+        record[GROUNDING_CONTROL_AUDIT_KEY] = dict(control_audit)
+    if len(canonical_json(record).encode("utf-8")) > _MAX_TOOL_AUDIT_RECORD_BYTES:
+        raise ValueError("exact tool callback audit record exceeds bound")
+    if function_call_id not in records and len(records) >= _MAX_TOOL_AUDITS:
+        raise ValueError("exact tool callback audit store is full")
+    records[function_call_id] = record
+    state[GROUNDING_TOOL_AUDITS_KEY] = records
+
+
 def _blocked_gate_audit(
     record: _BlockedSubmitCall,
     *,
@@ -2044,13 +2225,28 @@ def _official_trajectory_refs(state: Any) -> tuple[str, ...]:
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list):
         return ()
-    for event in trajectory:
+    for index, event in enumerate(trajectory):
         if not isinstance(event, dict):
             continue
         audit = event.get(SHADOW_AUDIT_KEY)
-        if not isinstance(audit, dict):
-            continue
-        observation_id = audit.get("observation_id")
+        observation_id = (
+            audit.get("observation_id") if isinstance(audit, dict) else None
+        )
+        if not isinstance(observation_id, str):
+            try:
+                digest = hashlib.sha256(
+                    canonical_json(
+                        {
+                            "tool": event.get("tool"),
+                            "phase": event.get("phase"),
+                            "args": event.get("args"),
+                            "result": event.get("result"),
+                        }
+                    ).encode("utf-8")
+                ).hexdigest()
+            except Exception:
+                continue
+            observation_id = f"official-trajectory-{index + 1}-{digest[:16]}"
         if isinstance(observation_id, str) and observation_id not in refs:
             refs.append(observation_id)
     return tuple(refs[-512:])
