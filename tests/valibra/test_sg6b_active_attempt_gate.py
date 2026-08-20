@@ -41,9 +41,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
-FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
+PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
+CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -458,7 +458,7 @@ class SG6bExecutionPolicyTests(unittest.IsolatedAsyncioTestCase):
         runtime = incomplete_runtime()
         with self.assertRaises(SQLGroundingValidationError):
             transition_grounding_stage(runtime, "official_submit_failed")
-        repair = transition_grounding_stage(
+        after_failure = transition_grounding_stage(
             runtime,
             "official_submit_failed",
             allow_initial_forced_exit=True,
@@ -468,9 +468,9 @@ class SG6bExecutionPolicyTests(unittest.IsolatedAsyncioTestCase):
             "official_p2_follow_up",
             allow_initial_forced_exit=True,
         )
-        self.assertEqual(repair.stage, "REPAIR")
+        self.assertEqual(after_failure.stage, "INITIAL_GROUNDING")
         self.assertEqual(p2.stage, "P2_INCREMENTAL")
-        self.assertEqual(repair.grounding_revision, runtime.grounding_revision)
+        self.assertEqual(after_failure.grounding_revision, runtime.grounding_revision)
         self.assertEqual(p2.grounding_revision, runtime.grounding_revision)
 
 
@@ -560,18 +560,20 @@ class SG6bActualAdkLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate["focus_direction_count"], 1)
         self.assertEqual(gate["affordable_direction_count"], 0)
         self.assertEqual(gate["effective_gate_action"], "budget_liveness_bypass")
-        self.assertEqual(submit_audit["control_status"], "failed_open")
-        self.assertEqual(submit_audit["error_type"], "ValueError")
-        self.assertEqual(load_runtime(state).stage, "REPAIR")
+        self.assertEqual(submit_audit["control_status"], "succeeded")
+        self.assertNotIn("error_type", submit_audit)
+        self.assertEqual(load_runtime(state).stage, "INITIAL_GROUNDING")
 
     async def test_intermediate_schema_no_longer_opens_blocked_submit(self):
         updater = QueueUpdater(
             GroundingLLMResponse(
                 sql_grounding_state=complete_state(),
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             ),
             GroundingLLMResponse(
                 sql_grounding_state=complete_state(),
+                user_clarification_requests=(),
                 next_focus_dimension="column_mapping",
             ),
         )

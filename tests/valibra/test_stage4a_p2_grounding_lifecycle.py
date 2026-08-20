@@ -14,6 +14,7 @@ from valibra_agent.sql_grounding.models import (
     GroundingLLMResponse,
     GroundingRuntime,
     SQLGroundingState,
+    UserClarificationRequest,
 )
 from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
 from valibra_agent.sql_grounding.updater import (
@@ -34,17 +35,22 @@ from tests.valibra.test_stage3_submit_driven_repair import (
 
 
 FOLLOW_UP = "Now include the current power reading."
-PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
-FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
+PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
+CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
 P2_SUBMIT_RESPONSE = (
     f"passed\nFollow-up question: {FOLLOW_UP}\nBudget remaining: 4"
 )
 
 
 class QueueUpdater:
-    def __init__(self, *states: SQLGroundingState) -> None:
+    def __init__(
+        self,
+        *states: SQLGroundingState,
+        clarifications: tuple[UserClarificationRequest, ...] = (),
+    ) -> None:
         self.states = deque(states)
+        self.clarifications = clarifications
         self.calls = 0
         self.inputs: list[dict[str, Any]] = []
 
@@ -62,6 +68,7 @@ class QueueUpdater:
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
                 sql_grounding_state=self.states.popleft(),
+                user_clarification_requests=self.clarifications,
                 next_focus_dimension="none",
             ),
             telemetry=GroundingLLMTelemetry(
@@ -98,7 +105,7 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 grounding_callbacks,
                 "load_sql_grounding_llm_config",
-                return_value=SimpleNamespace(max_calls_per_task=4),
+                return_value=SimpleNamespace(max_calls_per_task=2),
             ),
         ):
             yield
@@ -226,11 +233,12 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updater.calls, 1)
         self.assertEqual(load_runtime(state).stage, "DONE")
 
-    async def test_p2_submit_failure_gets_one_repair_and_second_failure_does_not(self):
-        state = task_state("stage4a-p2-repair")
+    async def test_p2_submit_failures_never_trigger_grounding(self):
+        state = task_state("stage4a-p2-no-repair")
         self.bind(state)
-        updater = QueueUpdater(primary_state(), repaired_state())
+        updater = QueueUpdater(primary_state())
         await self.enter_p2(state, updater)
+        frozen = load_runtime(state)
 
         with self.provider_context(updater):
             await self.run_tool(
@@ -248,16 +256,12 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 args={"sql": "SELECT maintcost FROM operational_metrics"},
             )
 
-        self.assertEqual(updater.calls, 2)
+        self.assertEqual(updater.calls, 1)
         self.assertEqual(
             state[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
-            {"1": 1, "2": 2},
+            {"1": 1, "2": 1},
         )
-        repair_input = updater.inputs[1]
-        self.assertEqual(repair_input["follow_up"], FOLLOW_UP)
-        self.assertEqual(repair_input["submit_failure"]["phase"], 2)
-        self.assertTrue(repair_input["execute_sql_evidence"])
-        self.assertEqual(load_runtime(state).stage, "P2_INCREMENTAL")
+        self.assertEqual(load_runtime(state), frozen)
 
         with self.provider_context(updater):
             await self.run_tool(
@@ -268,25 +272,61 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 args={"sql": "SELECT payload ->> 'cost' FROM operational_metrics"},
             )
 
-        self.assertEqual(updater.calls, 2)
+        self.assertEqual(updater.calls, 1)
         self.assertEqual(
-            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 3
+            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
         )
         audit = state[grounding_callbacks.GROUNDING_TOOL_AUDITS_KEY][
             "p2-submit-fail-2"
         ][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(
-            audit["service_status"], "skipped_subsequent_submit_no_repair"
+            audit["service_status"], "skipped_submit_failure_no_repair"
         )
 
-    async def test_p1_and_p2_each_allow_primary_plus_one_repair_only(self):
-        state = task_state("stage4a-four-call-cap")
+    async def test_p2_clarification_answer_is_overlay_only(self):
+        state = task_state("stage4a-p2-clarification")
         self.bind(state)
+        question = "Should current power mean the latest recorded reading?"
         updater = QueueUpdater(
-            repaired_state(),
-            repaired_state(),
             primary_state(),
+            clarifications=(
+                UserClarificationRequest(
+                    phrase="current power",
+                    kind="user_intent",
+                    question=question,
+                ),
+            ),
         )
+        await self.enter_p2(state, updater)
+        frozen = load_runtime(state)
+        pending = grounding_callbacks._next_pending_clarification(state)
+        self.assertIsNotNone(pending)
+        call_id = grounding_callbacks._clarification_function_call_id(
+            state,
+            pending,
+        )
+        with self.provider_context(updater):
+            await self.run_tool(
+                state,
+                "ask_user",
+                call_id,
+                "Use the latest reading.",
+                args={"question": question},
+            )
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(load_runtime(state), frozen)
+        self.assertEqual(
+            state[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
+            {"1": 1, "2": 1},
+        )
+        records = grounding_callbacks._clarification_records(state)
+        self.assertEqual(records[-1].phase, 2)
+        self.assertEqual(records[-1].answer, "Use the latest reading.")
+
+    async def test_p1_and_p2_each_allow_exactly_one_grounding_only(self):
+        state = task_state("stage4a-two-call-cap")
+        self.bind(state)
+        updater = QueueUpdater(primary_state())
 
         with self.provider_context(updater):
             await self.run_tool(
@@ -317,13 +357,13 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 args={"sql": "SELECT payload ->> 'cost' FROM operational_metrics"},
             )
 
-        self.assertEqual(updater.calls, 3)
+        self.assertEqual(updater.calls, 1)
         self.assertEqual(
-            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 4
+            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
         )
         self.assertEqual(
             state[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
-            {"1": 2, "2": 2},
+            {"1": 1, "2": 1},
         )
         self.assertEqual(load_runtime(state).stage, "P2_INCREMENTAL")
         self.assert_bootstrap_once(state)
@@ -434,7 +474,7 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assert_bootstrap_once(state)
 
     def test_stage4a_contract_and_hashes_are_frozen(self):
-        self.assertEqual(DEFAULT_GROUNDING_MAX_CALLS_PER_TASK, 4)
+        self.assertEqual(DEFAULT_GROUNDING_MAX_CALLS_PER_TASK, 2)
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)

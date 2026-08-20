@@ -29,9 +29,9 @@ from valibra_agent.sql_grounding.updater import (
     GroundingUpdaterResult,
 )
 
-PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
-FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
+PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
+CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
 QUERY = "Show the maintenance cost."
 _ORIGINAL_GROUNDING_UPDATER_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 
@@ -589,6 +589,7 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         updater = ScriptedUpdater(
             GroundingLLMResponse(
                 sql_grounding_state=target_state,
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             )
         )

@@ -31,9 +31,9 @@ from valibra_agent.sql_grounding.updater import (
 
 QUERY = "Show the maintenance cost."
 RULE = "Use maintcost as reported."
-PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
-FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
+PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
+CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC,
   payload JSONB
@@ -157,6 +157,7 @@ class RepairUpdater:
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
                 sql_grounding_state=repaired_state(),
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             ),
             telemetry=GroundingLLMTelemetry(
@@ -242,7 +243,7 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 grounding_callbacks,
                 "load_sql_grounding_llm_config",
-                return_value=SimpleNamespace(max_calls_per_task=4),
+                return_value=SimpleNamespace(max_calls_per_task=2),
             ),
         ):
             yield
@@ -306,7 +307,7 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_first_submit_pass_never_calls_repair(self):
+    async def test_first_submit_pass_never_calls_grounding_again(self):
         state = task_state("stage3-submit-pass")
         self.bind(state)
         updater = UnexpectedUpdater()
@@ -335,10 +336,11 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
-    async def test_first_failed_submit_builds_one_complete_repair_bundle(self):
+    async def test_submit_failures_never_call_grounding_or_change_state(self):
         state = task_state("stage3-submit-fail")
         self.bind(state)
-        updater = RepairUpdater()
+        updater = UnexpectedUpdater()
+        frozen = load_runtime(state)
         with self.provider_context(updater):
             await self.run_tool(
                 state,
@@ -362,37 +364,11 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
                 args={"sql": "SELECT maintcost FROM operational_metrics"},
             )
 
-            self.assertEqual(updater.calls, 1)
+            self.assertEqual(updater.calls, 0)
             self.assertEqual(
-                state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
+                state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 1
             )
-            bundle = updater.inputs[0]
-            self.assertEqual(
-                set(bundle),
-                {
-                    "query",
-                    "schema",
-                    "column_meanings",
-                    "knowledge_definitions",
-                    "current_state",
-                    "execute_sql_evidence",
-                    "submit_failure",
-                },
-            )
-            self.assertEqual(
-                [item["result"] for item in bundle["execute_sql_evidence"]],
-                [[{"maintcost": 7}], "SQL Error: wrong JSON path"],
-            )
-            self.assertEqual(
-                bundle["submit_failure"]["args"],
-                {"sql": "SELECT maintcost FROM operational_metrics"},
-            )
-            self.assertEqual(bundle["submit_failure"]["result"], "incorrect")
-            repaired = load_runtime(state)
-            self.assertEqual(repaired.grounding_revision, 2)
-            self.assertEqual(repaired.grounding_state, repaired_state())
-            self.assertEqual(repaired.stage, "SQL_ATTEMPT")
-            self.assertEqual(repaired.focus_dimension, "none")
+            self.assertEqual(load_runtime(state), frozen)
 
             await self.run_tool(
                 state,
@@ -402,11 +378,11 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
                 args={"sql": "SELECT payload ->> 'cost' FROM operational_metrics"},
             )
 
-        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.calls, 0)
         self.assertEqual(
-            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
+            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 1
         )
-        self.assertEqual(load_runtime(state).stage, "REPAIR")
+        self.assertEqual(load_runtime(state), frozen)
         self.assertEqual(
             [event["tool"] for event in state["tool_trajectory"]].count(
                 "get_all_knowledge_definitions"
@@ -418,10 +394,10 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
         ][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(
             second_audit["service_status"],
-            "skipped_subsequent_submit_no_repair",
+            "skipped_submit_failure_no_repair",
         )
 
-    async def test_repair_request_size_bound_fails_before_provider(self):
+    async def test_large_execute_history_still_does_not_trigger_grounding(self):
         state = task_state("stage3-size-bound")
         state["tool_trajectory"].extend(
             official_event(
@@ -432,8 +408,8 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
             for index in range(5)
         )
         self.bind(state)
-        client = CapturingClient()
-        updater = SQLGroundingUpdater(client)
+        updater = UnexpectedUpdater()
+        frozen = load_runtime(state)
         with self.provider_context(updater):
             await self.run_tool(
                 state,
@@ -442,23 +418,23 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
                 "incorrect",
                 args={"sql": "SELECT maintcost FROM operational_metrics"},
             )
-        self.assertEqual(client.requests, [])
+        self.assertEqual(updater.calls, 0)
         self.assertEqual(
             state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 1
         )
-        self.assertEqual(load_runtime(state).stage, "REPAIR")
+        self.assertEqual(load_runtime(state), frozen)
         audit = state[grounding_callbacks.GROUNDING_TOOL_AUDITS_KEY][
             "submit-size-bound"
         ][grounding_callbacks.SHADOW_AUDIT_KEY]
-        self.assertEqual(audit["service_status"], "rejected")
-        self.assertEqual(audit["provider_error_type"], "request_too_large")
+        self.assertEqual(audit["service_status"], "skipped_submit_failure_no_repair")
 
-    def test_stage3_prompt_and_form_contract_are_frozen(self):
+    def test_no_repair_prompt_and_form_contract_are_frozen(self):
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)
-        self.assertIn("execute_sql_evidence", SQL_GROUNDING_PROMPT)
-        self.assertIn("submit_failure", SQL_GROUNDING_PROMPT)
+        self.assertNotIn("execute_sql_evidence", SQL_GROUNDING_PROMPT)
+        self.assertNotIn("submit_failure", SQL_GROUNDING_PROMPT)
+        self.assertNotIn("REPAIR", SQL_GROUNDING_PROMPT)
 
 
 if __name__ == "__main__":

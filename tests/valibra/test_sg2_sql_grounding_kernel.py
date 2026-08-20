@@ -42,9 +42,9 @@ FOLLOW_POWER = "also include current power"
 RATIO_RULE = "revenue impact ratio = maintenance cost / total revenue"
 UPDATED_RATIO_RULE = "revenue impact ratio uses adjusted maintenance cost"
 
-PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
-FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
+PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
+CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
 
 KNOWN_TABLES = frozenset(
     {
@@ -132,6 +132,7 @@ def context_for(
 def response_json(state: SQLGroundingState, focus: str, **extra: Any) -> str:
     payload: dict[str, Any] = {
         "sql_grounding_state": state.model_dump(mode="json"),
+        "user_clarification_requests": [],
         "next_focus_dimension": focus,
     }
     payload.update(extra)
@@ -261,7 +262,11 @@ class UpdaterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)
         self.assertEqual(
             set(SQL_GROUNDING_FORM_SCHEMA["properties"]),
-            {"sql_grounding_state", "next_focus_dimension"},
+            {
+                "sql_grounding_state",
+                "user_clarification_requests",
+                "next_focus_dimension",
+            },
         )
         self.assertFalse(SQL_GROUNDING_FORM_SCHEMA["additionalProperties"])
         for phrase in (
@@ -422,7 +427,7 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_metadata_only_resolves_domain_null_to_empty_and_cannot_invent_knowledge(self) -> None:
         base = GroundingRuntime(
-            stage="REPAIR",
+            stage="INITIAL_GROUNDING",
             focus_dimension="column_mapping",
             grounding_state=solar_partial_state(),
             grounding_revision=1,
@@ -467,14 +472,14 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted.runtime.grounding_state.domain_knowledge, ())
 
         empty = GroundingRuntime(
-            stage="REPAIR",
-            focus_dimension="domain_knowledge",
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
             grounding_state=resolved,
             grounding_revision=2,
         )
         populated = GroundingRuntime(
-            stage="REPAIR",
-            focus_dimension="domain_knowledge",
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
             grounding_state=solar_complete_state(),
             grounding_revision=2,
         )
@@ -567,7 +572,7 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             ("tables", "column_mapping"),
         )
 
-    async def test_user_answer_uses_the_same_explicit_affected_dimension_boundary(self) -> None:
+    async def test_user_answer_cannot_modify_grounding_state(self) -> None:
         base = GroundingRuntime(
             grounding_revision=1,
             stage="P2_INCREMENTAL",
@@ -596,8 +601,8 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             response_json(replacement, "none"),
             affected=("column_mapping",),
         )
-        self.assertEqual(result.state_update.changed_dimensions, ("column_mapping",))
-        self.assertEqual(result.runtime.grounding_revision, 2)
+        self.assertEqual(result.state_update.status, "rejected")
+        self.assertEqual(result.runtime, base)
 
     async def test_updater_timeout_and_error_leave_runtime_exact(self) -> None:
         runtime = GroundingRuntime()
@@ -617,7 +622,7 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.state_update.error_type, expected)
                 self.assertEqual(result.state_update.status, "rejected")
 
-    async def test_sql_execution_is_limited_to_current_focus(self) -> None:
+    async def test_sql_execution_cannot_modify_frozen_phase_state(self) -> None:
         base_state = simple_complete_state()
         replacement = base_state.model_copy(
             update={
@@ -632,25 +637,20 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         obs = observation("sql_execution", sequence=6, content={"rows": 1})
         focused = GroundingRuntime(
             grounding_revision=2,
-            stage="REPAIR",
-            focus_dimension="column_mapping",
+            stage="SQL_ATTEMPT",
+            focus_dimension="none",
             grounding_state=base_state,
         )
-        accepted = await self.run_service(
+        rejected = await self.run_service(
             focused, obs, response_json(replacement, "none")
         )
-        self.assertEqual(accepted.state_update.changed_dimensions, ("column_mapping",))
-
-        unfocused = focused.model_copy(update={"focus_dimension": "none"})
-        rejected = await self.run_service(
-            unfocused, obs, response_json(replacement, "none")
-        )
         self.assertEqual(rejected.state_update.error_type, "authorization_rejected")
+        self.assertEqual(rejected.runtime, focused)
 
-    async def test_submission_and_tool_error_preserve_state_but_may_change_focus(self) -> None:
+    async def test_submission_and_tool_error_preserve_state_and_focus(self) -> None:
         base = GroundingRuntime(
             grounding_revision=1,
-            stage="REPAIR",
+            stage="SQL_ATTEMPT",
             focus_dimension="none",
             grounding_state=simple_complete_state(),
         )
@@ -660,16 +660,15 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.run_service(
                     base,
                     obs,
-                    response_json(simple_complete_state(), "column_mapping"),
+                    response_json(simple_complete_state(), "none"),
                 )
                 self.assertEqual(result.runtime.grounding_revision, 1)
-                self.assertEqual(result.runtime.focus_dimension, "column_mapping")
-                self.assertEqual(result.state_update.status, "accepted")
+                self.assertEqual(result.runtime.focus_dimension, "none")
+                self.assertEqual(result.state_update.status, "noop")
 
-        attempt = base.model_copy(update={"stage": "SQL_ATTEMPT"})
         submission = observation("submission", sequence=70, content={"status": "failed"})
         rejected = await self.run_service(
-            attempt,
+            base,
             submission,
             response_json(simple_complete_state(), "column_mapping"),
         )
@@ -720,6 +719,7 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                         ],
                         "domain_knowledge": [],
                     },
+                    "user_clarification_requests": [],
                     "next_focus_dimension": "none",
                 }
             ),
@@ -764,6 +764,7 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
                         ],
                         "domain_knowledge": [],
                     },
+                    "user_clarification_requests": [],
                     "next_focus_dimension": "none",
                 }
             ),
@@ -812,52 +813,35 @@ class ControlAndViewTests(unittest.TestCase):
             grounding_state=simple_complete_state(),
         )
         attempt = transition_grounding_stage(initial, "grounding_completed")
-        repair = transition_grounding_stage(attempt, "official_submit_failed")
-        done = transition_grounding_stage(repair, "official_task_completed")
-        self.assertEqual((attempt.stage, repair.stage, done.stage), ("SQL_ATTEMPT", "REPAIR", "DONE"))
-        self.assertEqual((attempt.grounding_revision, repair.grounding_revision, done.grounding_revision), (3, 3, 3))
+        after_failure = transition_grounding_stage(attempt, "official_submit_failed")
+        done = transition_grounding_stage(after_failure, "official_task_completed")
+        self.assertEqual(
+            (attempt.stage, after_failure.stage, done.stage),
+            ("SQL_ATTEMPT", "SQL_ATTEMPT", "DONE"),
+        )
+        self.assertEqual(
+            (
+                attempt.grounding_revision,
+                after_failure.grounding_revision,
+                done.grounding_revision,
+            ),
+            (3, 3, 3),
+        )
         p2 = transition_grounding_stage(attempt, "official_p2_follow_up")
         self.assertEqual(p2.stage, "P2_INCREMENTAL")
         self.assertEqual(p2.grounding_revision, 3)
 
-    def test_repair_completion_events_are_explicit_and_revision_neutral(self) -> None:
-        repair = GroundingRuntime(
-            grounding_revision=7,
-            stage="REPAIR",
+    def test_repair_stage_and_events_are_retired(self) -> None:
+        with self.assertRaises(ValidationError):
+            GroundingRuntime(stage="REPAIR")
+        runtime = GroundingRuntime(
+            stage="SQL_ATTEMPT",
             focus_dimension="none",
             grounding_state=simple_complete_state(),
         )
-        p1 = transition_grounding_stage(repair, "repair_completed_p1")
-        p2 = transition_grounding_stage(repair, "repair_completed_p2")
-        self.assertEqual((p1.stage, p2.stage), ("SQL_ATTEMPT", "P2_INCREMENTAL"))
-        for transitioned in (p1, p2):
-            self.assertEqual(transitioned.grounding_state, repair.grounding_state)
-            self.assertEqual(transitioned.grounding_revision, 7)
-            self.assertEqual(transitioned.focus_dimension, "none")
-
-    def test_repair_completion_events_reject_incomplete_or_wrong_control_state(self) -> None:
-        invalid_runtimes = (
-            GroundingRuntime(
-                stage="REPAIR",
-                focus_dimension="column_mapping",
-                grounding_state=simple_complete_state(),
-            ),
-            GroundingRuntime(
-                stage="REPAIR",
-                focus_dimension="none",
-                grounding_state=SQLGroundingState(),
-            ),
-            GroundingRuntime(
-                stage="SQL_ATTEMPT",
-                focus_dimension="none",
-                grounding_state=simple_complete_state(),
-            ),
-        )
-        for runtime in invalid_runtimes:
-            for event in ("repair_completed_p1", "repair_completed_p2"):
-                with self.subTest(stage=runtime.stage, focus=runtime.focus_dimension, event=event):
-                    with self.assertRaises(SQLGroundingValidationError):
-                        transition_grounding_stage(runtime, event)  # type: ignore[arg-type]
+        for event in ("repair_completed_p1", "repair_completed_p2"):
+            with self.assertRaises(SQLGroundingValidationError):
+                transition_grounding_stage(runtime, event)  # type: ignore[arg-type]
 
     def test_first_submit_gate_is_hard_only_for_first_submit(self) -> None:
         closed = evaluate_first_submit_gate(GroundingRuntime(), first_submit=True)
@@ -867,12 +851,12 @@ class ControlAndViewTests(unittest.TestCase):
             grounding_state=simple_complete_state(),
         )
         self.assertTrue(evaluate_first_submit_gate(complete, first_submit=True).open)
-        repair = GroundingRuntime(
-            stage="REPAIR",
-            focus_dimension="tables",
+        later = GroundingRuntime(
+            stage="P2_INCREMENTAL",
+            focus_dimension="none",
             grounding_state=simple_complete_state(),
         )
-        subsequent = evaluate_first_submit_gate(repair, first_submit=False)
+        subsequent = evaluate_first_submit_gate(later, first_submit=False)
         self.assertFalse(subsequent.applicable)
         self.assertTrue(subsequent.open)
 
@@ -1066,117 +1050,68 @@ class EndToEndFlowTests(unittest.IsolatedAsyncioTestCase):
             original.domain_knowledge,
         )
 
-    async def test_g_repair_changes_focus_then_only_targeted_dimension(self) -> None:
+    async def test_g_submit_failure_keeps_attempt_state_frozen(self) -> None:
         attempt = GroundingRuntime(
             grounding_revision=2,
             stage="SQL_ATTEMPT",
             focus_dimension="none",
             grounding_state=simple_complete_state(),
         )
-        repair = transition_grounding_stage(attempt, "official_submit_failed")
+        after_failure = transition_grounding_stage(
+            attempt,
+            "official_submit_failed",
+        )
+        self.assertEqual(after_failure, attempt)
         submission = observation(
             "submission",
             sequence=1,
             content={"result": "failed", "failure_signal": "wrong field"},
         )
-        focused = await self.process(
-            repair,
+        unchanged = await self.process(
+            after_failure,
             submission,
-            response_json(simple_complete_state(), "column_mapping"),
+            response_json(simple_complete_state(), "none"),
         )
-        self.assertEqual(focused.runtime.grounding_revision, 2)
-        self.assertEqual(focused.runtime.focus_dimension, "column_mapping")
+        self.assertEqual(unchanged.state_update.status, "noop")
+        self.assertEqual(unchanged.runtime, attempt)
 
-        replacement = simple_complete_state().model_copy(
-            update={
-                "column_mapping": (
-                    ColumnMapping(
-                        phrase="cost",
-                        targets=("operational_metrics.cost_adjusted",),
-                    ),
-                )
-            }
+        proposed_change = simple_complete_state().model_copy(
+            update={"column_mapping": ()}
         )
-        metadata = observation(
-            "metadata",
-            sequence=2,
-            content={"column": "operational_metrics.cost_adjusted"},
+        rejected = await self.process(
+            after_failure,
+            submission,
+            response_json(proposed_change, "none"),
         )
-        corrected = await self.process(
-            focused.runtime,
-            metadata,
-            response_json(replacement, "none"),
-        )
-        self.assertEqual(corrected.runtime.grounding_revision, 3)
-        self.assertEqual(corrected.state_update.changed_dimensions, ("column_mapping",))
-        self.assertEqual(
-            corrected.runtime.grounding_state.tables,
-            simple_complete_state().tables,
-        )
-        self.assertEqual(
-            corrected.runtime.grounding_state.domain_knowledge,
-            simple_complete_state().domain_knowledge,
-        )
+        self.assertEqual(rejected.state_update.status, "rejected")
+        self.assertEqual(rejected.runtime, attempt)
 
-        retry = transition_grounding_stage(corrected.runtime, "repair_completed_p1")
-        self.assertEqual(retry.stage, "SQL_ATTEMPT")
-        self.assertEqual(retry.grounding_revision, 3)
-        self.assertEqual(retry.grounding_state, corrected.runtime.grounding_state)
-
-        second_failure = transition_grounding_stage(retry, "official_submit_failed")
-        self.assertEqual(second_failure.stage, "REPAIR")
-        self.assertEqual(second_failure.grounding_revision, 3)
-
-        p2 = transition_grounding_stage(retry, "official_p2_follow_up")
-        self.assertEqual(p2.stage, "P2_INCREMENTAL")
-        self.assertEqual(p2.grounding_revision, 3)
-
-    async def test_h_p2_repair_returns_to_incremental_attempt(self) -> None:
+    async def test_h_p2_submit_failure_keeps_incremental_state_frozen(self) -> None:
         p2_attempt = GroundingRuntime(
             grounding_revision=4,
             stage="P2_INCREMENTAL",
             focus_dimension="none",
             grounding_state=simple_complete_state(),
         )
-        repair = transition_grounding_stage(p2_attempt, "official_submit_failed")
+        after_failure = transition_grounding_stage(
+            p2_attempt,
+            "official_submit_failed",
+        )
+        self.assertEqual(after_failure, p2_attempt)
         submission = observation(
             "submission",
             sequence=1,
             phase=2,
             content={"result": "failed", "failure_signal": "wrong field"},
         )
-        focused = await self.process(
-            repair,
+        unchanged = await self.process(
+            after_failure,
             submission,
-            response_json(simple_complete_state(), "column_mapping"),
+            response_json(simple_complete_state(), "none"),
         )
-
-        replacement = simple_complete_state().model_copy(
-            update={
-                "column_mapping": (
-                    ColumnMapping(
-                        phrase="cost",
-                        targets=("operational_metrics.cost_adjusted",),
-                    ),
-                )
-            }
-        )
-        metadata = observation(
-            "metadata",
-            sequence=2,
-            phase=2,
-            content={"column": "operational_metrics.cost_adjusted"},
-        )
-        corrected = await self.process(
-            focused.runtime,
-            metadata,
-            response_json(replacement, "none"),
-        )
-        retry = transition_grounding_stage(corrected.runtime, "repair_completed_p2")
-        self.assertEqual(retry.stage, "P2_INCREMENTAL")
-        self.assertEqual(retry.grounding_revision, 5)
-        self.assertEqual(retry.grounding_state, corrected.runtime.grounding_state)
-        subsequent = evaluate_first_submit_gate(retry, first_submit=False)
+        self.assertEqual(unchanged.state_update.status, "noop")
+        self.assertEqual(unchanged.runtime, p2_attempt)
+        subsequent = evaluate_first_submit_gate(p2_attempt, first_submit=False)
         self.assertFalse(subsequent.applicable)
         self.assertTrue(subsequent.open)
 

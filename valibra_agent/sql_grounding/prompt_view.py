@@ -10,7 +10,10 @@ from typing import Any
 
 import tiktoken
 
-from valibra_agent.sql_grounding.models import SQLGroundingState
+from valibra_agent.sql_grounding.models import (
+    SQLGroundingState,
+    UserClarificationRecord,
+)
 
 DEFAULT_MAX_VIEW_CHARS = 4_096
 DEFAULT_MAX_VIEW_ITEMS = 96
@@ -22,6 +25,7 @@ _SECTIONS = (
     ("Column mappings", "column_mapping"),
     ("Domain knowledge", "domain_knowledge"),
 )
+_CLARIFICATION_SECTION = "[USER CLARIFICATIONS]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +52,12 @@ def count_grounding_view_tokens(text: str) -> int:
 def render_grounding_view(
     state: SQLGroundingState,
     *,
+    clarifications: tuple[UserClarificationRecord, ...] = (),
     max_chars: int = DEFAULT_MAX_VIEW_CHARS,
     max_items: int = DEFAULT_MAX_VIEW_ITEMS,
     max_tokens: int = DEFAULT_MAX_VIEW_TOKENS,
 ) -> RenderedGroundingView:
-    """Render only the four State dimensions as safe JSON data."""
+    """Render four State dimensions plus answered, independent overlays."""
 
     for name, value in (
         ("max_chars", max_chars),
@@ -61,7 +66,7 @@ def render_grounding_view(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
-    items = _view_items(state)
+    items = _view_items(state) + _clarification_items(clarifications)
     maximum_kept = min(len(items), max_items)
     for kept in range(maximum_kept, -1, -1):
         text = _assemble(items[:kept], omitted=len(items) - kept)
@@ -112,12 +117,42 @@ def _safe_json(value: Any) -> str:
     ).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
 
 
+def _clarification_items(
+    records: tuple[UserClarificationRecord, ...],
+) -> list[tuple[str, str]]:
+    answered = [record for record in records if record.answer is not None]
+    return [
+        (
+            _CLARIFICATION_SECTION,
+            _safe_json(
+                {
+                    "answer": record.answer,
+                    "kind": record.kind,
+                    "phrase": record.phrase,
+                    "question": record.question,
+                }
+            ),
+        )
+        for record in sorted(
+            answered,
+            key=lambda item: (item.phase, item.phrase, item.kind, item.question),
+        )
+    ]
+
+
 def _assemble(items: list[tuple[str, str]], *, omitted: int) -> str:
     lines = [_HEADER]
     for section, _ in _SECTIONS:
         lines.extend(("", f"{section}:"))
         section_items = [value for item_section, value in items if item_section == section]
         lines.extend(f"- {value}" for value in section_items)
+    clarification_items = [
+        value for item_section, value in items
+        if item_section == _CLARIFICATION_SECTION
+    ]
+    if clarification_items:
+        lines.extend(("", _CLARIFICATION_SECTION))
+        lines.extend(f"- {value}" for value in clarification_items)
     if omitted:
         lines.extend(("", f"... omitted={omitted}"))
     return "\n".join(lines)

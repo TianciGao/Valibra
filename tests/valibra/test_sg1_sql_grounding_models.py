@@ -708,7 +708,7 @@ class StateDiffAuthorizationTests(unittest.TestCase):
     def test_evaluated_dimension_never_regresses_to_null(self) -> None:
         previous = SQLGroundingState(tables=("plants",))
         candidate = SQLGroundingState()
-        for stage in ("INITIAL_GROUNDING", "P2_INCREMENTAL", "REPAIR"):
+        for stage in ("INITIAL_GROUNDING", "P2_INCREMENTAL"):
             with self.subTest(stage=stage), self.assertRaisesRegex(
                 SQLGroundingValidationError,
                 "evaluated to null",
@@ -769,25 +769,11 @@ class StateDiffAuthorizationTests(unittest.TestCase):
                 ),
             )
 
-    def test_repair_can_replace_target_but_not_clear_non_target(self) -> None:
-        previous = complete_state()
-        replacement = previous.model_copy(update={"join_keys": ()})
-        repair_join = StateDiffAuthorization(
-            stage="REPAIR",
-            authorized_dimensions=("join_keys",),
-        )
-        self.assertEqual(
-            validate_grounding_state_transition(previous, replacement, repair_join),
-            ("join_keys",),
-        )
-
-        unrelated_clear = previous.model_copy(update={"column_mapping": ()})
-        with self.assertRaisesRegex(SQLGroundingValidationError, "unauthorized"):
-            validate_grounding_state_transition(
-                previous,
-                unrelated_clear,
-                repair_join,
-            )
+    def test_retired_repair_stage_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            StateDiffAuthorization(stage="REPAIR")
+        with self.assertRaises(ValidationError):
+            GroundingRuntime(stage="REPAIR")
 
     def test_attempt_and_done_cannot_change_grounding_state(self) -> None:
         previous = SQLGroundingState()
@@ -812,7 +798,7 @@ class StateDiffAuthorizationTests(unittest.TestCase):
             validate_grounding_state_transition(
                 state,
                 state,
-                StateDiffAuthorization(stage="REPAIR"),
+                StateDiffAuthorization(stage="SQL_ATTEMPT"),
             ),
             (),
         )
@@ -823,6 +809,7 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
         partial_state = SQLGroundingState(tables=("plants",))
         response = GroundingLLMResponse(
             sql_grounding_state=partial_state,
+            user_clarification_requests=(),
             next_focus_dimension="none",
         )
         with self.assertRaisesRegex(SQLGroundingValidationError, "dimension is null"):
@@ -846,6 +833,7 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
             with self.subTest(focus=focus):
                 candidate = GroundingLLMResponse(
                     sql_grounding_state=partial_state,
+                    user_clarification_requests=(),
                     next_focus_dimension=focus,
                 )
                 self.assertIs(
@@ -865,10 +853,11 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
                     focus,
                 )
 
-    def test_initial_complete_and_repair_focus_contracts(self) -> None:
+    def test_initial_complete_contract_and_retired_repair_stage(self) -> None:
         context = validation_context()
         initial = GroundingLLMResponse(
             sql_grounding_state=complete_state(),
+            user_clarification_requests=(),
             next_focus_dimension="none",
         )
         self.assertIs(
@@ -903,34 +892,14 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
             grounding_state=complete_state(),
         )
         self.assertEqual(completed_runtime.focus_dimension, "none")
-        repair = GroundingLLMResponse(
-            sql_grounding_state=complete_state(),
-            next_focus_dimension="join_keys",
-        )
-        self.assertIs(
-            validate_grounding_llm_response(
-                repair,
-                stage="REPAIR",
-                context=context,
-            ),
-            repair,
-        )
-        repair_none = GroundingLLMResponse(
-            sql_grounding_state=complete_state(),
-            next_focus_dimension="none",
-        )
-        self.assertIs(
-            validate_grounding_llm_response(
-                repair_none,
-                stage="REPAIR",
-                context=context,
-            ),
-            repair_none,
-        )
+        with self.assertRaises(ValidationError):
+            GroundingRuntime(stage="REPAIR")
 
     def test_stage_and_focus_are_closed_enums_and_not_state_fields(self) -> None:
         with self.assertRaises(ValidationError):
             GroundingRuntime(stage="PLANNING")
+        with self.assertRaises(ValidationError):
+            GroundingRuntime(stage="REPAIR")
         with self.assertRaises(ValidationError):
             GroundingRuntime(focus_dimension="schema")
         self.assertEqual(
@@ -946,7 +915,7 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
         old = GroundingRuntime()
         control_only = GroundingRuntime(
             grounding_revision=0,
-            stage="REPAIR",
+            stage="SQL_ATTEMPT",
             focus_dimension="domain_knowledge",
             grounding_state=old.grounding_state,
         )
@@ -954,8 +923,8 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
 
         changed = GroundingRuntime(
             grounding_revision=1,
-            stage="REPAIR",
-            focus_dimension="domain_knowledge",
+            stage="INITIAL_GROUNDING",
+            focus_dimension="tables",
             grounding_state=SQLGroundingState(tables=("plants",)),
         )
         initial_tables = StateDiffAuthorization(
@@ -984,7 +953,7 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
                 old,
                 changed,
                 StateDiffAuthorization(
-                    stage="REPAIR",
+                    stage="SQL_ATTEMPT",
                     authorized_dimensions=("tables",),
                 ),
             )

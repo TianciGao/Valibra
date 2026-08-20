@@ -165,6 +165,7 @@ class PrimaryFakeUpdater:
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
                 sql_grounding_state=complete_state(),
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             ),
             telemetry=GroundingLLMTelemetry(
@@ -269,7 +270,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     grounding_callbacks,
                     "load_sql_grounding_llm_config",
-                    return_value=SimpleNamespace(max_calls_per_task=4),
+                    return_value=SimpleNamespace(max_calls_per_task=2),
                 ),
             ):
                 events = [
@@ -346,6 +347,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         context = validation_context(observation)
         valid_response = GroundingLLMResponse(
             sql_grounding_state=complete_state(),
+            user_clarification_requests=(),
             next_focus_dimension="none",
         )
         client = CapturingClient(valid_response)
@@ -376,6 +378,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         invalid_client = CapturingClient(
             GroundingLLMResponse(
                 sql_grounding_state=invalid_state,
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             )
         )
@@ -390,12 +393,30 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.runtime, runtime)
         self.assertEqual(rejected.runtime.grounding_revision, 0)
 
+        partial_client = CapturingClient(
+            GroundingLLMResponse(
+                sql_grounding_state=SQLGroundingState(tables=()),
+                user_clarification_requests=(),
+                next_focus_dimension="join_keys",
+            )
+        )
+        partial = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context,
+            SQLGroundingUpdater(partial_client),
+            grounding_input=primary_input(runtime),
+        )
+        self.assertEqual(partial.state_update.status, "rejected")
+        self.assertEqual(partial.runtime, runtime)
+
     async def test_incomplete_bundle_is_rejected_before_client_call(self):
         runtime = GroundingRuntime()
         observation = primary_observation()
         client = CapturingClient(
             GroundingLLMResponse(
                 sql_grounding_state=complete_state(),
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             )
         )

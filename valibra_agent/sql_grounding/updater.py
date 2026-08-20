@@ -39,7 +39,7 @@ from valibra_agent.sql_grounding.telemetry import (
 MAX_GROUNDING_REQUEST_CHARS = 262_144
 MAX_GROUNDING_RESPONSE_CHARS = 65_536
 DEFAULT_GROUNDING_TIMEOUT_SECONDS = 600.0
-DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 4
+DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 2
 GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_UPDATER_MODE",
     "GROUNDING_MODEL_PRESET",
@@ -78,6 +78,7 @@ Markdown，也不要添加额外字段。
 
 输出字段只能是：
 - sql_grounding_state：tables、join_keys、column_mapping、domain_knowledge
+- user_clarification_requests
 - next_focus_dimension
 
 精确输出结构：
@@ -90,6 +91,10 @@ Markdown，也不要添加额外字段。
   - domain_knowledge：null 或由对象组成的数组；每个对象只能包含：
     - kind：business_rule、runtime_state 或 database_capability
     - content：一个字符串
+- user_clarification_requests：由零个或多个对象组成的数组；每个对象只能包含：
+  - phrase：当前 phase 用户 query / follow_up 中逐字连续的非空片段
+  - kind：user_intent 或 missing_knowledge
+  - question：只向用户确认意图或用户掌握但当前缺失的业务知识
 - next_focus_dimension 只能是 tables、join_keys、column_mapping、
   domain_knowledge 或 none。
 
@@ -100,15 +105,11 @@ Markdown，也不要添加额外字段。
 - 不要添加以上未列出的任何字段。
 
 持久化四维状态的规则：
-1. Primary Grounding 输入恰好包含 query、schema、column_meanings、
-   knowledge_definitions、current_state 五个字段。请一次查看完整输入，尽可能在一次响应中
-   同时完成 tables、join_keys、column_mapping、domain_knowledge 四个维度。
-   P2 Follow-up Grounding 复用相同五字段，并增加 follow_up 字段。Repair Grounding 在对应
-   phase 的 Primary / Follow-up 输入上增加 execute_sql_evidence 和 submit_failure 两个字段。
-   execute_sql_evidence 按 Official trajectory 顺序提供此前全部 execute_sql 的 args/result；
-   submit_failure 提供第一次 actual submit_sql 的 args/result。Repair 必须综合这些已有证据修正
-   四维，不得要求重新调用 bootstrap 工具。每个 phase 最多一次 Primary / Follow-up 和一次
-   submit-failure Repair；P1 + P2 整个 task 最多四次 Grounding。
+1. Phase 1 Primary Grounding 输入恰好包含 query、schema、column_meanings、
+   knowledge_definitions、current_state 五个字段。Phase 2 Follow-up Grounding 复用相同五字段，
+   并增加 follow_up 字段。每个 phase 只调用一次 Grounding，整个 task 最多两次。
+   请在本 phase 的唯一一次响应中完成 tables、join_keys、column_mapping、domain_knowledge
+   四个维度；不得等待 execute_sql 或 submit_sql 后再次修订 Grounding State。
 2. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
    得到 schema 支持。绝不能持久化简写别名或臆造名称。
 3. column_mapping 中的普通字段必须得到 schema 支持；JSON / JSONB target 的真实列必须来自
@@ -133,16 +134,18 @@ Markdown，也不要添加额外字段。
    每个新增或修改后的非空 domain_knowledge.content，都必须逐字复制自 knowledge_definitions
    或最新合法观测中的 Official BIRD 规范知识陈述。已有且通过验证的 content 只能原样保留。
    绝不能改写或臆造知识。
-9. Primary Grounding 可以同时提出四个维度；其他调用必须保留所有未经授权的现有维度和条目。
+9. 每个 phase 的唯一一次 Grounding 可以同时提出四个维度。P2 必须保留所有未受 follow_up
+   影响的现有维度和条目。
 10. null 表示尚未评估；[] 表示已经评估且不需要；非空数组包含通过验证的结果。
-11. 在 INITIAL_GROUNDING 阶段，只要任一维度仍为 null，next_focus_dimension 就必须是
-   tables、join_keys、column_mapping 或 domain_knowledge。四个维度全部完成评估后，
+11. 本 phase 的响应必须把四个维度全部评估为数组（可以为空），且
    next_focus_dimension 必须是 none。
-12. 在 REPAIR 阶段，即使状态已经完整，也可以重新聚焦任一维度。只有当最新合法观测
-   没有给出明确的继续补充数据库 Grounding 信息的需要时，才使用 none。
+12. user_clarification_requests=[] 表示不需要用户确认。只有当前 query / follow_up 中确实存在
+   无法安全消解的 user_intent，或完成任务必须依赖但用户可能掌握的 missing_knowledge，才可以
+   提出问题。不得询问 schema、表名、列名、join、SQL 写法、identifier 或 runtime error；这些
+   必须由 Official BIRD 工具证据和 Main Agent 自行处理。不得为了保险而要求用户确认数据库事实。
 
 不要输出 score、confidence、ambiguity、reasoning、Evidence 摘要、SQL plan、Bird-Coin、
-final SQL、tool call 或具体 tool choice。响应只能提出完整的四维状态和下一个聚焦维度。
+final SQL、tool call 或具体 tool choice。响应只能提出完整的四维状态、有限澄清请求和下一个聚焦维度。
 """
 
 SQL_GROUNDING_PROMPT_SHA256 = hashlib.sha256(
@@ -196,7 +199,7 @@ class SQLGroundingLLMConfig(ContractModel):
         if self.preset_config.get("max_tokens") != self.max_tokens:
             raise ValueError("GROUNDING_MAX_TOKENS must equal the frozen preset value")
         if self.max_calls_per_task != DEFAULT_GROUNDING_MAX_CALLS_PER_TASK:
-            raise ValueError("GROUNDING_MAX_CALLS_PER_TASK must equal 4")
+            raise ValueError("GROUNDING_MAX_CALLS_PER_TASK must equal 2")
         return self
 
 
@@ -649,14 +652,7 @@ def _validated_bundled_grounding_input(
         "current_state",
     }
     p2_fields = primary_fields | {"follow_up"}
-    repair_fields = primary_fields | {"execute_sql_evidence", "submit_failure"}
-    p2_repair_fields = repair_fields | {"follow_up"}
-    if runtime.stage == "REPAIR":
-        expected = p2_repair_fields if observation.phase == 2 else repair_fields
-    elif runtime.stage == "P2_INCREMENTAL":
-        expected = p2_fields
-    else:
-        expected = primary_fields
+    expected = p2_fields if runtime.stage == "P2_INCREMENTAL" else primary_fields
     if not isinstance(grounding_input, Mapping) or set(grounding_input) != expected:
         telemetry = _telemetry(
             attempted=False,
@@ -685,18 +681,6 @@ def _validated_bundled_grounding_input(
             or not follow_up_query
             or payload["follow_up"] != follow_up_query
             or follow_up_query != follow_up_query.strip()
-        ):
-            telemetry = _telemetry(
-                attempted=False,
-                status="rejected",
-                error_type="grounding_bundle_invalid",
-            )
-            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
-    if runtime.stage == "REPAIR":
-        execute_evidence = payload["execute_sql_evidence"]
-        submit_failure = payload["submit_failure"]
-        if not isinstance(execute_evidence, list) or not isinstance(
-            submit_failure, dict
         ):
             telemetry = _telemetry(
                 attempted=False,

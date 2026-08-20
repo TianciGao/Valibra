@@ -23,8 +23,6 @@ StageEvent: TypeAlias = Literal[
     "official_submit_failed",
     "official_p2_follow_up",
     "official_task_completed",
-    "repair_completed_p1",
-    "repair_completed_p2",
 ]
 
 FOCUS_TOOL_DIRECTIONS: Mapping[FocusDimension, tuple[str, ...]] = MappingProxyType({
@@ -52,6 +50,7 @@ class AttemptGateDecision(ContractModel):
         "ready",
         "dimension_not_evaluated",
         "initial_focus_pending",
+        "pending_user_clarification",
         "invalid_first_submit_stage",
         "subsequent_submit_not_gated",
     ]
@@ -117,7 +116,9 @@ def transition_grounding_stage(
             raise SQLGroundingValidationError(
                 "official_submit_failed requires an SQL attempt stage"
             )
-        stage = "REPAIR"
+        # Submission feedback belongs to the frozen Official trajectory.  The
+        # Main Agent may debug and resubmit, but Grounding does not re-open.
+        stage = runtime.stage
     elif event == "official_p2_follow_up":
         allowed_stages = {"SQL_ATTEMPT"}
         if allow_initial_forced_exit:
@@ -127,20 +128,12 @@ def transition_grounding_stage(
                 "official_p2_follow_up requires SQL_ATTEMPT"
             )
         stage = "P2_INCREMENTAL"
-    elif event in {"repair_completed_p1", "repair_completed_p2"}:
-        if (
-            runtime.stage != "REPAIR"
-            or not runtime.grounding_state.all_dimensions_evaluated
-            or runtime.focus_dimension != "none"
-        ):
-            raise SQLGroundingValidationError(
-                f"{event} requires complete REPAIR with focus none"
-            )
-        stage = "SQL_ATTEMPT" if event == "repair_completed_p1" else "P2_INCREMENTAL"
-    else:
+    elif event == "official_task_completed":
         if runtime.stage == "DONE":
             return runtime
         stage = "DONE"
+    else:
+        raise SQLGroundingValidationError("unsupported Grounding control event")
 
     candidate = runtime.model_copy(update={"stage": stage})
     validate_grounding_runtime_transition(
@@ -155,8 +148,22 @@ def evaluate_first_submit_gate(
     runtime: GroundingRuntime,
     *,
     first_submit: bool,
+    pending_clarifications: int = 0,
 ) -> AttemptGateDecision:
-    """Evaluate the SG2 pure gate; only the first submit is hard-gated."""
+    """Gate unresolved user-owned questions and premature first submits."""
+
+    if (
+        isinstance(pending_clarifications, bool)
+        or not isinstance(pending_clarifications, int)
+        or pending_clarifications < 0
+    ):
+        raise ValueError("pending_clarifications must be a non-negative integer")
+    if pending_clarifications:
+        return AttemptGateDecision(
+            applicable=True,
+            open=False,
+            reason="pending_user_clarification",
+        )
 
     if not first_submit:
         return AttemptGateDecision(

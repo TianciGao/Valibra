@@ -42,11 +42,13 @@ MAX_PHRASE_CHARS = 256
 MAX_KNOWLEDGE_CHARS = 2048
 MAX_QUERY_CHARS = 32_768
 MAX_TRAJECTORY_REFS = 512
+MAX_USER_CLARIFICATION_REQUESTS = 8
+MAX_CLARIFICATION_QUESTION_CHARS = 1_024
+MAX_CLARIFICATION_ANSWER_CHARS = 4_096
 
 GroundingStage: TypeAlias = Literal[
     "INITIAL_GROUNDING",
     "SQL_ATTEMPT",
-    "REPAIR",
     "P2_INCREMENTAL",
     "DONE",
 ]
@@ -68,6 +70,10 @@ DomainKnowledgeKind: TypeAlias = Literal[
     "runtime_state",
     "database_capability",
 ]
+UserClarificationKind: TypeAlias = Literal[
+    "user_intent",
+    "missing_knowledge",
+]
 
 GROUNDING_DIMENSIONS: tuple[GroundingDimension, ...] = (
     "tables",
@@ -81,6 +87,10 @@ _TABLE_IDENTIFIER_RE = re.compile(
     rf"^{_IDENTIFIER_PART}(?:\.{_IDENTIFIER_PART})?$"
 )
 _CONTROL_TOKEN_RE = re.compile(r";|--|/\*|\*/")
+_FORBIDDEN_CLARIFICATION_SUBJECT_RE = re.compile(
+    r"(?i)(?:\b(?:schema|table|column|join|sql|identifier|relation|runtime\s+error)\b"
+    r"|数据库|表名|字段|列名|连接条件|联接条件|SQL\s*写法|运行时错误)"
+)
 
 # Frozen from already-completed Full-600 taxonomy findings.  The list is
 # deliberately narrow: plain columns, JSON/JSONB paths, PostgreSQL arrays,
@@ -364,11 +374,79 @@ class SQLGroundingState(ContractModel):
         return self
 
 
+class UserClarificationRequest(ContractModel):
+    """One bounded question about information owned by the user."""
+
+    phrase: Annotated[str, Field(min_length=1, max_length=MAX_PHRASE_CHARS)]
+    kind: UserClarificationKind
+    question: Annotated[
+        str,
+        Field(min_length=1, max_length=MAX_CLARIFICATION_QUESTION_CHARS),
+    ]
+
+    @field_validator("phrase")
+    @classmethod
+    def validate_phrase(cls, value: str) -> str:
+        return _require_bounded_text(
+            value,
+            label="user_clarification_requests.phrase",
+            maximum=MAX_PHRASE_CHARS,
+        )
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        value = _require_bounded_text(
+            value,
+            label="user_clarification_requests.question",
+            maximum=MAX_CLARIFICATION_QUESTION_CHARS,
+        )
+        if _FORBIDDEN_CLARIFICATION_SUBJECT_RE.search(value):
+            raise ValueError(
+                "clarification question asks about database/schema/SQL implementation"
+            )
+        return value
+
+
+class UserClarificationRecord(UserClarificationRequest):
+    """Session overlay record; deliberately outside GroundingRuntime."""
+
+    phase: Literal[1, 2]
+    answer: Annotated[
+        str,
+        Field(min_length=1, max_length=MAX_CLARIFICATION_ANSWER_CHARS),
+    ] | None = None
+
+    @field_validator("answer")
+    @classmethod
+    def validate_answer(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("clarification answer must contain non-whitespace text")
+        return value
+
+
 class GroundingLLMResponse(ContractModel):
     """The entire state proposed by Grounding LLM plus its next focus."""
 
     sql_grounding_state: SQLGroundingState
+    user_clarification_requests: Annotated[
+        tuple[UserClarificationRequest, ...],
+        Field(max_length=MAX_USER_CLARIFICATION_REQUESTS),
+    ]
     next_focus_dimension: FocusDimension
+
+    @field_validator("user_clarification_requests")
+    @classmethod
+    def validate_unique_clarifications(
+        cls,
+        value: tuple[UserClarificationRequest, ...],
+    ) -> tuple[UserClarificationRequest, ...]:
+        keys = [(item.phrase, item.kind, item.question) for item in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("user_clarification_requests must be unique")
+        return value
 
 
 class StateDiffAuthorization(ContractModel):
@@ -1143,6 +1221,11 @@ def validate_grounding_llm_response(
     """Validate an offline LLM response contract for the supplied Stage."""
 
     validate_sql_grounding_state(response.sql_grounding_state, context)
+    for request in response.user_clarification_requests:
+        if not any(request.phrase in source for source in context.query_texts):
+            raise SQLGroundingValidationError(
+                "clarification phrase is not a verbatim query substring"
+            )
     if (
         stage == "INITIAL_GROUNDING"
         and not response.sql_grounding_state.all_dimensions_evaluated

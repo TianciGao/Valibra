@@ -95,6 +95,7 @@ class _NoProviderPrimaryUpdater:
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
                 sql_grounding_state=runtime.grounding_state,
+                user_clarification_requests=(),
                 next_focus_dimension=runtime.focus_dimension,
             ),
             telemetry=GroundingLLMTelemetry(
@@ -189,7 +190,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     grounding_callbacks,
                     "load_sql_grounding_llm_config",
-                    return_value=SimpleNamespace(max_calls_per_task=4),
+                    return_value=SimpleNamespace(max_calls_per_task=2),
                 ),
             ):
                 events = [
@@ -239,7 +240,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 record[grounding_callbacks.SHADOW_AUDIT_KEY]["service_status"]
                 for record in ordered_audits
             ],
-            ["stored_bootstrap_evidence", "stored_bootstrap_evidence", "noop"],
+            ["stored_bootstrap_evidence", "stored_bootstrap_evidence", "rejected"],
         )
         self.assertTrue(
             all(

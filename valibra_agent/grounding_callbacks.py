@@ -33,6 +33,8 @@ from valibra_agent.sql_grounding.models import (
     SQL_GROUNDING_RUNTIME_KEY,
     GroundingLLMResponse,
     GroundingRuntime,
+    UserClarificationRecord,
+    UserClarificationRequest,
     ValidationContext,
     canonical_json,
     sql_grounding_state_sha256,
@@ -100,6 +102,7 @@ GROUNDING_GATE_AUDITS_KEY = "valibra:sql_grounding_gate_audits"
 GROUNDING_SUPPRESSED_BOOTSTRAP_KEY = (
     "valibra:sql_grounding_suppressed_bootstrap"
 )
+GROUNDING_CLARIFICATIONS_KEY = "valibra:user_clarifications"
 
 # The frozen P6 export module imports these names at module load.  They are
 # retained only so that historical, read-only export code remains importable;
@@ -130,6 +133,7 @@ _MAX_BLOCKED_SUBMITS = 64
 _MAX_GATE_AUDITS = 64
 _MAX_TOOL_AUDITS = 64
 _MAX_SUPPRESSED_BOOTSTRAP = 64
+_MAX_CLARIFICATION_RECORDS = 16
 _MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
 _MAX_ACTIVE_TASK_SYNCHRONIZERS = 512
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -137,8 +141,7 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 
 _BLOCKED_SUBMIT_STATUS = "VALIBRA_FIRST_SUBMIT_BLOCKED"
 _BLOCKED_SUBMIT_GUIDANCE = (
-    "Continue Grounding using the current Valibra Control Hint before "
-    "retrying submit_sql."
+    "Complete the pending Valibra user clarification before retrying submit_sql."
 )
 
 _TOOL_OBSERVATION_TYPES: Mapping[str, ObservationType] = {
@@ -175,8 +178,8 @@ _BOOTSTRAP_TOOL_SEQUENCE: tuple[str, ...] = (
 )
 _BOOTSTRAP_MODEL_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_STORED"
 _BOOTSTRAP_ALREADY_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_ALREADY_STORED"
-_MAX_PROVIDER_CALLS_PER_PHASE = 2
-_MAX_PROVIDER_CALLS_PER_TASK = 4
+_MAX_PROVIDER_CALLS_PER_PHASE = 1
+_MAX_PROVIDER_CALLS_PER_TASK = 2
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
 )
@@ -198,6 +201,7 @@ class _PassthroughSQLGroundingUpdater:
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
                 sql_grounding_state=runtime.grounding_state,
+                user_clarification_requests=(),
                 next_focus_dimension=runtime.focus_dimension,
             ),
             telemetry=GroundingLLMTelemetry(
@@ -400,7 +404,6 @@ class _BlockedSubmitCall:
         if record.stage not in {
             "INITIAL_GROUNDING",
             "SQL_ATTEMPT",
-            "REPAIR",
             "P2_INCREMENTAL",
             "DONE",
         }:
@@ -514,6 +517,7 @@ async def before_model_callback(
     update_audit: dict[str, Any] | None = None
     control_audit: dict[str, Any] | None = None
     bootstrap_tool: str | None = None
+    pending_clarification: UserClarificationRecord | None = None
     view_audit: dict[str, Any] = {
         "mode": "active",
         "injected": False,
@@ -533,7 +537,12 @@ async def before_model_callback(
                     runtime,
                     llm_request,
                 )
-            view = render_grounding_view(runtime.grounding_state)
+                if bootstrap_tool is None:
+                    pending_clarification = _next_pending_clarification(state)
+            view = render_grounding_view(
+                runtime.grounding_state,
+                clarifications=_clarification_records(state),
+            )
             control_audit = _control_audit_for_runtime(
                 runtime,
                 control_status="failed_open" if degraded else "succeeded",
@@ -684,17 +693,32 @@ async def before_model_callback(
                 state,
                 _bounded_error_audit("before_model_audit", exc),
             )
-    if baseline_result is not None or bootstrap_tool is None:
+    if baseline_result is not None:
         return baseline_result
-    try:
-        return _bootstrap_function_call_response(state, bootstrap_tool)
-    except Exception as exc:
-        if state is not None:
-            _append_error_audit(
+    if bootstrap_tool is not None:
+        try:
+            return _bootstrap_function_call_response(state, bootstrap_tool)
+        except Exception as exc:
+            if state is not None:
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit("before_model_bootstrap", exc),
+                )
+            return None
+    if pending_clarification is not None:
+        try:
+            return _clarification_function_call_response(
                 state,
-                _bounded_error_audit("before_model_bootstrap", exc),
+                pending_clarification,
             )
-        return None
+        except Exception as exc:
+            if state is not None:
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit("before_model_clarification", exc),
+                )
+            return None
+    return None
 
 
 async def after_model_callback(
@@ -770,6 +794,7 @@ async def before_tool_callback(
             gate = evaluate_first_submit_gate(
                 runtime,
                 first_submit=first_submit,
+                pending_clarifications=_pending_clarification_count(state),
             )
             if degraded:
                 policy = _GateExecutionPolicy(action="failed_open")
@@ -1081,6 +1106,23 @@ async def after_tool_callback(
                 tool_name,
                 tool_response,
             )
+            if tool_name == "ask_user" and observation_type != "tool_error":
+                question = args.get("question") if isinstance(args, dict) else None
+                if (
+                    isinstance(question, str)
+                    and _is_clarification_function_call(
+                        state,
+                        function_call_id=function_call_id,
+                        phase=pending.phase_before,
+                        question=question,
+                    )
+                ):
+                    _record_clarification_answer(
+                        state,
+                        phase=pending.phase_before,
+                        question=question,
+                        answer=tool_response,
+                    )
             phase_after = _phase(
                 state.get("current_phase", pending.phase_before)
             )
@@ -1453,61 +1495,13 @@ async def _handle_submit_observation(
         allow_initial_forced_exit=liveness_bypass,
     )
     if event == "official_submit_failed":
-        if (
-            _official_submit_count_for_phase(state, observation.phase) != 1
-            or private_ref is None
-        ):
-            return (
-                _ObservationResult(
-                    runtime=transitioned,
-                    service_status="skipped_subsequent_submit_no_repair",
-                    observation=observation,
-                    control_events=(transition,),
-                    control_status="succeeded",
-                    official_outcome=outcome,
-                ),
-                None,
-            )
-        try:
-            bound = _ACTIVE_TURN_MESSAGE.get()
-            if bound is None or bound.task_id != _task_id(state):
-                raise ValueError(
-                    "current bound query is required for Repair Grounding"
-                )
-            grounding_input = _build_repair_grounding_request(
-                state,
-                query=_user_message_query(bound.message),
-                runtime=transitioned,
-                observation=observation,
-            )
-            repaired = await _handle_observation(
-                state,
-                observation,
-                transitioned,
-                grounding_input=grounding_input,
-            )
-        except Exception as exc:
-            return (
-                _ObservationResult(
-                    runtime=transitioned,
-                    service_status="degraded_repair_bundle",
-                    observation=observation,
-                    control_events=(transition,),
-                    control_status="failed_open",
-                    control_error_type=type(exc).__name__[:128],
-                    official_outcome=outcome,
-                ),
-                None,
-            )
         return (
             _ObservationResult(
-                runtime=repaired.runtime,
-                service_status=repaired.service_status,
+                runtime=transitioned,
+                service_status="skipped_submit_failure_no_repair",
                 observation=observation,
-                service_result=repaired.service_result,
-                control_events=(transition, *repaired.control_events),
-                control_status=repaired.control_status,
-                control_error_type=repaired.control_error_type,
+                control_events=(transition,),
+                control_status="succeeded",
                 official_outcome=outcome,
             ),
             None,
@@ -1612,10 +1606,7 @@ async def _handle_observation_serialized(
             service_status="skipped_affected_dimensions_unfrozen",
             observation=observation,
         )
-    if (
-        observation.observation_type == "submission"
-        and active_runtime.stage != "REPAIR"
-    ):
+    if observation.observation_type == "submission":
         return _ObservationResult(
             runtime=active_runtime,
             service_status="skipped_control_lifecycle_only",
@@ -1652,7 +1643,7 @@ async def _handle_observation_serialized(
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
             phase_calls = _provider_phase_call_count(state, observation.phase)
-            expected_phase_calls = 1 if active_runtime.stage == "REPAIR" else 0
+            expected_phase_calls = 0
             if phase_calls != expected_phase_calls:
                 return _ObservationResult(
                     runtime=active_runtime,
@@ -1723,6 +1714,12 @@ async def _handle_observation_serialized(
     if service_result.state_update.status in {"accepted", "noop"}:
         control_status = "succeeded"
         try:
+            if service_result.response is not None:
+                _register_clarification_requests(
+                    state,
+                    phase=observation.phase,
+                    requests=service_result.response.user_clarification_requests,
+                )
             candidate, control_events = _advance_ready_control_stage(
                 state,
                 candidate,
@@ -1773,16 +1770,6 @@ def _advance_ready_control_stage(
         and runtime.focus_dimension == "none"
     ):
         event = "grounding_completed"
-    elif (
-        runtime.stage == "REPAIR"
-        and runtime.grounding_state.all_dimensions_evaluated
-        and runtime.focus_dimension == "none"
-    ):
-        event = (
-            "repair_completed_p1"
-            if _phase(state.get("current_phase", 1)) == 1
-            else "repair_completed_p2"
-        )
     if event is None:
         return runtime, ()
     candidate, record = _apply_control_event(runtime, event)
@@ -2054,6 +2041,156 @@ def _bootstrap_function_call_response(state: Any, tool_name: str) -> Any:
     )
 
 
+def _clarification_function_call_response(
+    state: Any,
+    record: UserClarificationRecord,
+) -> Any:
+    """Force one Grounding-owned clarification through the Official tool."""
+
+    if record.answer is not None:
+        raise ValueError("answered clarification cannot be requested again")
+    from google.adk.models.llm_response import LlmResponse as AdkLlmResponse
+    from google.genai import types as genai_types
+
+    return AdkLlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[
+                genai_types.Part(
+                    function_call=genai_types.FunctionCall(
+                        id=_clarification_function_call_id(state, record),
+                        name="ask_user",
+                        args={"question": record.question},
+                    )
+                )
+            ],
+        )
+    )
+
+
+def _clarification_records(state: Any) -> tuple[UserClarificationRecord, ...]:
+    raw = state.get(GROUNDING_CLARIFICATIONS_KEY, [])
+    if not isinstance(raw, list) or len(raw) > _MAX_CLARIFICATION_RECORDS:
+        raise ValueError("invalid clarification overlay")
+    records = tuple(UserClarificationRecord.model_validate(item) for item in raw)
+    keys = [(item.phase, item.question) for item in records]
+    if len(keys) != len(set(keys)):
+        raise ValueError("clarification overlay contains duplicates")
+    return records
+
+
+def _store_clarification_records(
+    state: Any,
+    records: tuple[UserClarificationRecord, ...],
+) -> None:
+    if len(records) > _MAX_CLARIFICATION_RECORDS:
+        raise ValueError("clarification overlay exceeds its task bound")
+    state[GROUNDING_CLARIFICATIONS_KEY] = [
+        item.model_dump(mode="json") for item in records
+    ]
+
+
+def _register_clarification_requests(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    requests: tuple[UserClarificationRequest, ...],
+) -> None:
+    records = _clarification_records(state)
+    phase_records = tuple(item for item in records if item.phase == phase)
+    proposed = tuple(
+        UserClarificationRecord(
+            phase=phase,
+            phrase=item.phrase,
+            kind=item.kind,
+            question=item.question,
+        )
+        for item in requests
+    )
+    if phase_records:
+        if phase_records != proposed:
+            raise ValueError("clarification requests for a phase are immutable")
+        return
+    _store_clarification_records(state, (*records, *proposed))
+
+
+def _next_pending_clarification(state: Any) -> UserClarificationRecord | None:
+    return next(
+        (item for item in _clarification_records(state) if item.answer is None),
+        None,
+    )
+
+
+def _pending_clarification_count(state: Any) -> int:
+    return sum(
+        item.answer is None for item in _clarification_records(state)
+    )
+
+
+def _clarification_function_call_id(
+    state: Any,
+    record: UserClarificationRecord,
+) -> str:
+    records = _clarification_records(state)
+    try:
+        position = records.index(record) + 1
+    except ValueError as exc:
+        raise ValueError("clarification is absent from Session overlay") from exc
+    suffix = _sha256_text(
+        f"{_task_id(state)}:{record.phase}:{record.question}"
+    )[:16]
+    return f"valibra-clarification-{position}-{suffix}"
+
+
+def _is_clarification_function_call(
+    state: Any,
+    *,
+    function_call_id: str,
+    phase: Literal[1, 2],
+    question: str,
+) -> bool:
+    for record in _clarification_records(state):
+        if record.phase == phase and record.question == question:
+            return function_call_id == _clarification_function_call_id(
+                state,
+                record,
+            )
+    return False
+
+
+def _record_clarification_answer(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    question: str,
+    answer: Any,
+) -> None:
+    if not isinstance(answer, str):
+        raise ValueError("clarification answer must be a string")
+    records = list(_clarification_records(state))
+    matches = [
+        index
+        for index, record in enumerate(records)
+        if record.phase == phase and record.question == question
+    ]
+    if len(matches) != 1:
+        raise ValueError("clarification answer does not pair uniquely")
+    index = matches[0]
+    current = records[index]
+    if current.answer is not None:
+        if current.answer == answer:
+            return
+        raise ValueError("clarification answer is immutable")
+    records[index] = UserClarificationRecord(
+        phase=current.phase,
+        phrase=current.phrase,
+        kind=current.kind,
+        question=current.question,
+        answer=answer,
+    )
+    _store_clarification_records(state, tuple(records))
+
+
 def _bootstrap_function_call_id(state: Any, tool_name: str) -> str:
     if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
         raise ValueError("unsupported bootstrap tool")
@@ -2206,81 +2343,6 @@ def _build_p2_grounding_request(
     return {
         **_build_grounding_request(state, query=query, runtime=runtime),
         "follow_up": follow_up,
-    }
-
-
-def _build_repair_grounding_request(
-    state: Any,
-    *,
-    query: str,
-    runtime: GroundingRuntime,
-    observation: SQLGroundingObservation,
-) -> dict[str, Any]:
-    """Rebuild the one allowed Repair bundle from Official trajectory facts."""
-
-    if runtime.stage != "REPAIR" or observation.observation_type != "submission":
-        raise ValueError("Repair bundle requires a submission in REPAIR")
-    if not isinstance(query, str) or not query or query != query.strip():
-        raise ValueError("bounded original query is required")
-    events = _completed_sql_grounding_trajectory(state)
-    bootstrap = _bootstrap_evidence_events(state)
-    by_tool = {event["tool_name"]: event["content"] for event in bootstrap}
-    _parse_schema_projection(by_tool["get_schema"])
-    _exact_all_column_meanings(by_tool["get_all_column_meanings"])
-    _exact_knowledge_definitions(by_tool["get_all_knowledge_definitions"])
-
-    execute_evidence = [
-        _repair_trajectory_record(event)
-        for event in events
-        if event["tool_name"] == "execute_sql"
-    ]
-    submissions = [
-        event
-        for event in events
-        if event["tool_name"] == "submit_sql"
-        and event["phase"] == observation.phase
-    ]
-    if len(submissions) != 1:
-        raise ValueError(
-            "Repair is allowed only for the first actual submit in its phase"
-        )
-    submit_failure = _repair_trajectory_record(submissions[0])
-    if submit_failure["result"] != observation.content:
-        raise ValueError("current submit failure differs from Official trajectory")
-    result = {
-        "query": query,
-        "schema": by_tool["get_schema"],
-        "column_meanings": by_tool["get_all_column_meanings"],
-        "knowledge_definitions": by_tool["get_all_knowledge_definitions"],
-        "current_state": runtime.grounding_state.model_dump(mode="json"),
-        "execute_sql_evidence": execute_evidence,
-        "submit_failure": submit_failure,
-    }
-    if observation.phase == 2:
-        result["follow_up"] = _official_p2_follow_up(state)
-    return result
-
-
-def _repair_trajectory_record(event: Mapping[str, Any]) -> dict[str, Any]:
-    """Project only the exact Official fields needed by the bounded Repair."""
-
-    index = event.get("trajectory_index")
-    phase = event.get("phase")
-    args = event.get("args")
-    if (
-        isinstance(index, bool)
-        or not isinstance(index, int)
-        or index < 0
-        or isinstance(phase, bool)
-        or phase not in {1, 2}
-        or not isinstance(args, dict)
-    ):
-        raise ValueError("Official Repair trajectory event has invalid fields")
-    return {
-        "trajectory_index": index,
-        "phase": phase,
-        "args": to_jsonable(args),
-        "result": to_jsonable(event.get("content")),
     }
 
 

@@ -56,10 +56,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
-FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
+PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
+CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
 QUERY = "What is the maintenance cost?"
 
 
@@ -69,7 +69,7 @@ def environment(key_file: Path | None = None) -> dict[str, str]:
         "GROUNDING_MODEL_PRESET": "glm52_high_32768",
         "GROUNDING_TIMEOUT_SECONDS": "600",
         "GROUNDING_MAX_TOKENS": "32768",
-        "GROUNDING_MAX_CALLS_PER_TASK": "4",
+        "GROUNDING_MAX_CALLS_PER_TASK": "2",
         "GROUNDING_PROMPT_SHA256": PROMPT_SHA,
         "GROUNDING_API_BASE": "https://provider.invalid/v1",
         "GROUNDING_API_KEY": "",
@@ -83,6 +83,7 @@ def response_content(state: SQLGroundingState, focus: str) -> str:
     return json.dumps(
         {
             "sql_grounding_state": state.model_dump(mode="json"),
+            "user_clarification_requests": [],
             "next_focus_dimension": focus,
         },
         sort_keys=True,
@@ -419,6 +420,7 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
                 ],
                 "domain_knowledge": [],
             },
+            "user_clarification_requests": [],
             "next_focus_dimension": "none",
         }
         singular_target = json.loads(json.dumps(valid))
@@ -485,6 +487,7 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
                     ],
                     "domain_knowledge": [],
                 },
+                "user_clarification_requests": [],
                 "next_focus_dimension": "none",
             }
         )
@@ -658,6 +661,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         query_updater = _ScriptedUpdater(
             GroundingLLMResponse(
                 sql_grounding_state=SQLGroundingState(),
+                user_clarification_requests=(),
                 next_focus_dimension="column_mapping",
             )
         )
@@ -753,14 +757,18 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
             [
                 GroundingLLMResponse(
                     sql_grounding_state=after_schema,
+                    user_clarification_requests=(),
                     next_focus_dimension="column_mapping",
                 ),
                 GroundingLLMResponse(
                     sql_grounding_state=after_metadata,
+                    user_clarification_requests=(),
                     next_focus_dimension="domain_knowledge",
                 ),
                 GroundingLLMResponse(
-                    sql_grounding_state=after_knowledge, next_focus_dimension="none"
+                    sql_grounding_state=after_knowledge,
+                    user_clarification_requests=(),
+                    next_focus_dimension="none",
                 ),
             ]
         )
@@ -847,6 +855,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
                     column_mapping=(),
                     domain_knowledge=(),
                 ),
+                user_clarification_requests=(),
                 next_focus_dimension="none",
             )
         )
