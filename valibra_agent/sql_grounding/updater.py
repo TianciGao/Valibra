@@ -38,7 +38,7 @@ from valibra_agent.sql_grounding.telemetry import (
 
 MAX_GROUNDING_REQUEST_CHARS = 262_144
 MAX_GROUNDING_RESPONSE_CHARS = 65_536
-DEFAULT_GROUNDING_TIMEOUT_SECONDS = 180.0
+DEFAULT_GROUNDING_TIMEOUT_SECONDS = 300.0
 DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 4
 GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_UPDATER_MODE",
@@ -186,7 +186,7 @@ class SQLGroundingLLMConfig(ContractModel):
     @model_validator(mode="after")
     def validate_frozen_contract(self) -> "SQLGroundingLLMConfig":
         if self.timeout_seconds != DEFAULT_GROUNDING_TIMEOUT_SECONDS:
-            raise ValueError("GROUNDING_TIMEOUT_SECONDS differs from frozen SG2 value")
+            raise ValueError("GROUNDING_TIMEOUT_SECONDS must equal 300 seconds")
         if self.prompt_sha256 != SQL_GROUNDING_PROMPT_SHA256:
             raise ValueError("GROUNDING_PROMPT_SHA256 mismatch")
         if self.form_schema_sha256 != SQL_GROUNDING_FORM_SCHEMA_SHA256:
