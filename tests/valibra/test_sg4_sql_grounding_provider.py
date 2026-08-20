@@ -31,6 +31,7 @@ from valibra_agent.sql_grounding.models import (
 from valibra_agent.sql_grounding.observations import build_sql_grounding_observation
 from valibra_agent.sql_grounding.service import process_sql_grounding_observation
 from valibra_agent.sql_grounding.updater import (
+    DEFAULT_GROUNDING_TIMEOUT_SECONDS,
     SQL_GROUNDING_CONFIGURATION_SHA256,
     SQL_GROUNDING_FORM_SCHEMA,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
@@ -55,10 +56,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
+CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
 QUERY = "What is the maintenance cost?"
 
 
@@ -66,9 +67,9 @@ def environment(key_file: Path | None = None) -> dict[str, str]:
     result = {
         "GROUNDING_UPDATER_MODE": "llm",
         "GROUNDING_MODEL_PRESET": "glm52_high_32768",
-        "GROUNDING_TIMEOUT_SECONDS": "180",
+        "GROUNDING_TIMEOUT_SECONDS": "600",
         "GROUNDING_MAX_TOKENS": "32768",
-        "GROUNDING_MAX_CALLS_PER_TASK": "2",
+        "GROUNDING_MAX_CALLS_PER_TASK": "4",
         "GROUNDING_PROMPT_SHA256": PROMPT_SHA,
         "GROUNDING_API_BASE": "https://provider.invalid/v1",
         "GROUNDING_API_KEY": "",
@@ -234,6 +235,9 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(calls), 1)
         sent = calls[0]
+        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
+        self.assertEqual(sent["timeout"], 600.0)
+        self.assertEqual(sent["max_tokens"], 32_768)
         self.assertEqual(sent["num_retries"], 0)
         self.assertEqual(sent["max_retries"], 0)
         self.assertNotIn("tools", sent)
@@ -250,8 +254,41 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         audit_text = audit_path.read_text(encoding="utf-8")
         self.assertNotIn("unit-test-credential", audit_text)
         request = json.loads(audit_text)["request"]
+        self.assertEqual(request["timeout_seconds"], 600.0)
         self.assertEqual(request["tools"], [])
         self.assertIsNone(request["tool_choice"])
+
+    async def test_provider_and_outer_updater_timeouts_are_both_frozen_at_600(self):
+        class OfflineClient:
+            async def complete(self, request):
+                del request
+                return GroundingClientResponse(
+                    content=response_content(SQLGroundingState(), "tables")
+                )
+
+        observed_timeouts = []
+
+        async def capture_wait_for(awaitable, *, timeout):
+            observed_timeouts.append(timeout)
+            return await awaitable
+
+        updater = SQLGroundingUpdater(OfflineClient())
+        with patch(
+            "valibra_agent.sql_grounding.updater.asyncio.wait_for",
+            new=capture_wait_for,
+        ):
+            await updater.propose(
+                GroundingRuntime(), observation(), original_query=QUERY
+            )
+
+        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
+        self.assertEqual(observed_timeouts, [600.0])
+
+        with self.assertRaisesRegex(ValueError, "600 seconds"):
+            load_sql_grounding_llm_config(
+                PROJECT_ROOT,
+                self.env | {"GROUNDING_TIMEOUT_SECONDS": "300"},
+            )
 
     async def test_litellm_transformation_preserves_json_object_in_http_body(self):
         llm, provider = self.configs()
@@ -679,7 +716,7 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["attempt_gate_mode"], "active_first_submit")
         self.assertTrue(summary["attempt_gate_budget_liveness_bypass"])
 
-    async def test_schema_metadata_and_exact_knowledge_update_with_transient_context(self):
+    async def test_intermediate_evidence_never_calls_provider_after_stage3(self):
         current = {
             "task_id": "sg4-fake-tools",
             "current_phase": 1,
@@ -787,11 +824,14 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
                 )
         finally:
             grounding_callbacks._reset_turn_message(token)
-        self.assertEqual(updater.calls, 3)
-        self.assertEqual(first.runtime.grounding_revision, 1)
-        self.assertEqual(second.runtime.grounding_revision, 2)
-        self.assertEqual(third.runtime.grounding_revision, 3)
-        self.assertEqual(third.runtime.grounding_state, after_knowledge)
+        self.assertEqual(updater.calls, 0)
+        self.assertEqual(first.service_status, "stored_official_evidence_only")
+        self.assertEqual(second.service_status, "stored_official_evidence_only")
+        self.assertEqual(third.service_status, "stored_official_evidence_only")
+        self.assertEqual(first.runtime.grounding_revision, 0)
+        self.assertEqual(second.runtime.grounding_revision, 0)
+        self.assertEqual(third.runtime.grounding_revision, 0)
+        self.assertEqual(third.runtime.grounding_state, SQLGroundingState())
 
     async def test_invalid_response_and_ineligible_observations_preserve_runtime(self):
         current = {
@@ -844,8 +884,8 @@ class CallbackFakeProviderTests(unittest.IsolatedAsyncioTestCase):
         finally:
             grounding_callbacks._reset_turn_message(token)
         self.assertEqual(rejected.runtime, initial)
-        self.assertEqual(rejected.service_status, "rejected")
-        self.assertEqual(invalid.calls, 1)
+        self.assertEqual(rejected.service_status, "stored_official_evidence_only")
+        self.assertEqual(invalid.calls, 0)
 
 
 class _ScriptedUpdater:

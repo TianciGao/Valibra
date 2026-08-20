@@ -38,8 +38,8 @@ from valibra_agent.sql_grounding.telemetry import (
 
 MAX_GROUNDING_REQUEST_CHARS = 262_144
 MAX_GROUNDING_RESPONSE_CHARS = 65_536
-DEFAULT_GROUNDING_TIMEOUT_SECONDS = 180.0
-DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 2
+DEFAULT_GROUNDING_TIMEOUT_SECONDS = 600.0
+DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 4
 GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_UPDATER_MODE",
     "GROUNDING_MODEL_PRESET",
@@ -103,6 +103,12 @@ Markdown，也不要添加额外字段。
 1. Primary Grounding 输入恰好包含 query、schema、column_meanings、
    knowledge_definitions、current_state 五个字段。请一次查看完整输入，尽可能在一次响应中
    同时完成 tables、join_keys、column_mapping、domain_knowledge 四个维度。
+   P2 Follow-up Grounding 复用相同五字段，并增加 follow_up 字段。Repair Grounding 在对应
+   phase 的 Primary / Follow-up 输入上增加 execute_sql_evidence 和 submit_failure 两个字段。
+   execute_sql_evidence 按 Official trajectory 顺序提供此前全部 execute_sql 的 args/result；
+   submit_failure 提供第一次 actual submit_sql 的 args/result。Repair 必须综合这些已有证据修正
+   四维，不得要求重新调用 bootstrap 工具。每个 phase 最多一次 Primary / Follow-up 和一次
+   submit-failure Repair；P1 + P2 整个 task 最多四次 Grounding。
 2. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
    得到 schema 支持。绝不能持久化简写别名或臆造名称。
 3. column_mapping 中的普通字段必须得到 schema 支持；JSON / JSONB target 的真实列必须来自
@@ -180,7 +186,7 @@ class SQLGroundingLLMConfig(ContractModel):
     @model_validator(mode="after")
     def validate_frozen_contract(self) -> "SQLGroundingLLMConfig":
         if self.timeout_seconds != DEFAULT_GROUNDING_TIMEOUT_SECONDS:
-            raise ValueError("GROUNDING_TIMEOUT_SECONDS differs from frozen SG2 value")
+            raise ValueError("GROUNDING_TIMEOUT_SECONDS must equal 600 seconds")
         if self.prompt_sha256 != SQL_GROUNDING_PROMPT_SHA256:
             raise ValueError("GROUNDING_PROMPT_SHA256 mismatch")
         if self.form_schema_sha256 != SQL_GROUNDING_FORM_SCHEMA_SHA256:
@@ -189,6 +195,8 @@ class SQLGroundingLLMConfig(ContractModel):
             raise ValueError("SQL Grounding kernel configuration SHA mismatch")
         if self.preset_config.get("max_tokens") != self.max_tokens:
             raise ValueError("GROUNDING_MAX_TOKENS must equal the frozen preset value")
+        if self.max_calls_per_task != DEFAULT_GROUNDING_MAX_CALLS_PER_TASK:
+            raise ValueError("GROUNDING_MAX_CALLS_PER_TASK must equal 4")
         return self
 
 
@@ -591,10 +599,12 @@ def _build_request(
             "original_query": original_query,
         }
     else:
-        input_payload = _validated_primary_grounding_input(
+        input_payload = _validated_bundled_grounding_input(
             grounding_input,
             runtime=runtime,
             original_query=original_query,
+            follow_up_query=follow_up_query,
+            observation=observation,
         )
     input_json = canonical_json(input_payload)
     if len(input_json) > MAX_GROUNDING_REQUEST_CHARS:
@@ -621,52 +631,88 @@ def _build_request(
     return request
 
 
-def _validated_primary_grounding_input(
+def _validated_bundled_grounding_input(
     grounding_input: Mapping[str, Any],
     *,
     runtime: GroundingRuntime,
     original_query: str,
+    follow_up_query: str | None,
+    observation: SQLGroundingObservation,
 ) -> dict[str, Any]:
-    """Copy and validate the exact five-field ephemeral Primary input."""
+    """Copy and validate the exact ephemeral phase Grounding bundle."""
 
-    expected = {
+    primary_fields = {
         "query",
         "schema",
         "column_meanings",
         "knowledge_definitions",
         "current_state",
     }
+    p2_fields = primary_fields | {"follow_up"}
+    repair_fields = primary_fields | {"execute_sql_evidence", "submit_failure"}
+    p2_repair_fields = repair_fields | {"follow_up"}
+    if runtime.stage == "REPAIR":
+        expected = p2_repair_fields if observation.phase == 2 else repair_fields
+    elif runtime.stage == "P2_INCREMENTAL":
+        expected = p2_fields
+    else:
+        expected = primary_fields
     if not isinstance(grounding_input, Mapping) or set(grounding_input) != expected:
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     payload = dict(grounding_input)
     if payload["query"] != original_query or payload["query"] != original_query.strip():
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     if payload["current_state"] != runtime.grounding_state.model_dump(mode="json"):
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if "follow_up" in expected:
+        if (
+            not isinstance(follow_up_query, str)
+            or not follow_up_query
+            or payload["follow_up"] != follow_up_query
+            or follow_up_query != follow_up_query.strip()
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if runtime.stage == "REPAIR":
+        execute_evidence = payload["execute_sql_evidence"]
+        submit_failure = payload["submit_failure"]
+        if not isinstance(execute_evidence, list) or not isinstance(
+            submit_failure, dict
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     try:
         canonical_json(payload)
     except (TypeError, ValueError, RecursionError) as exc:
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
-            error_type="primary_input_invalid",
+            error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("primary_input_invalid", telemetry) from exc
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry) from exc
     return payload
 
 

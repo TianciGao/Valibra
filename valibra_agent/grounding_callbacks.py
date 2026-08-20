@@ -91,9 +91,15 @@ GROUNDING_UPDATE_AUDIT_KEY = "valibra_sql_grounding_update"
 GROUNDING_CONTROL_AUDIT_KEY = "valibra_sql_grounding_control"
 GROUNDING_ERROR_AUDIT_KEY = "valibra:sql_grounding_error_audits"
 GROUNDING_PROVIDER_CALL_COUNT_KEY = "valibra:sql_grounding_provider_calls"
+GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY = (
+    "valibra:sql_grounding_provider_phase_calls"
+)
 GROUNDING_TOOL_AUDITS_KEY = "valibra:sql_grounding_tool_audits"
 GROUNDING_BLOCKED_SUBMITS_KEY = "valibra:sql_grounding_blocked_submits"
 GROUNDING_GATE_AUDITS_KEY = "valibra:sql_grounding_gate_audits"
+GROUNDING_SUPPRESSED_BOOTSTRAP_KEY = (
+    "valibra:sql_grounding_suppressed_bootstrap"
+)
 
 # The frozen P6 export module imports these names at module load.  They are
 # retained only so that historical, read-only export code remains importable;
@@ -123,6 +129,7 @@ _MAX_PENDING = 64
 _MAX_BLOCKED_SUBMITS = 64
 _MAX_GATE_AUDITS = 64
 _MAX_TOOL_AUDITS = 64
+_MAX_SUPPRESSED_BOOTSTRAP = 64
 _MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
 _MAX_ACTIVE_TASK_SYNCHRONIZERS = 512
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -167,6 +174,9 @@ _BOOTSTRAP_TOOL_SEQUENCE: tuple[str, ...] = (
     "get_all_knowledge_definitions",
 )
 _BOOTSTRAP_MODEL_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_STORED"
+_BOOTSTRAP_ALREADY_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_ALREADY_STORED"
+_MAX_PROVIDER_CALLS_PER_PHASE = 2
+_MAX_PROVIDER_CALLS_PER_TASK = 4
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
 )
@@ -412,6 +422,53 @@ class _BlockedSubmitCall:
         if not isinstance(record.gate_audit, dict):
             raise ValueError("invalid blocked-submit Gate audit")
         _require_bounded_audit(record.gate_audit)
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class _SuppressedBootstrapCall:
+    """Short-lived glue for one duplicate bootstrap call skipped before cost."""
+
+    function_call_id: str
+    tool_name: str
+    args_digest: str
+    response_sha256: str
+    sequence: int
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "function_call_id": self.function_call_id,
+            "tool_name": self.tool_name,
+            "args_digest": self.args_digest,
+            "response_sha256": self.response_sha256,
+            "sequence": self.sequence,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_SuppressedBootstrapCall":
+        required = {
+            "function_call_id",
+            "tool_name",
+            "args_digest",
+            "response_sha256",
+            "sequence",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid suppressed-bootstrap record")
+        record = cls(**payload)
+        if not _IDENTIFIER_RE.fullmatch(record.function_call_id):
+            raise ValueError("invalid suppressed-bootstrap function_call_id")
+        if record.tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
+            raise ValueError("invalid suppressed-bootstrap tool")
+        for value in (record.args_digest, record.response_sha256):
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("invalid suppressed-bootstrap digest")
+        if (
+            isinstance(record.sequence, bool)
+            or not isinstance(record.sequence, int)
+            or not 1 <= record.sequence <= _MAX_SEQUENCE
+        ):
+            raise ValueError("invalid suppressed-bootstrap sequence")
         return record
 
 
@@ -666,6 +723,46 @@ async def before_tool_callback(
     state = getattr(tool_context, "state", None)
     tool_name = _safe_tool_name(tool)
     control_gate_audit: dict[str, Any] | None = None
+    if (
+        state is not None
+        and tool_name in _BOOTSTRAP_TOOL_SEQUENCE
+        and _bootstrap_tool_already_attempted(state, tool_name)
+    ):
+        try:
+            function_call_id = _require_function_call_id(tool_context)
+            response = _duplicate_bootstrap_response(tool_name)
+            record = _SuppressedBootstrapCall(
+                function_call_id=function_call_id,
+                tool_name=tool_name,
+                args_digest=_sha256_text(canonical_json(to_jsonable(args))),
+                response_sha256=_sha256_text(canonical_json(response)),
+                sequence=_next_sequence(state),
+            )
+            _add_suppressed_bootstrap(state, record)
+            _upsert_tool_callback_audit(
+                state,
+                function_call_id,
+                shadow_audit={
+                    "service_status": "skipped_duplicate_bootstrap_no_charge",
+                    "function_call_id": function_call_id,
+                    "tool_name": tool_name,
+                    "provider_attempted": False,
+                    "official_tool_executed": False,
+                },
+                control_audit=None,
+            )
+            return response
+        except Exception as exc:
+            _cleanup_suppressed_bootstrap_best_effort(state, tool_context)
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "before_tool_duplicate_bootstrap",
+                    exc,
+                    function_call_id=_valid_context_identifier(tool_context),
+                ),
+            )
+            return _duplicate_bootstrap_response(tool_name)
     if state is not None and tool_name == "submit_sql":
         try:
             runtime, degraded = _ensure_runtime(state)
@@ -848,6 +945,56 @@ async def after_tool_callback(
 
     state = getattr(tool_context, "state", None)
     function_call_id = _valid_context_identifier(tool_context)
+    if (
+        state is not None
+        and function_call_id is not None
+        and _suppressed_bootstrap_present(state, function_call_id)
+    ):
+        try:
+            suppressed = _pop_suppressed_bootstrap(state, function_call_id)
+            if suppressed is None:
+                raise ValueError("exact suppressed-bootstrap record disappeared")
+            response = _duplicate_bootstrap_response(suppressed.tool_name)
+            if _safe_tool_name(tool) != suppressed.tool_name:
+                raise ValueError("suppressed bootstrap tool name mismatch")
+            if _sha256_text(canonical_json(to_jsonable(tool_response))) != (
+                suppressed.response_sha256
+            ):
+                raise ValueError("suppressed bootstrap response mismatch")
+            return response
+        except Exception as exc:
+            _cleanup_suppressed_bootstrap_best_effort(state, tool_context)
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "after_tool_duplicate_bootstrap",
+                    exc,
+                    function_call_id=function_call_id,
+                ),
+            )
+            return tool_response
+    if state is not None and _safe_tool_name(tool) in _BOOTSTRAP_TOOL_SEQUENCE:
+        # A duplicate is already proven by the frozen Official trajectory.  If
+        # exact-ID bookkeeping was itself degraded, the deterministic response
+        # still proves ADK skipped execution; never manufacture an Official
+        # event by falling through to Baseline after_tool.
+        try:
+            tool_name = _safe_tool_name(tool)
+            if (
+                _bootstrap_tool_already_attempted(state, tool_name)
+                and tool_response == _duplicate_bootstrap_response(tool_name)
+            ):
+                _cleanup_suppressed_bootstrap_best_effort(state, tool_context)
+                return tool_response
+        except Exception as exc:
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "after_tool_duplicate_bootstrap_fallback",
+                    exc,
+                    function_call_id=function_call_id,
+                ),
+            )
     if (
         state is not None
         and function_call_id is not None
@@ -1141,6 +1288,12 @@ async def on_tool_error_callback(
     function_call_id = _valid_context_identifier(tool_context)
     if (
         function_call_id is not None
+        and _suppressed_bootstrap_present(state, function_call_id)
+    ):
+        _pop_suppressed_bootstrap(state, function_call_id)
+        return None
+    if (
+        function_call_id is not None
         and _blocked_submit_present(state, function_call_id)
     ):
         try:
@@ -1300,7 +1453,52 @@ async def _handle_submit_observation(
         allow_initial_forced_exit=liveness_bypass,
     )
     if event == "official_submit_failed":
-        repaired = await _handle_observation(state, observation, transitioned)
+        if (
+            _official_submit_count_for_phase(state, observation.phase) != 1
+            or private_ref is None
+        ):
+            return (
+                _ObservationResult(
+                    runtime=transitioned,
+                    service_status="skipped_subsequent_submit_no_repair",
+                    observation=observation,
+                    control_events=(transition,),
+                    control_status="succeeded",
+                    official_outcome=outcome,
+                ),
+                None,
+            )
+        try:
+            bound = _ACTIVE_TURN_MESSAGE.get()
+            if bound is None or bound.task_id != _task_id(state):
+                raise ValueError(
+                    "current bound query is required for Repair Grounding"
+                )
+            grounding_input = _build_repair_grounding_request(
+                state,
+                query=_user_message_query(bound.message),
+                runtime=transitioned,
+                observation=observation,
+            )
+            repaired = await _handle_observation(
+                state,
+                observation,
+                transitioned,
+                grounding_input=grounding_input,
+            )
+        except Exception as exc:
+            return (
+                _ObservationResult(
+                    runtime=transitioned,
+                    service_status="degraded_repair_bundle",
+                    observation=observation,
+                    control_events=(transition,),
+                    control_status="failed_open",
+                    control_error_type=type(exc).__name__[:128],
+                    official_outcome=outcome,
+                ),
+                None,
+            )
         return (
             _ObservationResult(
                 runtime=repaired.runtime,
@@ -1329,10 +1527,22 @@ async def _handle_submit_observation(
                 summary="official Phase-2 follow-up observed",
                 private_raw_ref=private_ref,
             )
+            bound = _ACTIVE_TURN_MESSAGE.get()
+            if bound is None or bound.task_id != _task_id(state):
+                raise ValueError(
+                    "current bound query is required for P2 Grounding"
+                )
+            grounding_input = _build_p2_grounding_request(
+                state,
+                query=_user_message_query(bound.message),
+                follow_up=follow_up,
+                runtime=transitioned,
+            )
             follow_up_result = await _handle_observation(
                 state,
                 follow_up_observation,
                 transitioned,
+                grounding_input=grounding_input,
             )
             final_runtime = follow_up_result.runtime
             follow_up_audit = _observation_audit(follow_up_result)
@@ -1393,7 +1603,10 @@ async def _handle_observation_serialized(
     *,
     grounding_input: Mapping[str, Any] | None = None,
 ) -> _ObservationResult:
-    if observation.observation_type == "p2_follow_up":
+    if (
+        observation.observation_type == "p2_follow_up"
+        and grounding_input is None
+    ):
         return _ObservationResult(
             runtime=active_runtime,
             service_status="skipped_affected_dimensions_unfrozen",
@@ -1426,13 +1639,10 @@ async def _handle_observation_serialized(
             service_status="skipped_provider_no_state_evidence",
             observation=observation,
         )
-    if (
-        grounding_input is None
-        and not _observation_supports_current_focus(active_runtime, observation)
-    ):
+    if grounding_input is None:
         return _ObservationResult(
             runtime=active_runtime,
-            service_status="skipped_provider_no_state_evidence",
+            service_status="stored_official_evidence_only",
             observation=observation,
         )
     provider_mode = _is_real_provider_mode()
@@ -1441,15 +1651,28 @@ async def _handle_observation_serialized(
         if provider_mode:
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
-            if grounding_input is not None and calls != 0:
+            phase_calls = _provider_phase_call_count(state, observation.phase)
+            expected_phase_calls = 1 if active_runtime.stage == "REPAIR" else 0
+            if phase_calls != expected_phase_calls:
                 return _ObservationResult(
                     runtime=active_runtime,
-                    service_status="skipped_primary_already_attempted",
+                    service_status="skipped_bundled_call_sequence",
                     observation=observation,
                     control_status="failed_open",
-                    control_error_type="PrimaryProviderAlreadyAttempted",
+                    control_error_type="BundledProviderCallSequenceError",
                 )
-            if calls >= llm_config.max_calls_per_task:
+            if llm_config.max_calls_per_task != _MAX_PROVIDER_CALLS_PER_TASK:
+                return _ObservationResult(
+                    runtime=active_runtime,
+                    service_status="degraded_configuration",
+                    observation=observation,
+                    control_status="failed_open",
+                    control_error_type="ConfiguredProviderCallLimit",
+                )
+            if (
+                calls >= _MAX_PROVIDER_CALLS_PER_TASK
+                or phase_calls >= _MAX_PROVIDER_CALLS_PER_PHASE
+            ):
                 return _ObservationResult(
                     runtime=active_runtime,
                     service_status="skipped_provider_call_limit",
@@ -1492,7 +1715,7 @@ async def _handle_observation_serialized(
             control_error_type=type(exc).__name__[:128],
         )
     if service_result.llm_telemetry.attempted and provider_mode:
-        state[GROUNDING_PROVIDER_CALL_COUNT_KEY] = _provider_call_count(state) + 1
+        _record_provider_call(state, observation.phase)
     candidate = service_result.runtime
     control_events: tuple[dict[str, str], ...] = ()
     control_status: Literal["not_applicable", "succeeded", "failed_open"]
@@ -1519,27 +1742,6 @@ async def _handle_observation_serialized(
         control_status=control_status,
         control_error_type=control_error_type,
     )
-
-
-def _observation_supports_current_focus(
-    runtime: GroundingRuntime,
-    observation: SQLGroundingObservation,
-) -> bool:
-    """Apply the frozen, evidence-aware Provider scheduling policy."""
-
-    if observation.observation_type == "submission":
-        return runtime.stage == "REPAIR"
-    tool_name = observation.tool_name
-    if not isinstance(tool_name, str) or runtime.focus_dimension == "none":
-        return False
-    directions = set(tool_directions_for_focus(runtime.focus_dimension))
-    # A knowledge-name list is discovery metadata, not canonical business-rule
-    # evidence.  The current deterministic projection also supports only the
-    # exact singular definition response, so the bulk definition tool remains
-    # fail-closed until such a parser is explicitly frozen.
-    directions.discard("get_all_external_knowledge_names")
-    directions.discard("get_all_knowledge_definitions")
-    return tool_name in directions
 
 
 def _apply_control_event(
@@ -1650,6 +1852,32 @@ def _is_first_official_submit(state: Any) -> bool:
     )
 
 
+def _official_submit_count(state: Any) -> int:
+    """Count only actual submit entries written by the frozen Baseline."""
+
+    trajectory = state.get("tool_trajectory", [])
+    if not isinstance(trajectory, list):
+        raise ValueError("official tool_trajectory must be a list")
+    return sum(
+        1
+        for event in trajectory
+        if isinstance(event, dict) and event.get("tool") == "submit_sql"
+    )
+
+
+def _official_submit_count_for_phase(
+    state: Any,
+    phase: Literal[1, 2],
+) -> int:
+    """Count actual submits only within the current Official phase."""
+
+    return sum(
+        1
+        for event in _completed_sql_grounding_trajectory(state)
+        if event["tool_name"] == "submit_sql" and event["phase"] == phase
+    )
+
+
 def _build_validation_context(
     state: Any,
     observation: SQLGroundingObservation,
@@ -1682,12 +1910,7 @@ def _build_validation_context(
     )
     return ValidationContext(
         current_query=_user_message_query(bound.message),
-        follow_up_query=(
-            observation.content
-            if observation.observation_type == "p2_follow_up"
-            and isinstance(observation.content, str)
-            else None
-        ),
+        follow_up_query=_validation_follow_up_query(state, observation),
         latest_observation_id=observation.observation_id,
         official_trajectory_observation_ids=_official_trajectory_refs(state),
         known_tables=frozenset(known_tables),
@@ -1724,6 +1947,50 @@ def _provider_call_count(state: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError("invalid SQL Grounding Provider call counter")
     return value
+
+
+def _provider_phase_call_counts(state: Any) -> dict[str, int]:
+    """Load the bounded per-phase ledger, migrating the old P1-only counter."""
+
+    total = _provider_call_count(state)
+    payload = state.get(GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY)
+    if payload is None:
+        if total > _MAX_PROVIDER_CALLS_PER_PHASE:
+            raise ValueError("legacy Provider counter exceeds the P1 phase limit")
+        return {"1": total, "2": 0}
+    if not isinstance(payload, dict) or set(payload) != {"1", "2"}:
+        raise ValueError("invalid SQL Grounding phase call counters")
+    counts: dict[str, int] = {}
+    for key in ("1", "2"):
+        value = payload.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= _MAX_PROVIDER_CALLS_PER_PHASE
+        ):
+            raise ValueError("invalid SQL Grounding phase call counter")
+        counts[key] = value
+    if sum(counts.values()) != total or total > _MAX_PROVIDER_CALLS_PER_TASK:
+        raise ValueError("SQL Grounding total and phase call counters differ")
+    return counts
+
+
+def _provider_phase_call_count(state: Any, phase: Literal[1, 2]) -> int:
+    return _provider_phase_call_counts(state)[str(phase)]
+
+
+def _record_provider_call(state: Any, phase: Literal[1, 2]) -> None:
+    counts = _provider_phase_call_counts(state)
+    total = _provider_call_count(state)
+    key = str(phase)
+    if (
+        total >= _MAX_PROVIDER_CALLS_PER_TASK
+        or counts[key] >= _MAX_PROVIDER_CALLS_PER_PHASE
+    ):
+        raise ValueError("SQL Grounding Provider call limit exceeded")
+    counts[key] += 1
+    state[GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY] = counts
+    state[GROUNDING_PROVIDER_CALL_COUNT_KEY] = total + 1
 
 
 def _request_exposes_bootstrap_tools(llm_request: Any) -> bool:
@@ -1832,6 +2099,28 @@ def _bootstrap_model_visible_result(
     )
 
 
+def _duplicate_bootstrap_response(tool_name: str) -> dict[str, str]:
+    if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
+        raise ValueError("unsupported duplicate bootstrap tool")
+    return {
+        "status": "already_stored",
+        "tool": tool_name,
+        "message": (
+            f"{_BOOTSTRAP_ALREADY_VISIBLE_PREFIX}: {tool_name}. "
+            "Reuse the existing Official evidence; do not call this tool again."
+        ),
+    }
+
+
+def _bootstrap_tool_already_attempted(state: Any, tool_name: str) -> bool:
+    if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
+        return False
+    return any(
+        event["tool_name"] == tool_name
+        for event in _completed_sql_grounding_trajectory(state)
+    )
+
+
 def _bootstrap_evidence_events(state: Any) -> tuple[dict[str, Any], ...]:
     """Require one successful Official result for each fixed bootstrap tool."""
 
@@ -1846,6 +2135,35 @@ def _bootstrap_evidence_events(state: Any) -> tuple[dict[str, Any], ...]:
     if any(event["observation_type"] == "tool_error" for event in events):
         raise ValueError("bootstrap evidence contains an Official tool error")
     return events
+
+
+def _official_p2_follow_up(state: Any) -> str:
+    """Recover the unique Official P2 question from a successful P1 submit."""
+
+    follow_ups: list[str] = []
+    for event in _completed_sql_grounding_trajectory(state):
+        if event["tool_name"] != "submit_sql" or event["phase"] != 1:
+            continue
+        try:
+            follow_ups.append(_extract_submit_follow_up(event["content"]))
+        except ValueError:
+            continue
+    if len(follow_ups) != 1:
+        raise ValueError("exactly one Official P2 follow-up is required")
+    return follow_ups[0]
+
+
+def _validation_follow_up_query(
+    state: Any,
+    observation: SQLGroundingObservation,
+) -> str | None:
+    if observation.observation_type == "p2_follow_up":
+        if not isinstance(observation.content, str):
+            raise ValueError("P2 follow-up Observation must be text")
+        return observation.content
+    if observation.phase == 2:
+        return _official_p2_follow_up(state)
+    return None
 
 
 def _build_grounding_request(
@@ -1872,6 +2190,100 @@ def _build_grounding_request(
     }
 
 
+def _build_p2_grounding_request(
+    state: Any,
+    *,
+    query: str,
+    follow_up: str,
+    runtime: GroundingRuntime,
+) -> dict[str, Any]:
+    """Reuse the one task-level bootstrap for one Phase-2 follow-up call."""
+
+    if runtime.stage != "P2_INCREMENTAL":
+        raise ValueError("P2 Grounding requires P2_INCREMENTAL")
+    if not isinstance(follow_up, str) or not follow_up or follow_up != follow_up.strip():
+        raise ValueError("bounded P2 follow-up is required")
+    return {
+        **_build_grounding_request(state, query=query, runtime=runtime),
+        "follow_up": follow_up,
+    }
+
+
+def _build_repair_grounding_request(
+    state: Any,
+    *,
+    query: str,
+    runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+) -> dict[str, Any]:
+    """Rebuild the one allowed Repair bundle from Official trajectory facts."""
+
+    if runtime.stage != "REPAIR" or observation.observation_type != "submission":
+        raise ValueError("Repair bundle requires a submission in REPAIR")
+    if not isinstance(query, str) or not query or query != query.strip():
+        raise ValueError("bounded original query is required")
+    events = _completed_sql_grounding_trajectory(state)
+    bootstrap = _bootstrap_evidence_events(state)
+    by_tool = {event["tool_name"]: event["content"] for event in bootstrap}
+    _parse_schema_projection(by_tool["get_schema"])
+    _exact_all_column_meanings(by_tool["get_all_column_meanings"])
+    _exact_knowledge_definitions(by_tool["get_all_knowledge_definitions"])
+
+    execute_evidence = [
+        _repair_trajectory_record(event)
+        for event in events
+        if event["tool_name"] == "execute_sql"
+    ]
+    submissions = [
+        event
+        for event in events
+        if event["tool_name"] == "submit_sql"
+        and event["phase"] == observation.phase
+    ]
+    if len(submissions) != 1:
+        raise ValueError(
+            "Repair is allowed only for the first actual submit in its phase"
+        )
+    submit_failure = _repair_trajectory_record(submissions[0])
+    if submit_failure["result"] != observation.content:
+        raise ValueError("current submit failure differs from Official trajectory")
+    result = {
+        "query": query,
+        "schema": by_tool["get_schema"],
+        "column_meanings": by_tool["get_all_column_meanings"],
+        "knowledge_definitions": by_tool["get_all_knowledge_definitions"],
+        "current_state": runtime.grounding_state.model_dump(mode="json"),
+        "execute_sql_evidence": execute_evidence,
+        "submit_failure": submit_failure,
+    }
+    if observation.phase == 2:
+        result["follow_up"] = _official_p2_follow_up(state)
+    return result
+
+
+def _repair_trajectory_record(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only the exact Official fields needed by the bounded Repair."""
+
+    index = event.get("trajectory_index")
+    phase = event.get("phase")
+    args = event.get("args")
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or isinstance(phase, bool)
+        or phase not in {1, 2}
+        or not isinstance(args, dict)
+    ):
+        raise ValueError("Official Repair trajectory event has invalid fields")
+    return {
+        "trajectory_index": index,
+        "phase": phase,
+        "args": to_jsonable(args),
+        "result": to_jsonable(event.get("content")),
+    }
+
+
 def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...]:
     """Reconstruct trusted evidence from Official events, never shadow presence."""
 
@@ -1895,6 +2307,8 @@ def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...
                 "tool_name": tool_name,
                 "observation_type": observation_type,
                 "content": content,
+                "phase": event.get("phase"),
+                "args": event.get("args"),
                 "trajectory_index": index,
                 "private_raw_ref": f"session://tool_trajectory/{index}",
                 "raw_digest": _sha256_text(canonical_json(to_jsonable(content))),
@@ -2484,6 +2898,80 @@ def _cleanup_blocked_best_effort(state: Any, tool_context: Any) -> None:
     cleaned = dict(payload)
     cleaned.pop(function_call_id, None)
     state[GROUNDING_BLOCKED_SUBMITS_KEY] = cleaned
+
+
+def _load_suppressed_bootstrap(
+    state: Any,
+) -> dict[str, _SuppressedBootstrapCall]:
+    payload = state.get(GROUNDING_SUPPRESSED_BOOTSTRAP_KEY, {})
+    if not isinstance(payload, dict) or len(payload) > _MAX_SUPPRESSED_BOOTSTRAP:
+        raise ValueError("invalid suppressed-bootstrap store")
+    records: dict[str, _SuppressedBootstrapCall] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            raise ValueError("suppressed-bootstrap key must be a string")
+        record = _SuppressedBootstrapCall.from_json(value)
+        if record.function_call_id != key:
+            raise ValueError(
+                "suppressed-bootstrap key does not match function_call_id"
+            )
+        records[key] = record
+    return records
+
+
+def _store_suppressed_bootstrap(
+    state: Any,
+    records: Mapping[str, _SuppressedBootstrapCall],
+) -> None:
+    if len(records) > _MAX_SUPPRESSED_BOOTSTRAP:
+        raise ValueError("too many suppressed-bootstrap records")
+    state[GROUNDING_SUPPRESSED_BOOTSTRAP_KEY] = {
+        key: _SuppressedBootstrapCall.from_json(records[key].to_json()).to_json()
+        for key in sorted(records)
+    }
+
+
+def _add_suppressed_bootstrap(
+    state: Any,
+    record: _SuppressedBootstrapCall,
+) -> None:
+    records = _load_suppressed_bootstrap(state)
+    if record.function_call_id in records:
+        raise ValueError("duplicate suppressed-bootstrap function_call_id")
+    records[record.function_call_id] = _SuppressedBootstrapCall.from_json(
+        record.to_json()
+    )
+    _store_suppressed_bootstrap(state, records)
+
+
+def _pop_suppressed_bootstrap(
+    state: Any,
+    function_call_id: str,
+) -> _SuppressedBootstrapCall | None:
+    records = _load_suppressed_bootstrap(state)
+    record = records.pop(function_call_id, None)
+    _store_suppressed_bootstrap(state, records)
+    return record
+
+
+def _suppressed_bootstrap_present(state: Any, function_call_id: str) -> bool:
+    payload = state.get(GROUNDING_SUPPRESSED_BOOTSTRAP_KEY, {})
+    return isinstance(payload, dict) and function_call_id in payload
+
+
+def _cleanup_suppressed_bootstrap_best_effort(
+    state: Any,
+    tool_context: Any,
+) -> None:
+    function_call_id = _valid_context_identifier(tool_context)
+    if function_call_id is None:
+        return
+    payload = state.get(GROUNDING_SUPPRESSED_BOOTSTRAP_KEY)
+    if not isinstance(payload, dict) or function_call_id not in payload:
+        return
+    cleaned = dict(payload)
+    cleaned.pop(function_call_id, None)
+    state[GROUNDING_SUPPRESSED_BOOTSTRAP_KEY] = cleaned
 
 
 def _load_gate_audits(state: Any) -> list[dict[str, Any]]:

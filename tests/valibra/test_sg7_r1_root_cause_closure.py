@@ -50,12 +50,12 @@ from valibra_agent.sql_grounding import updater as updater_module
 
 
 OLD_PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
-PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
 PRE_PROMPT_FIX_R1_CONFIG_SHA = "af6c8d9378da50a2d167e6bdf6f247dc0978691a21dd82c2fcc6dadbd9ee0bf7"
 CANONICAL_PROMPT_90S_CONFIG_SHA = "f6f674db77cf2a811802155738e20297fc2ecbd0b86a5d369c20e3bf64c032f7"
-CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
+CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -66,9 +66,9 @@ def _provider_environment() -> dict[str, str]:
     return {
         "GROUNDING_UPDATER_MODE": "llm",
         "GROUNDING_MODEL_PRESET": "glm52_high_32768",
-        "GROUNDING_TIMEOUT_SECONDS": "180",
+        "GROUNDING_TIMEOUT_SECONDS": "600",
         "GROUNDING_MAX_TOKENS": "32768",
-        "GROUNDING_MAX_CALLS_PER_TASK": "2",
+        "GROUNDING_MAX_CALLS_PER_TASK": "4",
         "GROUNDING_PROMPT_SHA256": PROMPT_SHA,
     }
 
@@ -261,7 +261,7 @@ class SG7R1SchedulingAndConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0), 0
         )
 
-    async def test_same_task_eligible_calls_serialize_and_respect_limit(self):
+    async def test_same_task_intermediate_observations_never_reserve_provider(self):
         state = _state("r1-reservation")
         updater = DelayedSchemaUpdater(preserve_focus=True)
         with (
@@ -275,15 +275,21 @@ class SG7R1SchedulingAndConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             third = await _bound_handle(
                 state, _observation(state["task_id"], 3)
             )
-        self.assertEqual([first.service_status, second.service_status], ["noop", "noop"])
-        self.assertEqual(third.service_status, "skipped_provider_call_limit")
-        self.assertEqual(updater.calls, ["get_schema", "get_schema"])
-        self.assertEqual(updater.max_inflight, 1)
         self.assertEqual(
-            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
+            [first.service_status, second.service_status, third.service_status],
+            [
+                "stored_official_evidence_only",
+                "stored_official_evidence_only",
+                "stored_official_evidence_only",
+            ],
+        )
+        self.assertEqual(updater.calls, [])
+        self.assertEqual(updater.max_inflight, 0)
+        self.assertEqual(
+            state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0), 0
         )
 
-    async def test_timeout_attempts_consume_slots_without_refund(self):
+    async def test_intermediate_observations_cannot_consume_timeout_slots(self):
         state = _state("r1-timeout-slots")
         updater = TimeoutUpdater()
         results = []
@@ -298,16 +304,20 @@ class SG7R1SchedulingAndConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                         _observation(state["task_id"], sequence),
                     )
                 )
-        self.assertEqual(updater.calls, 2)
+        self.assertEqual(updater.calls, 0)
         self.assertEqual(
             [item.service_status for item in results],
-            ["rejected", "rejected", "skipped_provider_call_limit"],
+            [
+                "stored_official_evidence_only",
+                "stored_official_evidence_only",
+                "stored_official_evidence_only",
+            ],
         )
         self.assertEqual(
-            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
+            state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0), 0
         )
 
-    async def test_different_tasks_remain_parallel(self):
+    async def test_different_tasks_skip_intermediate_provider_independently(self):
         updater = DelayedSchemaUpdater(preserve_focus=True, delay=0.04)
         first = _state("r1-parallel-a")
         second = _state("r1-parallel-b")
@@ -319,12 +329,12 @@ class SG7R1SchedulingAndConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 _bound_handle(first, _observation(first["task_id"], 1)),
                 _bound_handle(second, _observation(second["task_id"], 1)),
             )
-        self.assertEqual(updater.max_inflight, 2)
+        self.assertEqual(updater.max_inflight, 0)
         self.assertEqual(
-            first[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 1
+            first.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0), 0
         )
         self.assertEqual(
-            second[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 1
+            second.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0), 0
         )
 
     async def test_actual_adk_sibling_tools_have_exact_audits_and_one_call(self):
@@ -389,10 +399,10 @@ class SG7R1SchedulingAndConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             sorted(event["tool"] for event in final_state["tool_trajectory"]),
             ["get_all_external_knowledge_names", "get_schema"],
         )
-        self.assertEqual(updater.calls, ["get_schema"])
-        self.assertEqual(updater.max_inflight, 1)
+        self.assertEqual(updater.calls, [])
+        self.assertEqual(updater.max_inflight, 0)
         self.assertEqual(
-            final_state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 1
+            final_state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0), 0
         )
         exact = final_state[grounding_callbacks.GROUNDING_TOOL_AUDITS_KEY]
         self.assertEqual(set(exact), {"r1-schema-call", "r1-knowledge-names-call"})
@@ -400,19 +410,19 @@ class SG7R1SchedulingAndConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             exact["r1-schema-call"][grounding_callbacks.SHADOW_AUDIT_KEY][
                 "service_status"
             ],
-            "accepted",
+            "stored_official_evidence_only",
         )
         self.assertEqual(
             exact["r1-knowledge-names-call"][grounding_callbacks.SHADOW_AUDIT_KEY][
                 "service_status"
             ],
-            "skipped_provider_no_state_evidence",
+            "stored_official_evidence_only",
         )
         runtime = GroundingRuntime.model_validate(
             final_state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
         )
-        self.assertEqual(runtime.grounding_revision, 1)
-        self.assertEqual(runtime.grounding_state.tables, ("operational_metrics",))
+        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertIsNone(runtime.grounding_state.tables)
 
 
 class SG7R1EvidenceAndAuditTests(unittest.IsolatedAsyncioTestCase):
@@ -551,7 +561,7 @@ class SG7R1EvidenceAndAuditTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(evaluate_first_submit_gate(partial, first_submit=True).open)
         self.assertTrue(evaluate_first_submit_gate(complete, first_submit=True).open)
-        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 180.0)
+        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)

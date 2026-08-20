@@ -1,0 +1,56 @@
+{
+  "result": "PASS",
+  "stage": "R2 Stage 3",
+  "start_head": "30657af2e7ba035da1409d950bf2cb118e420a29",
+  "branch": "research/sql-grounding-v1",
+  "contracts": {
+    "prompt_sha256": "137f8b917a7e39f6ce4a5b8d885f09dabc0737d3d23dd321ec7ffcd5e73fe373",
+    "form_sha256": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration_sha256": "d641974ee9a3a08d439b9ad349a33eec889f9b47de9ea38730cee0f1ef42d224",
+    "max_grounding_calls_per_task": 2,
+    "max_request_chars": 262144,
+    "repair_input_fields": [
+      "query",
+      "schema",
+      "column_meanings",
+      "knowledge_definitions",
+      "current_state",
+      "execute_sql_evidence",
+      "submit_failure"
+    ]
+  },
+  "verified_behavior": {
+    "execute_sql_triggers_grounding": false,
+    "repair_trigger": "first_actual_submit_sql_failure_only",
+    "successful_submit_grounding_calls": 1,
+    "maximum_grounding_calls": 2,
+    "repair_reexecutes_bootstrap_tools": false,
+    "oversized_repair_reaches_client": false,
+    "stage_4_started": false
+  },
+  "tests": {
+    "focused_passed": 5,
+    "focused_total": 5,
+    "cross_stage_passed": 94,
+    "cross_stage_total": 94,
+    "full_passed": 441,
+    "full_total": 441,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "grounding_provider": 0,
+    "main_agent_provider": 0,
+    "user_simulator": 0,
+    "database": 0,
+    "http": 0,
+    "benchmark": 0
+  },
+  "source_sha256": {
+    "valibra_agent/grounding_callbacks.py": "2037a64c4436b1e8ddf66c4ee763378188e90a4542106f20cb5ca651b450f3eb",
+    "valibra_agent/sql_grounding/service.py": "1e1a1dceddfb5e55957b4a4d2f2f54fad758112d806ec48370190116246b8c61",
+    "valibra_agent/sql_grounding/updater.py": "fa3f9453350fe680f07ba53137183bff00cc45a253959bd811546432918c608b",
+    "tests/valibra/test_stage3_submit_driven_repair.py": "c9005cf858d73decde37fb3e83005ace8abb307288e081f0a949c6911b013f53"
+  }
+}

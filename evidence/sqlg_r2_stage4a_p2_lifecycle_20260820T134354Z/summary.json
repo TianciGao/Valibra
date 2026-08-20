@@ -1,0 +1,42 @@
+{
+  "stage": "R2 Stage 4A",
+  "status": "PASS",
+  "start_head": "d27a4b962c14286ed9bf5657d93ef5d93f53f84e",
+  "contract": {
+    "bootstrap_calls_per_task_per_tool": 1,
+    "p1_calls_max": 2,
+    "p2_calls_max": 2,
+    "task_calls_max": 4,
+    "p2_follow_up_calls": 1,
+    "execute_sql_triggers_grounding": false,
+    "p2_repair_trigger": "first_actual_p2_submit_failure_only",
+    "persistent_evidence_store_added": false,
+    "fifth_dimension_added": false
+  },
+  "frozen_sha256": {
+    "prompt": "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c",
+    "form_schema": "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406",
+    "configuration": "01f022e0235d23ac669d81742bd374840b3de2d77cd8166f1a28a5c5d37b22ea"
+  },
+  "tests": {
+    "stage4a_focused": {"passed": 6, "total": 6},
+    "sqlg_stage_regression": {"passed": 173, "total": 173},
+    "full_tracked_plus_stage4a": {"passed": 470, "total": 470},
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "external_calls": {
+    "provider": 0,
+    "database": 0,
+    "http_service": 0,
+    "user_simulator": 0,
+    "benchmark": 0
+  },
+  "source_sha256": {
+    "valibra_agent/grounding_callbacks.py": "a618cdaf8550d7510eec8e1a5383d66a40d72db03db6d378f6508c83fba4542a",
+    "valibra_agent/sql_grounding/service.py": "e763d4bb9b087e7b5ce2e608c0b35f61247c7c875a64d0e22176cfd73307626c",
+    "valibra_agent/sql_grounding/updater.py": "8b20caee894a037c44737d75c94478a3b9ac78acb7f5daa60f6cf1cda5dcd48f",
+    "tests/valibra/test_stage4a_p2_grounding_lifecycle.py": "3468009a4699199d1deebcb24a649fa60ff648672a482c5fd4cbb8c07cb14710"
+  }
+}

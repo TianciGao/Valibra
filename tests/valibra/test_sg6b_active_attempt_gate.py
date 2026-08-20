@@ -41,9 +41,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
+CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -560,10 +560,11 @@ class SG6bActualAdkLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate["focus_direction_count"], 1)
         self.assertEqual(gate["affordable_direction_count"], 0)
         self.assertEqual(gate["effective_gate_action"], "budget_liveness_bypass")
-        self.assertEqual(submit_audit["control_status"], "succeeded")
+        self.assertEqual(submit_audit["control_status"], "failed_open")
+        self.assertEqual(submit_audit["error_type"], "ValueError")
         self.assertEqual(load_runtime(state).stage, "REPAIR")
 
-    async def test_normal_block_then_grounding_then_open_submit(self):
+    async def test_intermediate_schema_no_longer_opens_blocked_submit(self):
         updater = QueueUpdater(
             GroundingLLMResponse(
                 sql_grounding_state=complete_state(),
@@ -584,19 +585,20 @@ class SG6bActualAdkLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ],
             updater=updater,
         )
-        self.assertEqual(counts, {"get_schema": 1, "submit_sql": 1})
+        self.assertEqual(counts, {"get_schema": 1, "submit_sql": 0})
         self.assertEqual(model.calls, 4)
-        self.assertEqual(state["budget_remaining"], 6.0)
+        self.assertEqual(state["budget_remaining"], 9.0)
         self.assertEqual(
             [event["tool"] for event in state["tool_trajectory"]],
-            ["get_schema", "submit_sql"],
+            ["get_schema"],
         )
-        self.assertEqual(len(state[grounding_callbacks.GROUNDING_GATE_AUDITS_KEY]), 1)
-        open_gate = state["tool_trajectory"][1][
-            grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
-        ]["attempt_gate"]
-        self.assertTrue(open_gate["open"])
-        self.assertFalse(open_gate["would_block"])
+        self.assertEqual(len(state[grounding_callbacks.GROUNDING_GATE_AUDITS_KEY]), 2)
+        self.assertTrue(
+            all(
+                audit["effective_gate_action"] == "blocked"
+                for audit in state[grounding_callbacks.GROUNDING_GATE_AUDITS_KEY]
+            )
+        )
         serialized = canonical_json(
             [event.model_dump(mode="json") for event in events]
         )

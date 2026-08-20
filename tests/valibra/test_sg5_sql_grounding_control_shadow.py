@@ -26,13 +26,15 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "00e5720595b40617a674236b814a7f8f7d9befbc8c9d19d2bcc76cc38664f970"
+PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "c5229db0ec1f4031d56071b97415b3df3302501e90e6500af1d0d3af392fb360"
+CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
 );"""
+ALL_COLUMN_MEANINGS = "{}"
+ALL_KNOWLEDGE_DEFINITIONS = "[]"
 _ORIGINAL_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 
 
@@ -97,6 +99,23 @@ def task_state(task_id: str, *, budget: float = 12.0) -> dict:
         "tool_trajectory": [],
         "system_agent_llm_calls": [],
     }
+
+
+def add_bootstrap_trajectory(current: dict) -> None:
+    for tool, result in (
+        ("get_schema", SCHEMA),
+        ("get_all_column_meanings", ALL_COLUMN_MEANINGS),
+        ("get_all_knowledge_definitions", ALL_KNOWLEDGE_DEFINITIONS),
+    ):
+        current["tool_trajectory"].append(
+            {
+                "type": "tool",
+                "tool": tool,
+                "phase": 1,
+                "args": {},
+                "result": result,
+            }
+        )
 
 
 def tool_context(current: dict, call_id: str) -> SimpleNamespace:
@@ -172,7 +191,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
             response,
         )
 
-    async def test_initial_complete_service_update_transitions_to_sql_attempt(self):
+    async def test_intermediate_schema_is_evidence_only(self):
         current = task_state("sg5-initial")
         self.bind(current)
         updater = QueueUpdater(
@@ -185,14 +204,14 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
             await self.run_tool(current, "get_schema", "schema-1", SCHEMA)
 
         final = load_runtime(current)
-        self.assertEqual(final.stage, "SQL_ATTEMPT")
-        self.assertEqual(final.grounding_revision, 1)
+        self.assertEqual(final.stage, "INITIAL_GROUNDING")
+        self.assertEqual(final.grounding_revision, 0)
         control = current["tool_trajectory"][0][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
-        self.assertEqual(control["event"], "grounding_completed")
         self.assertEqual(control["stage_before"], "INITIAL_GROUNDING")
-        self.assertEqual(control["stage_after"], "SQL_ATTEMPT")
+        self.assertEqual(control["stage_after"], "INITIAL_GROUNDING")
+        self.assertEqual(updater.calls, 0)
         self.assertFalse(control["control_hint_injected"])
 
     async def test_focus_persists_across_model_turns_and_hint_is_never_injected(self):
@@ -201,6 +220,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
             stage="SQL_ATTEMPT",
             focus="none",
         )
+        add_bootstrap_trajectory(current)
         self.bind(current)
         updater = QueueUpdater(
             GroundingLLMResponse(
@@ -300,6 +320,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_first_submit_preserves_baseline_and_enters_repair(self):
         current = task_state("sg5-open")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
         updater = QueueUpdater(
             GroundingLLMResponse(
@@ -319,7 +340,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.stage, "REPAIR")
         self.assertEqual(final.focus_dimension, "column_mapping")
         self.assertEqual(final.grounding_revision, 0)
-        control = current["tool_trajectory"][0][
+        control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertTrue(control["attempt_gate"]["open"])
@@ -330,19 +351,12 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
     async def test_p1_repair_returns_to_attempt_and_can_fail_again(self):
         current = task_state("sg5-p1-loop")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
         updater = QueueUpdater(
             GroundingLLMResponse(
-                sql_grounding_state=empty_complete_state(),
-                next_focus_dimension="column_mapping",
-            ),
-            GroundingLLMResponse(
                 sql_grounding_state=grounded_state(),
                 next_focus_dimension="none",
-            ),
-            GroundingLLMResponse(
-                sql_grounding_state=grounded_state(),
-                next_focus_dimension="domain_knowledge",
             ),
         )
         with patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater):
@@ -360,33 +374,44 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
 
         final = load_runtime(current)
         self.assertEqual(final.stage, "REPAIR")
-        self.assertEqual(final.focus_dimension, "domain_knowledge")
-        second_gate = current["tool_trajectory"][2][
+        self.assertEqual(final.focus_dimension, "none")
+        self.assertEqual(updater.calls, 1)
+        second_gate = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]["attempt_gate"]
         self.assertFalse(second_gate["applicable"])
         self.assertEqual(second_gate["reason"], "subsequent_submit_not_gated")
 
-    async def test_p1_success_follow_up_uses_only_official_state_and_skips_refresh(self):
+    async def test_p1_success_follow_up_grounds_once_without_rebootstrap(self):
         current = task_state("sg5-p2-follow-up")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
+        updater = QueueUpdater(
+            GroundingLLMResponse(
+                sql_grounding_state=grounded_state(),
+                next_focus_dimension="none",
+            )
+        )
         tool = SimpleNamespace(name="submit_sql")
         call = tool_context(current, "p1-pass")
-        await grounding_callbacks.before_tool_callback(tool, {"sql": "S"}, call)
-        current["phase1_completed"] = True
-        current["current_phase"] = 2
-        raw = "passed\nFollow-up question: Add active users.\nBudget remaining: 9"
-        await grounding_callbacks.after_tool_callback(tool, {"sql": "S"}, call, raw)
+        with patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater):
+            await grounding_callbacks.before_tool_callback(tool, {"sql": "S"}, call)
+            current["phase1_completed"] = True
+            current["current_phase"] = 2
+            raw = "passed\nFollow-up question: Add active users.\nBudget remaining: 9"
+            await grounding_callbacks.after_tool_callback(tool, {"sql": "S"}, call, raw)
 
         final = load_runtime(current)
         self.assertEqual(final.stage, "P2_INCREMENTAL")
-        audit = current["tool_trajectory"][0][grounding_callbacks.SHADOW_AUDIT_KEY]
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.observation_types, ["p2_follow_up"])
+        audit = current["tool_trajectory"][-1][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(
             audit["p2_follow_up"]["service_status"],
-            "skipped_affected_dimensions_unfrozen",
+            "accepted",
         )
-        control = current["tool_trajectory"][0][
+        control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertEqual(control["official_outcome"], "p1_follow_up")
@@ -395,12 +420,9 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
     async def test_p1_repair_then_success_enters_p2_incremental(self):
         current = task_state("sg5-p1-repair-pass")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
         updater = QueueUpdater(
-            GroundingLLMResponse(
-                sql_grounding_state=empty_complete_state(),
-                next_focus_dimension="column_mapping",
-            ),
             GroundingLLMResponse(
                 sql_grounding_state=grounded_state(),
                 next_focus_dimension="none",
@@ -432,14 +454,14 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         final = load_runtime(current)
         self.assertEqual(final.stage, "P2_INCREMENTAL")
         self.assertEqual(final.grounding_revision, 1)
-        self.assertEqual(updater.calls, 2)
+        self.assertEqual(updater.calls, 1)
         control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertEqual(control["official_outcome"], "p1_follow_up")
         self.assertEqual(control["event"], "official_p2_follow_up")
 
-    async def test_p2_repair_returns_to_p2_incremental(self):
+    async def test_p2_failure_after_prior_submit_never_calls_repair(self):
         current = task_state("sg5-p2-repair")
         current["current_phase"] = 2
         current["phase1_completed"] = True
@@ -480,7 +502,8 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         final = load_runtime(current)
         self.assertEqual(final.stage, "DONE")
         self.assertEqual(final.focus_dimension, "none")
-        self.assertEqual(final.grounding_revision, 1)
+        self.assertEqual(final.grounding_revision, 0)
+        self.assertEqual(updater.calls, 0)
         retry_gate = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]["attempt_gate"]
@@ -541,6 +564,8 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_control_transition_error_fails_open_with_last_valid_runtime(self):
         current = task_state("sg5-control-fail-open")
+        current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
         updater = QueueUpdater(
             GroundingLLMResponse(
@@ -556,13 +581,19 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=RuntimeError("private control detail"),
             ),
         ):
-            returned = await self.run_tool(current, "get_schema", "control-fail", SCHEMA)
+            returned = await self.run_tool(
+                current,
+                "submit_sql",
+                "control-fail",
+                "incorrect",
+                args={"sql": "SELECT 1"},
+            )
 
         self.assertIsNotNone(returned)
         final = load_runtime(current)
-        self.assertEqual(final.stage, "INITIAL_GROUNDING")
-        self.assertEqual(final.grounding_revision, 1)
-        control = current["tool_trajectory"][0][
+        self.assertEqual(final.stage, "SQL_ATTEMPT")
+        self.assertEqual(final.grounding_revision, 0)
+        control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertEqual(control["control_status"], "failed_open")
@@ -572,6 +603,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
     async def test_official_failure_transition_survives_service_boundary_failure(self):
         current = task_state("sg5-service-fail-open")
         current[grounding_callbacks.GROUNDING_RUNTIME_KEY] = runtime_payload()
+        add_bootstrap_trajectory(current)
         self.bind(current)
         with patch.object(
             grounding_callbacks,
@@ -589,7 +621,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         final = load_runtime(current)
         self.assertEqual(final.stage, "REPAIR")
         self.assertEqual(final.grounding_revision, 0)
-        control = current["tool_trajectory"][0][
+        control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertEqual(control["control_status"], "failed_open")

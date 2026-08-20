@@ -110,7 +110,7 @@ async def process_sql_grounding_observation(
             runtime,
             observation,
             affected_dimensions=affected_dimensions,
-            primary_grounding=grounding_input is not None,
+            bundled_grounding=grounding_input is not None,
         )
         changed = validate_grounding_state_transition(
             runtime.grounding_state,
@@ -122,6 +122,7 @@ async def process_sql_grounding_observation(
             observation,
             response,
             changed=changed,
+            bundled_grounding=grounding_input is not None,
         )
         candidate = GroundingRuntime(
             grounding_revision=runtime.grounding_revision + int(bool(changed)),
@@ -211,24 +212,50 @@ def _validate_service_inputs(
             raise SQLGroundingValidationError(
                 "Primary Grounding cannot combine affected_dimensions"
             )
-        if (
-            runtime.stage != "INITIAL_GROUNDING"
-            or observation.phase != 1
-            or observation.observation_type != "knowledge"
-            or observation.tool_name != "get_all_knowledge_definitions"
-        ):
-            raise SQLGroundingValidationError(
-                "Primary Grounding requires the final Phase-1 bootstrap Observation"
-            )
-        if set(grounding_input) != {
+        primary_fields = {
             "query",
             "schema",
             "column_meanings",
             "knowledge_definitions",
             "current_state",
-        }:
+        }
+        p2_fields = primary_fields | {"follow_up"}
+        repair_fields = primary_fields | {
+            "execute_sql_evidence",
+            "submit_failure",
+        }
+        p2_repair_fields = repair_fields | {"follow_up"}
+        primary = (
+            runtime.stage == "INITIAL_GROUNDING"
+            and observation.phase == 1
+            and observation.observation_type == "knowledge"
+            and observation.tool_name == "get_all_knowledge_definitions"
+        )
+        p2_follow_up = (
+            runtime.stage == "P2_INCREMENTAL"
+            and observation.phase == 2
+            and observation.observation_type == "p2_follow_up"
+        )
+        repair = (
+            runtime.stage == "REPAIR"
+            and observation.observation_type == "submission"
+            and observation.tool_name == "submit_sql"
+        )
+        if not primary and not p2_follow_up and not repair:
             raise SQLGroundingValidationError(
-                "Primary Grounding input must contain exactly five fields"
+                "bundled Grounding requires P1 Primary, P2 follow-up, or REPAIR"
+            )
+        if primary:
+            expected_fields = primary_fields
+        elif p2_follow_up:
+            expected_fields = p2_fields
+        elif observation.phase == 2:
+            expected_fields = p2_repair_fields
+        else:
+            expected_fields = repair_fields
+        if set(grounding_input) != expected_fields:
+            raise SQLGroundingValidationError(
+                "bundled Grounding input has an invalid field set"
             )
         if grounding_input.get("query") != context.current_query:
             raise SQLGroundingValidationError(
@@ -238,8 +265,15 @@ def _validate_service_inputs(
             mode="json"
         ):
             raise SQLGroundingValidationError(
-                "Primary Grounding current_state differs from Runtime"
+                "bundled Grounding current_state differs from Runtime"
             )
+        if p2_follow_up or (repair and observation.phase == 2):
+            if grounding_input.get("follow_up") != context.follow_up_query:
+                raise SQLGroundingValidationError(
+                    "P2 Grounding follow_up differs from ValidationContext"
+                )
+        if repair:
+            _validate_repair_bundle(grounding_input, observation)
     # The strict model performs de-duplication and canonical ordering checks.
     StateDiffAuthorization(
         stage=runtime.stage,
@@ -252,9 +286,9 @@ def _authorization_for_observation(
     observation: SQLGroundingObservation,
     *,
     affected_dimensions: tuple[GroundingDimension, ...],
-    primary_grounding: bool,
+    bundled_grounding: bool,
 ) -> StateDiffAuthorization:
-    if primary_grounding:
+    if bundled_grounding:
         return StateDiffAuthorization(
             stage=runtime.stage,
             authorized_dimensions=GROUNDING_DIMENSIONS,
@@ -289,6 +323,7 @@ def _validate_observation_specific_diff(
     response: GroundingLLMResponse,
     *,
     changed: tuple[GroundingDimension, ...],
+    bundled_grounding: bool,
 ) -> None:
     if (
         observation.observation_type in {"schema", "metadata"}
@@ -303,11 +338,18 @@ def _validate_observation_specific_diff(
             )
     if observation.observation_type in {
         "user_query",
-        "submission",
         "tool_error",
     } and changed:
         raise SQLGroundingValidationError(
             f"{observation.observation_type} cannot directly change Grounding State"
+        )
+    if (
+        observation.observation_type == "submission"
+        and changed
+        and not bundled_grounding
+    ):
+        raise SQLGroundingValidationError(
+            "submission cannot change Grounding State without a Repair bundle"
         )
     if (
         observation.observation_type == "submission"
@@ -316,6 +358,71 @@ def _validate_observation_specific_diff(
     ):
         raise SQLGroundingValidationError(
             "submission can change focus only after an official REPAIR transition"
+        )
+
+
+def _validate_repair_bundle(
+    grounding_input: Mapping[str, Any],
+    observation: SQLGroundingObservation,
+) -> None:
+    """Validate the bounded shape and exact current submit evidence."""
+
+    expected_event_fields = {"trajectory_index", "phase", "args", "result"}
+    execute_evidence = grounding_input.get("execute_sql_evidence")
+    submit_failure = grounding_input.get("submit_failure")
+    if not isinstance(execute_evidence, list) or not isinstance(
+        submit_failure, Mapping
+    ):
+        raise SQLGroundingValidationError("Repair evidence has an invalid shape")
+    indexes: list[int] = []
+    for event in execute_evidence:
+        if not isinstance(event, Mapping) or set(event) != expected_event_fields:
+            raise SQLGroundingValidationError(
+                "execute_sql Repair evidence has an invalid shape"
+            )
+        index = event.get("trajectory_index")
+        phase = event.get("phase")
+        args = event.get("args")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise SQLGroundingValidationError(
+                "execute_sql Repair evidence has an invalid trajectory index"
+            )
+        if (
+            isinstance(phase, bool)
+            or phase not in {1, 2}
+            or not isinstance(args, dict)
+        ):
+            raise SQLGroundingValidationError(
+                "execute_sql Repair evidence has invalid Official fields"
+            )
+        indexes.append(index)
+    if indexes != sorted(set(indexes)):
+        raise SQLGroundingValidationError(
+            "execute_sql Repair evidence must be unique and ordered"
+        )
+    if set(submit_failure) != expected_event_fields:
+        raise SQLGroundingValidationError(
+            "submit failure evidence has an invalid shape"
+        )
+    submit_phase = submit_failure.get("phase")
+    if isinstance(submit_phase, bool) or submit_phase != observation.phase:
+        raise SQLGroundingValidationError(
+            "submit failure phase differs from Observation"
+        )
+    if submit_failure.get("result") != observation.content:
+        raise SQLGroundingValidationError(
+            "submit failure result differs from Observation"
+        )
+    submit_index = submit_failure.get("trajectory_index")
+    if (
+        isinstance(submit_index, bool)
+        or not isinstance(submit_index, int)
+        or submit_index < 0
+        or (indexes and submit_index <= indexes[-1])
+        or not isinstance(submit_failure.get("args"), dict)
+    ):
+        raise SQLGroundingValidationError(
+            "submit failure evidence is not the ordered current Official result"
         )
 
 
