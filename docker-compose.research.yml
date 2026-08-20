@@ -26,4 +26,4 @@ services:
 
 volumes:
   postgresql_data_full_research:
-    name: bird_interact_adk_agent_research_postgresql_data_full
+    name: bird_interact_adk_agent_research_postgresql_data_full_v2_20260820
