@@ -59,7 +59,7 @@ OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13
 PROMPT_SHA = "da449b309cc875892fb70f62f7eff3780951c1a29b3c60236f588f6343aa160c"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "9c9a601d227adf3c4208d09f9fe21a3e417a53ff01f873f46c6adb7d8229483b"
+CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
 QUERY = "What is the maintenance cost?"
 
 
@@ -67,7 +67,7 @@ def environment(key_file: Path | None = None) -> dict[str, str]:
     result = {
         "GROUNDING_UPDATER_MODE": "llm",
         "GROUNDING_MODEL_PRESET": "glm52_high_32768",
-        "GROUNDING_TIMEOUT_SECONDS": "300",
+        "GROUNDING_TIMEOUT_SECONDS": "600",
         "GROUNDING_MAX_TOKENS": "32768",
         "GROUNDING_MAX_CALLS_PER_TASK": "4",
         "GROUNDING_PROMPT_SHA256": PROMPT_SHA,
@@ -235,8 +235,8 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(calls), 1)
         sent = calls[0]
-        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 300.0)
-        self.assertEqual(sent["timeout"], 300.0)
+        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
+        self.assertEqual(sent["timeout"], 600.0)
         self.assertEqual(sent["max_tokens"], 32_768)
         self.assertEqual(sent["num_retries"], 0)
         self.assertEqual(sent["max_retries"], 0)
@@ -254,11 +254,11 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         audit_text = audit_path.read_text(encoding="utf-8")
         self.assertNotIn("unit-test-credential", audit_text)
         request = json.loads(audit_text)["request"]
-        self.assertEqual(request["timeout_seconds"], 300.0)
+        self.assertEqual(request["timeout_seconds"], 600.0)
         self.assertEqual(request["tools"], [])
         self.assertIsNone(request["tool_choice"])
 
-    async def test_provider_and_outer_updater_timeouts_are_both_frozen_at_300(self):
+    async def test_provider_and_outer_updater_timeouts_are_both_frozen_at_600(self):
         class OfflineClient:
             async def complete(self, request):
                 del request
@@ -281,13 +281,13 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
                 GroundingRuntime(), observation(), original_query=QUERY
             )
 
-        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 300.0)
-        self.assertEqual(observed_timeouts, [300.0])
+        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
+        self.assertEqual(observed_timeouts, [600.0])
 
-        with self.assertRaisesRegex(ValueError, "300 seconds"):
+        with self.assertRaisesRegex(ValueError, "600 seconds"):
             load_sql_grounding_llm_config(
                 PROJECT_ROOT,
-                self.env | {"GROUNDING_TIMEOUT_SECONDS": "180"},
+                self.env | {"GROUNDING_TIMEOUT_SECONDS": "300"},
             )
 
     async def test_litellm_transformation_preserves_json_object_in_http_body(self):

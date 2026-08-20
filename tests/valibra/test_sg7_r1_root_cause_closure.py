@@ -55,7 +55,7 @@ FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
 PRE_PROMPT_FIX_R1_CONFIG_SHA = "af6c8d9378da50a2d167e6bdf6f247dc0978691a21dd82c2fcc6dadbd9ee0bf7"
 CANONICAL_PROMPT_90S_CONFIG_SHA = "f6f674db77cf2a811802155738e20297fc2ecbd0b86a5d369c20e3bf64c032f7"
-CONFIG_SHA = "9c9a601d227adf3c4208d09f9fe21a3e417a53ff01f873f46c6adb7d8229483b"
+CONFIG_SHA = "627e79e2bf4bf11f58e35b6ccb4d0b4004253191c50fbec529405a3c58e1440a"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -66,7 +66,7 @@ def _provider_environment() -> dict[str, str]:
     return {
         "GROUNDING_UPDATER_MODE": "llm",
         "GROUNDING_MODEL_PRESET": "glm52_high_32768",
-        "GROUNDING_TIMEOUT_SECONDS": "300",
+        "GROUNDING_TIMEOUT_SECONDS": "600",
         "GROUNDING_MAX_TOKENS": "32768",
         "GROUNDING_MAX_CALLS_PER_TASK": "4",
         "GROUNDING_PROMPT_SHA256": PROMPT_SHA,
@@ -561,7 +561,7 @@ class SG7R1EvidenceAndAuditTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(evaluate_first_submit_gate(partial, first_submit=True).open)
         self.assertTrue(evaluate_first_submit_gate(complete, first_submit=True).open)
-        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 300.0)
+        self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)
