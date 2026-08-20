@@ -55,10 +55,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8"
+PROMPT_SHA = "3bf5c2bea92725bde9965fad0f66d6bf429cfba7d7fd8f43ec9c2c84fbd79c2b"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61"
+CONFIG_SHA = "866d0e41c2be88d2cf5888f23cad8d8b5e4dc8b14f6220e38cfc9253189fb820"
 QUERY = "What is the maintenance cost?"
 
 
@@ -522,8 +522,8 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
             FORM_SHA,
         )
         self.assertIn('"targets"', SQL_GROUNDING_PROMPT)
-        self.assertIn('There is no field named "target".', SQL_GROUNDING_PROMPT)
-        self.assertIn('"targets" is always a JSON array', SQL_GROUNDING_PROMPT)
+        self.assertIn('不存在名为 "target" 的字段。', SQL_GROUNDING_PROMPT)
+        self.assertIn('"targets" 也必须是 JSON 数组', SQL_GROUNDING_PROMPT)
         self.assertNotIn("maintenance cost", SQL_GROUNDING_PROMPT.lower())
         self.assertNotIn("operational_metrics", SQL_GROUNDING_PROMPT.lower())
         report = sql_grounding_provider_health_report(PROJECT_ROOT, self.env)

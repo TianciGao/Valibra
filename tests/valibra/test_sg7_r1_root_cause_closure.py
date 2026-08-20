@@ -50,12 +50,12 @@ from valibra_agent.sql_grounding import updater as updater_module
 
 
 OLD_PROMPT_SHA = "312a5c019c68d09aaf3c54e3991ef381d4dc2ded7564fdb344bd7113305ac594"
-PROMPT_SHA = "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8"
+PROMPT_SHA = "3bf5c2bea92725bde9965fad0f66d6bf429cfba7d7fd8f43ec9c2c84fbd79c2b"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
 PRE_PROMPT_FIX_R1_CONFIG_SHA = "af6c8d9378da50a2d167e6bdf6f247dc0978691a21dd82c2fcc6dadbd9ee0bf7"
 CANONICAL_PROMPT_90S_CONFIG_SHA = "f6f674db77cf2a811802155738e20297fc2ecbd0b86a5d369c20e3bf64c032f7"
-CONFIG_SHA = "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61"
+CONFIG_SHA = "866d0e41c2be88d2cf5888f23cad8d8b5e4dc8b14f6220e38cfc9253189fb820"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -621,14 +621,14 @@ class SG7R1EvidenceAndAuditTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         for fragment in (
-            "exact lexical form",
+            "精确词法",
             "sqlglot 26.16.4",
             'expression.sql(dialect="postgres")',
-            "one ASCII space on both sides of",
-            "-> and ->>",
-            "Syntax-only example",
+            "两侧都必须各有一个 ASCII 空格",
+            "-> 和 ->>",
+            "仅用于展示语法的示例",
             "t.c -> 'key' ->> 'leaf'",
-            "formatting only",
+            "只展示格式",
         ):
             with self.subTest(prompt_fragment=fragment):
                 self.assertIn(fragment, SQL_GROUNDING_PROMPT)

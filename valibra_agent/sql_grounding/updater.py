@@ -72,69 +72,62 @@ _PRIVATE_KEY_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
-SQL_GROUNDING_PROMPT = """Fill the fixed Valibra SQL Grounding form from the bounded JSON input.
-Return exactly one JSON object and no prose, comments, Markdown other than the
-single transport fence allowed by the caller, or additional fields.
+SQL_GROUNDING_PROMPT = """请根据有界 JSON 输入填写固定的 Valibra SQL Grounding 表单。
+只返回一个 JSON 对象。不要返回说明文字、注释、调用方允许的单个传输代码围栏之外的
+Markdown，也不要添加额外字段。
 
-The output fields are exactly:
-- sql_grounding_state: tables, join_keys, column_mapping, domain_knowledge
+输出字段只能是：
+- sql_grounding_state：tables、join_keys、column_mapping、domain_knowledge
 - next_focus_dimension
 
-Exact output shape:
-- sql_grounding_state contains exactly:
-  - tables: null or an array of table-name strings
-  - join_keys: null or an array of relation-expression strings
-  - column_mapping: null or an array of objects containing exactly:
-    - phrase: one string
-    - targets: an array of one or more strings
-  - domain_knowledge: null or an array of objects containing exactly:
-    - kind: business_rule, runtime_state, or database_capability
-    - content: one string
-- next_focus_dimension is exactly one of tables, join_keys, column_mapping,
-  domain_knowledge, or none.
+精确输出结构：
+- sql_grounding_state 中只能包含：
+  - tables：null 或由表名字符串组成的数组
+  - join_keys：null 或由关联表达式字符串组成的数组
+  - column_mapping：null 或由对象组成的数组；每个对象只能包含：
+    - phrase：一个字符串
+    - targets：由一个或多个字符串组成的数组
+  - domain_knowledge：null 或由对象组成的数组；每个对象只能包含：
+    - kind：business_rule、runtime_state 或 database_capability
+    - content：一个字符串
+- next_focus_dimension 只能是 tables、join_keys、column_mapping、
+  domain_knowledge 或 none。
 
-Important structural rules:
-- The field name is exactly "targets", plural.
-- "targets" is always a JSON array, even when it contains one item.
-- There is no field named "target".
-- Do not add any fields not listed above.
+重要结构规则：
+- 字段名必须是复数形式 "targets"。
+- 即使只有一个元素，"targets" 也必须是 JSON 数组。
+- 不存在名为 "target" 的字段。
+- 不要添加以上未列出的任何字段。
 
-Rules for the persisted four-dimensional State:
-1. Use only real, fully qualified database identifiers already supported by the
-   latest legal Observation. Never persist shorthand aliases or invented names.
-2. join_keys and column_mapping targets are canonical PostgreSQL expressions
-   under Valibra's restricted field/relation expression contract. They are not
-   free SQL and cannot contain statements, comments, arbitrary functions, or
-   unapproved AST shapes.
-   Every emitted join_keys expression and column_mapping target must already be
-   in the exact lexical form produced by sqlglot 26.16.4 after parsing as
-   PostgreSQL and rendering with expression.sql(dialect="postgres"). Do not
-   emit an equivalent expression with different spacing or formatting. For
-   PostgreSQL JSON / JSONB operators, include one ASCII space on both sides of
-   -> and ->>. Syntax-only example: t.c -> 'key' ->> 'leaf'. This example shows
-   formatting only; never copy its identifiers or literals unless the current
-   legal Observation supports them.
-3. Every column_mapping.phrase is a non-empty verbatim substring of the original
-   Query or follow-up. Do not paraphrase the phrase.
-4. domain_knowledge.kind is exactly one of business_rule, runtime_state, or
-   database_capability. Every newly added or changed non-empty
-   domain_knowledge.content is copied verbatim from a canonical Official BIRD
-   knowledge statement present in the latest legal Observation. Existing
-   validated content may only be preserved unchanged. Never paraphrase or
-   invent knowledge.
-5. Preserve every existing dimension and item not affected by the latest legal
-   Observation. Do not clear or replace an unaffected dimension.
-6. null means not evaluated. [] means evaluated and not needed. A non-empty
-   array contains the validated result.
-7. In INITIAL_GROUNDING, if any dimension is null, next_focus_dimension must be
-   tables, join_keys, column_mapping, or domain_knowledge. When all four
-   dimensions are evaluated, next_focus_dimension must be none.
-8. In REPAIR, a completed State may focus any one dimension again. Use none only
-   when the latest legal Observation gives no clear need for more Grounding.
+持久化四维状态的规则：
+1. 只能使用最新合法观测（即输入中的 latest_observation）已经支持的真实、完全限定的数据库标识符。绝不能持久化
+   简写别名或臆造的名称。
+2. join_keys 和 column_mapping 的 targets 必须是符合 Valibra 受限字段/关联表达式合同的
+   规范化 PostgreSQL 表达式。它们不是自由 SQL，不能包含语句、注释、任意函数或未经
+   批准的 AST 结构。
+   输出的每个 join_keys 表达式和 column_mapping target，都必须已经采用 sqlglot 26.16.4
+   按 PostgreSQL 解析后、通过 expression.sql(dialect="postgres") 渲染所得的精确词法
+   形式。不要输出仅空格或格式不同的等价表达式。对于 PostgreSQL JSON / JSONB 运算符，
+   -> 和 ->> 的两侧都必须各有一个 ASCII 空格。仅用于展示语法的示例：
+   t.c -> 'key' ->> 'leaf'。这个示例只展示格式；除非当前合法观测支持其中的
+   标识符或字面量，否则绝不能复制它们。
+3. 每个 column_mapping.phrase 都必须是原始用户问题 original_query 或追问 follow_up 中
+   非空、逐字连续的子串。
+   不要改写 phrase。
+4. domain_knowledge.kind 只能是 business_rule、runtime_state 或 database_capability。
+   每个新增或修改后的非空 domain_knowledge.content，都必须逐字复制自最新合法观测中的
+   Official BIRD 规范知识陈述。已有且通过验证的 content 只能原样保留。
+   绝不能改写或臆造知识。
+5. 保留所有未受最新合法 Observation 影响的现有维度和条目。不要清空或替换未受影响的维度。
+6. null 表示尚未评估；[] 表示已经评估且不需要；非空数组包含通过验证的结果。
+7. 在 INITIAL_GROUNDING 阶段，只要任一维度仍为 null，next_focus_dimension 就必须是
+   tables、join_keys、column_mapping 或 domain_knowledge。四个维度全部完成评估后，
+   next_focus_dimension 必须是 none。
+8. 在 REPAIR 阶段，即使状态已经完整，也可以重新聚焦任一维度。只有当最新合法观测
+   没有给出明确的继续补充数据库 Grounding 信息的需要时，才使用 none。
 
-Do not output score, confidence, ambiguity, reasoning, an Evidence summary, an
-SQL plan, Bird-Coin, final SQL, a tool call, or a specific tool choice. The
-response proposes only the complete four-dimensional State and the next focus.
+不要输出 score、confidence、ambiguity、reasoning、Evidence 摘要、SQL plan、Bird-Coin、
+final SQL、tool call 或具体 tool choice。响应只能提出完整的四维状态和下一个聚焦维度。
 """
 
 SQL_GROUNDING_PROMPT_SHA256 = hashlib.sha256(

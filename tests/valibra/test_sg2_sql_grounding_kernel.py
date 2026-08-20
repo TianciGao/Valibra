@@ -42,9 +42,9 @@ FOLLOW_POWER = "also include current power"
 RATIO_RULE = "revenue impact ratio = maintenance cost / total revenue"
 UPDATED_RATIO_RULE = "revenue impact ratio uses adjusted maintenance cost"
 
-PROMPT_SHA = "67eaf7e875d6e79a082b93067e275aa93f9e49a72e2faef977644947be697dc8"
+PROMPT_SHA = "3bf5c2bea92725bde9965fad0f66d6bf429cfba7d7fd8f43ec9c2c84fbd79c2b"
 FORM_SHA = "2d60e788b2a3c1efc581f95945331a124805678fedc857bb2bc39f7462500406"
-CONFIG_SHA = "52c32a4feadd6193694cb45402bdcd65e8731266d059dcb04f1e5a43e5b9ef61"
+CONFIG_SHA = "866d0e41c2be88d2cf5888f23cad8d8b5e4dc8b14f6220e38cfc9253189fb820"
 
 KNOWN_TABLES = frozenset(
     {
@@ -265,16 +265,16 @@ class UpdaterContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(SQL_GROUNDING_FORM_SCHEMA["additionalProperties"])
         for phrase in (
-            "fully qualified database identifiers",
-            "verbatim substring",
+            "完全限定的数据库标识符",
+            "逐字连续的子串",
             "business_rule",
             "runtime_state",
             "database_capability",
-            "Do not output score",
-            "does not generate final SQL",
+            "不要输出 score",
+            "不生成 final SQL",
         ):
-            # The final-SQL boundary is written as "Do not output ... final SQL".
-            if phrase == "does not generate final SQL":
+            # final SQL 边界写成“不要输出……final SQL”。
+            if phrase == "不生成 final SQL":
                 self.assertIn("final SQL", SQL_GROUNDING_PROMPT)
             else:
                 self.assertIn(phrase, SQL_GROUNDING_PROMPT)
