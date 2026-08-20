@@ -1,0 +1,45 @@
+{
+  "bird_coin": {
+    "costs": [1.0, 1.0, 1.0],
+    "total": 3.0
+  },
+  "bootstrap_tools": [
+    "get_schema",
+    "get_all_column_meanings",
+    "get_all_knowledge_definitions"
+  ],
+  "external_calls": {
+    "benchmark": 0,
+    "database": 0,
+    "grounding_provider": 0,
+    "http": 0,
+    "main_provider": 0,
+    "user_simulator": 0
+  },
+  "git": {
+    "branch": "research/sql-grounding-v1",
+    "delivery": "explicit_publish_authorized; unrelated_sg7_drafts_excluded",
+    "start_head": "1cd06ad4f95308df48f2a035148d8fe564c9ec5f",
+    "upstream_head": "1cd06ad4f95308df48f2a035148d8fe564c9ec5f"
+  },
+  "invariants": {
+    "bootstrap_provider_calls_after_each_tool": 0,
+    "evidence_store_added": false,
+    "grounding_revision": 0,
+    "main_history_contains_raw_bootstrap_evidence": false,
+    "runtime_contract_changed": false,
+    "stage_2_started": false
+  },
+  "source_sha256": {
+    "tests/valibra/test_stage1_bootstrap_evidence.py": "ce72417af5b882ddb88746c326f6052adc9013a6c438f887feccef4d8821c870",
+    "valibra_agent/grounding_callbacks.py": "9d4c0d9bb892e8a2e30a8c99d42159878c982008dcf48d44748ea73e9b10269b"
+  },
+  "status": "pass",
+  "tests": {
+    "all_git_tracked_valibra": "428/428",
+    "discovery": "466/467; one unrelated untracked SG7 frozen-HEAD assertion",
+    "focused_stage1": "4/4",
+    "focused_sg3_sg7_regression": "85/85"
+  },
+  "timestamp_utc": "2026-08-20T11:56:00Z"
+}

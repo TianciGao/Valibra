@@ -158,6 +158,19 @@ _OFFICIAL_TOOL_ERROR_PREFIXES: Mapping[str, tuple[str, ...]] = {
 _FOLLOW_UP_PREFIX = "Follow-up question: "
 _BUDGET_PREFIX = "\nBudget remaining: "
 
+# Stage 1 bootstrap is deliberately a fixed Official-tool sequence.  Raw
+# results remain in Baseline's Official trajectory; they are never copied into
+# SQLGroundingState or another persistent evidence store.
+_BOOTSTRAP_TOOL_SEQUENCE: tuple[str, ...] = (
+    "get_schema",
+    "get_all_column_meanings",
+    "get_all_knowledge_definitions",
+)
+_BOOTSTRAP_MODEL_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_STORED"
+_BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
+    {"id", "knowledge", "description", "definition"}
+)
+
 
 class _PassthroughSQLGroundingUpdater:
     """Default SG4 updater: no I/O, no Provider, and no State guesswork."""
@@ -442,6 +455,7 @@ async def before_model_callback(
     request_before: str | None = None
     update_audit: dict[str, Any] | None = None
     control_audit: dict[str, Any] | None = None
+    bootstrap_tool: str | None = None
     view_audit: dict[str, Any] = {
         "mode": "active",
         "injected": False,
@@ -455,6 +469,12 @@ async def before_model_callback(
             update_audit = await _consume_bound_user_message(state, runtime)
             runtime, later_degraded = _ensure_runtime(state)
             degraded = degraded or later_degraded
+            if not degraded:
+                bootstrap_tool = _next_bootstrap_tool(
+                    state,
+                    runtime,
+                    llm_request,
+                )
             view = render_grounding_view(runtime.grounding_state)
             control_audit = _control_audit_for_runtime(
                 runtime,
@@ -566,6 +586,8 @@ async def before_model_callback(
         callback_context,
         llm_request,
     )
+    if bootstrap_tool is not None:
+        view_audit["bootstrap_tool_forced"] = bootstrap_tool
     try:
         request_after = _request_sha256(llm_request)
         view_audit["request_sha256_after"] = request_after
@@ -604,7 +626,17 @@ async def before_model_callback(
                 state,
                 _bounded_error_audit("before_model_audit", exc),
             )
-    return baseline_result
+    if baseline_result is not None or bootstrap_tool is None:
+        return baseline_result
+    try:
+        return _bootstrap_function_call_response(state, bootstrap_tool)
+    except Exception as exc:
+        if state is not None:
+            _append_error_audit(
+                state,
+                _bounded_error_audit("before_model_bootstrap", exc),
+            )
+        return None
 
 
 async def after_model_callback(
@@ -880,6 +912,8 @@ async def after_tool_callback(
     audit: dict[str, Any]
     control_audit: dict[str, Any] | None = None
     pending: _PendingToolCall | None = None
+    bootstrap_tool_result = False
+    bootstrap_tool_succeeded = False
     try:
         function_call_id = _require_function_call_id(tool_context)
         pending = _pop_pending(state, function_call_id)
@@ -899,53 +933,87 @@ async def after_tool_callback(
                 tool_name,
                 tool_response,
             )
-            observation = build_sql_grounding_observation(
-                task_id=_task_id(state),
-                phase=pending.phase_before,
-                sequence=_next_sequence(state),
-                observation_type=observation_type,
-                content=raw_content,
-                summary=f"official {tool_name} result observed",
-                tool_name=tool_name,
-                function_call_id=function_call_id,
-                private_raw_ref=private_ref,
-            )
             phase_after = _phase(
                 state.get("current_phase", pending.phase_before)
             )
-            if tool_name == "submit_sql":
-                result, follow_up_audit = await _handle_submit_observation(
-                    state,
-                    observation,
-                    pending=pending,
-                    phase_after=phase_after,
-                    observation_type=observation_type,
-                    tool_response=tool_response,
-                    private_ref=private_ref,
-                )
-            else:
-                result = await _handle_observation(state, observation)
-                follow_up_audit = None
-            runtime = result.runtime
-            audit = _observation_audit(result)
-            audit.update(
-                {
+            if _is_bootstrap_function_call(
+                state,
+                function_call_id=function_call_id,
+                tool_name=tool_name,
+            ):
+                bootstrap_tool_result = True
+                bootstrap_tool_succeeded = observation_type != "tool_error"
+                runtime, degraded = _ensure_runtime(state)
+                audit = {
+                    "service_status": (
+                        "stored_bootstrap_tool_error"
+                        if observation_type == "tool_error"
+                        else "stored_bootstrap_evidence"
+                    ),
                     "function_call_id": function_call_id,
                     "tool_name": tool_name,
+                    "observation_type": observation_type,
                     "phase_before": pending.phase_before,
                     "phase_after": phase_after,
                     "args_digest": pending.args_digest,
+                    "raw_digest": _sha256_text(canonical_json(raw_content)),
                     "private_raw_ref": private_ref,
                     "official_error": observation_type == "tool_error",
+                    "provider_attempted": False,
+                    **_runtime_audit(runtime),
                 }
-            )
-            if follow_up_audit is not None:
-                audit["p2_follow_up"] = follow_up_audit
-            control_audit = _control_audit_for_observation(
-                result,
-                gate_audit=pending.control_gate_audit,
-            )
-            _store_runtime(state, runtime)
+                control_audit = _control_audit_for_runtime(
+                    runtime,
+                    control_status="failed_open" if degraded else "succeeded",
+                    error_type="RuntimeValidationError" if degraded else None,
+                    gate_audit=pending.control_gate_audit,
+                )
+                _store_runtime(state, runtime)
+            else:
+                observation = build_sql_grounding_observation(
+                    task_id=_task_id(state),
+                    phase=pending.phase_before,
+                    sequence=_next_sequence(state),
+                    observation_type=observation_type,
+                    content=raw_content,
+                    summary=f"official {tool_name} result observed",
+                    tool_name=tool_name,
+                    function_call_id=function_call_id,
+                    private_raw_ref=private_ref,
+                )
+                if tool_name == "submit_sql":
+                    result, follow_up_audit = await _handle_submit_observation(
+                        state,
+                        observation,
+                        pending=pending,
+                        phase_after=phase_after,
+                        observation_type=observation_type,
+                        tool_response=tool_response,
+                        private_ref=private_ref,
+                    )
+                else:
+                    result = await _handle_observation(state, observation)
+                    follow_up_audit = None
+                runtime = result.runtime
+                audit = _observation_audit(result)
+                audit.update(
+                    {
+                        "function_call_id": function_call_id,
+                        "tool_name": tool_name,
+                        "phase_before": pending.phase_before,
+                        "phase_after": phase_after,
+                        "args_digest": pending.args_digest,
+                        "private_raw_ref": private_ref,
+                        "official_error": observation_type == "tool_error",
+                    }
+                )
+                if follow_up_audit is not None:
+                    audit["p2_follow_up"] = follow_up_audit
+                control_audit = _control_audit_for_observation(
+                    result,
+                    gate_audit=pending.control_gate_audit,
+                )
+                _store_runtime(state, runtime)
     except Exception as exc:
         _cleanup_pending_best_effort(state, tool_context)
         runtime, _ = _ensure_runtime(state)
@@ -1007,6 +1075,12 @@ async def after_tool_callback(
                         ),
                     ),
                 )
+    if bootstrap_tool_result:
+        return _bootstrap_model_visible_result(
+            _safe_tool_name(tool),
+            baseline_override,
+            succeeded=bootstrap_tool_succeeded,
+        )
     return baseline_override
 
 
@@ -1589,6 +1663,152 @@ def _provider_call_count(state: Any) -> int:
     return value
 
 
+def _request_exposes_bootstrap_tools(llm_request: Any) -> bool:
+    """Require the real ADK request to expose all three Official tools."""
+
+    tools = getattr(llm_request, "tools_dict", None)
+    return isinstance(tools, dict) and all(
+        tool_name in tools for tool_name in _BOOTSTRAP_TOOL_SEQUENCE
+    )
+
+
+def _next_bootstrap_tool(
+    state: Any,
+    runtime: GroundingRuntime,
+    llm_request: Any,
+) -> str | None:
+    """Return the next fixed Official bootstrap tool without persisting state."""
+
+    if (
+        not _is_real_provider_mode()
+        or runtime.stage != "INITIAL_GROUNDING"
+        or _phase(state.get("current_phase", 1)) != 1
+        or _provider_call_count(state) != 0
+        or not _request_exposes_bootstrap_tools(llm_request)
+    ):
+        return None
+    observed = tuple(
+        event["tool_name"]
+        for event in _completed_sql_grounding_trajectory(state)
+        if event["tool_name"] in _BOOTSTRAP_TOOL_SEQUENCE
+    )
+    expected_prefix = _BOOTSTRAP_TOOL_SEQUENCE[: len(observed)]
+    if observed != expected_prefix:
+        raise ValueError("Official bootstrap trajectory is duplicate or out of order")
+    if len(observed) == len(_BOOTSTRAP_TOOL_SEQUENCE):
+        return None
+    return _BOOTSTRAP_TOOL_SEQUENCE[len(observed)]
+
+
+def _bootstrap_function_call_response(state: Any, tool_name: str) -> Any:
+    """Return one deterministic ADK function call; Baseline runs the tool."""
+
+    if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
+        raise ValueError("unsupported bootstrap tool")
+    from google.adk.models.llm_response import LlmResponse as AdkLlmResponse
+    from google.genai import types as genai_types
+
+    return AdkLlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[
+                genai_types.Part(
+                    function_call=genai_types.FunctionCall(
+                        id=_bootstrap_function_call_id(state, tool_name),
+                        name=tool_name,
+                        args={},
+                    )
+                )
+            ],
+        )
+    )
+
+
+def _bootstrap_function_call_id(state: Any, tool_name: str) -> str:
+    if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
+        raise ValueError("unsupported bootstrap tool")
+    position = _BOOTSTRAP_TOOL_SEQUENCE.index(tool_name) + 1
+    call_suffix = _sha256_text(f"{_task_id(state)}:{position}")[:16]
+    return f"valibra-bootstrap-{position}-{call_suffix}"
+
+
+def _is_bootstrap_function_call(
+    state: Any,
+    *,
+    function_call_id: str,
+    tool_name: str,
+) -> bool:
+    return (
+        tool_name in _BOOTSTRAP_TOOL_SEQUENCE
+        and function_call_id == _bootstrap_function_call_id(state, tool_name)
+    )
+
+
+def _bootstrap_model_visible_result(
+    tool_name: str,
+    baseline_override: Any,
+    *,
+    succeeded: bool,
+) -> str:
+    """Expose only completion status and Baseline's budget note to Main."""
+
+    if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
+        raise ValueError("unsupported bootstrap tool")
+    budget_note = ""
+    if isinstance(baseline_override, str):
+        marker = "\n\n[SYSTEM NOTE:"
+        start = baseline_override.rfind(marker)
+        candidate = baseline_override[start:] if start >= 0 else ""
+        if candidate.endswith("]") and len(candidate) <= 256:
+            budget_note = candidate
+    status = "stored" if succeeded else "tool_error_stored"
+    return (
+        f"{_BOOTSTRAP_MODEL_VISIBLE_PREFIX}: {tool_name}; status={status}. "
+        "Full content is retained only in the Official tool trajectory."
+        f"{budget_note}"
+    )
+
+
+def _bootstrap_evidence_events(state: Any) -> tuple[dict[str, Any], ...]:
+    """Require one successful Official result for each fixed bootstrap tool."""
+
+    events = tuple(
+        event
+        for event in _completed_sql_grounding_trajectory(state)
+        if event["tool_name"] in _BOOTSTRAP_TOOL_SEQUENCE
+    )
+    observed = tuple(event["tool_name"] for event in events)
+    if observed != _BOOTSTRAP_TOOL_SEQUENCE:
+        raise ValueError("complete ordered bootstrap evidence is required")
+    if any(event["observation_type"] == "tool_error" for event in events):
+        raise ValueError("bootstrap evidence contains an Official tool error")
+    return events
+
+
+def _build_grounding_request(
+    state: Any,
+    *,
+    query: str,
+    runtime: GroundingRuntime,
+) -> dict[str, Any]:
+    """Rebuild the five-field Primary input ephemerally from Official facts."""
+
+    if not isinstance(query, str) or not query or query != query.strip():
+        raise ValueError("bounded original query is required")
+    events = _bootstrap_evidence_events(state)
+    by_tool = {event["tool_name"]: event["content"] for event in events}
+    _parse_schema_projection(by_tool["get_schema"])
+    _exact_all_column_meanings(by_tool["get_all_column_meanings"])
+    _exact_knowledge_definitions(by_tool["get_all_knowledge_definitions"])
+    return {
+        "query": query,
+        "schema": by_tool["get_schema"],
+        "column_meanings": by_tool["get_all_column_meanings"],
+        "knowledge_definitions": by_tool["get_all_knowledge_definitions"],
+        "current_state": runtime.grounding_state.model_dump(mode="json"),
+    }
+
+
 def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...]:
     """Reconstruct trusted evidence from Official events, never shadow presence."""
 
@@ -1596,7 +1816,7 @@ def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list):
         return ()
-    for event in trajectory:
+    for index, event in enumerate(trajectory):
         if not isinstance(event, dict):
             continue
         tool_name = event.get("tool")
@@ -1612,6 +1832,9 @@ def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...
                 "tool_name": tool_name,
                 "observation_type": observation_type,
                 "content": content,
+                "trajectory_index": index,
+                "private_raw_ref": f"session://tool_trajectory/{index}",
+                "raw_digest": _sha256_text(canonical_json(to_jsonable(content))),
             }
         )
     return tuple(result[-512:])
@@ -1638,6 +1861,18 @@ def _project_official_evidence(
         definition = _exact_knowledge_definition(content)
         if definition is not None:
             supported_knowledge.add(("business_rule", definition))
+        return
+    if (
+        observation_type == "knowledge"
+        and tool_name == "get_all_knowledge_definitions"
+    ):
+        try:
+            definitions = _exact_knowledge_definitions(content)
+        except ValueError:
+            return
+        supported_knowledge.update(
+            ("business_rule", definition) for definition in definitions
+        )
 
 
 def _parse_schema_projection(content: Any) -> tuple[frozenset[str], frozenset[str]]:
@@ -1730,6 +1965,75 @@ def _exact_knowledge_definition(content: Any) -> str | None:
     if len(definition) > 2_048:
         return None
     return definition
+
+
+def _exact_all_column_meanings(content: Any) -> dict[str, Any]:
+    """Validate the Official bulk metadata envelope without persisting it."""
+
+    value = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(
+                value,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("bulk column meanings must be strict JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("bulk column meanings must be a JSON object")
+    try:
+        normalized = json.loads(canonical_json(value))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("bulk column meanings must be finite JSON") from exc
+    if not isinstance(normalized, dict):
+        raise ValueError("bulk column meanings must be a JSON object")
+    return normalized
+
+
+def _exact_knowledge_definitions(content: Any) -> tuple[str, ...]:
+    """Recognize every definition in the Official bulk knowledge response."""
+
+    value = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(
+                value,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("bulk knowledge definitions must be strict JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError("bulk knowledge definitions must be a JSON list")
+    try:
+        canonical_json(value)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("bulk knowledge definitions must be finite JSON") from exc
+    definitions: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("each bulk knowledge entry must be an object")
+        if not set(item).issubset(_BULK_KNOWLEDGE_VISIBLE_FIELDS):
+            raise ValueError("bulk knowledge entry contains an unsupported field")
+        definition = _exact_knowledge_definition(item)
+        if definition is None:
+            raise ValueError("bulk knowledge entry has no canonical definition")
+        definitions.append(definition)
+    return tuple(definitions)
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
 
 
 def _ensure_runtime(state: Any) -> tuple[GroundingRuntime, bool]:
