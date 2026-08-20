@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
@@ -20,19 +22,24 @@ from valibra_agent.sql_grounding.models import (
     sql_grounding_state_sha256,
     validate_grounding_llm_response,
 )
+from valibra_agent.sql_grounding.observations import (
+    build_sql_grounding_observation,
+)
 from valibra_agent.sql_grounding.prompt_view import render_grounding_view
+from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
 from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_CONFIGURATION_SHA256,
     SQL_GROUNDING_FORM_SCHEMA,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT_SHA256,
+    GroundingUpdaterResult,
 )
 
 
 QUERY = "Show active artists and their revenue."
-PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+PROMPT_SHA = "53dd2dd1a527533af2b71c71851466915436110530f30d8edb2a247676058031"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
+CONFIG_SHA = "1d9dd853bcef4685979c2f01a8aea0b9bf09bae18d224d36eca92584b77da8e7"
 
 
 def complete_state() -> SQLGroundingState:
@@ -197,8 +204,192 @@ class ClarificationFormContractTests(unittest.TestCase):
             {"grounding_revision", "stage", "focus_dimension", "grounding_state"},
         )
 
+    def test_same_phase_question_must_be_unique_in_response_contract(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "question must be unique"):
+            GroundingLLMResponse(
+                sql_grounding_state=complete_state(),
+                user_clarification_requests=(
+                    UserClarificationRequest(
+                        phrase="active",
+                        kind="user_intent",
+                        question="What does active mean?",
+                    ),
+                    UserClarificationRequest(
+                        phrase="artists",
+                        kind="missing_knowledge",
+                        question="What does active mean?",
+                    ),
+                ),
+                next_focus_dimension="none",
+            )
+
+    def test_answered_clarification_survives_item_budget_before_state(self) -> None:
+        record = UserClarificationRecord(
+            phase=1,
+            phrase="active",
+            kind="user_intent",
+            question="What does active mean?",
+            answer="Use signed contracts only.",
+        )
+        rendered = render_grounding_view(
+            complete_state(),
+            clarifications=(record,),
+            max_items=1,
+        )
+        self.assertIn("[USER CLARIFICATIONS]", rendered.text)
+        self.assertIn("Use signed contracts only.", rendered.text)
+        self.assertEqual(rendered.included_items, 1)
+        self.assertEqual(rendered.omitted_items, 4)
+
+        constrained = render_grounding_view(
+            complete_state(),
+            clarifications=(record,),
+            max_chars=rendered.char_count,
+            max_tokens=rendered.token_count,
+        )
+        self.assertIn("[USER CLARIFICATIONS]", constrained.text)
+        self.assertIn("Use signed contracts only.", constrained.text)
+        self.assertEqual(constrained.included_items, 1)
+        self.assertEqual(constrained.omitted_items, 4)
+
+
+class IncompleteGroundingUpdater:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def propose(self, *args, **kwargs):
+        del args, kwargs
+        self.calls += 1
+        return GroundingUpdaterResult(
+            response=GroundingLLMResponse(
+                sql_grounding_state=SQLGroundingState(),
+                user_clarification_requests=(),
+                next_focus_dimension="tables",
+            ),
+            telemetry=GroundingLLMTelemetry(
+                attempted=True,
+                status="succeeded",
+                request_sha256="a" * 64,
+                response_sha256="b" * 64,
+                prompt_sha256=SQL_GROUNDING_PROMPT_SHA256,
+                form_schema_sha256=SQL_GROUNDING_FORM_SCHEMA_SHA256,
+                configuration_sha256=SQL_GROUNDING_CONFIGURATION_SHA256,
+            ),
+            transport_normalization="none",
+        )
+
 
 class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_phase_grounding_blocks_model_and_official_tools(self) -> None:
+        initial = GroundingRuntime()
+        current = {
+            "task_id": "grounding-failed-closed",
+            "current_phase": 1,
+            "phase1_completed": False,
+            "phase2_completed": False,
+            "task_done": False,
+            "budget_remaining": 10.0,
+            "initial_budget": 10.0,
+            "tool_trajectory": [],
+            "system_agent_llm_calls": [],
+            grounding_callbacks.GROUNDING_RUNTIME_KEY: initial.model_dump(mode="json"),
+        }
+        observation = build_sql_grounding_observation(
+            task_id=current["task_id"],
+            phase=1,
+            sequence=1,
+            observation_type="knowledge",
+            content="[]",
+            summary="complete Official bootstrap evidence observed",
+            tool_name="get_all_knowledge_definitions",
+            function_call_id="failed-closed-bootstrap-3",
+            private_raw_ref="session://tool_trajectory/2",
+        )
+        grounding_input = {
+            "query": QUERY,
+            "schema": "schema",
+            "column_meanings": "{}",
+            "knowledge_definitions": "[]",
+            "current_state": initial.grounding_state.model_dump(mode="json"),
+        }
+        updater = IncompleteGroundingUpdater()
+        context = ValidationContext(
+            current_query=QUERY,
+            latest_observation_id=observation.observation_id,
+            official_trajectory_observation_ids=(observation.observation_id,),
+        )
+        with (
+            patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+            patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater),
+            patch.object(
+                grounding_callbacks,
+                "load_sql_grounding_llm_config",
+                return_value=SimpleNamespace(max_calls_per_task=2),
+            ),
+            patch.object(
+                grounding_callbacks,
+                "_build_validation_context",
+                return_value=context,
+            ),
+        ):
+            first = await grounding_callbacks._handle_observation(
+                current,
+                observation,
+                grounding_input=grounding_input,
+            )
+            second = await grounding_callbacks._handle_observation(
+                current,
+                observation,
+                grounding_input=grounding_input,
+            )
+
+            self.assertEqual(first.service_status, "rejected")
+            self.assertEqual(second.service_status, "skipped_phase_grounding_terminal")
+            self.assertEqual(updater.calls, 1)
+            self.assertEqual(
+                current[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
+                1,
+            )
+            outcome = current[grounding_callbacks.GROUNDING_PHASE_OUTCOMES_KEY]["1"]
+            self.assertEqual(outcome["status"], "failed")
+            self.assertEqual(outcome["error_type"], "state_validation_failed")
+            self.assertEqual(outcome["grounding_revision"], 0)
+
+            model_result = await grounding_callbacks.before_model_callback(
+                SimpleNamespace(state=current),
+                request(),
+            )
+            self.assertIn(
+                "VALIBRA_SQL_GROUNDING_FAILED_CLOSED",
+                model_result.content.parts[0].text,
+            )
+            budget_before = current["budget_remaining"]
+            tool_context = SimpleNamespace(
+                state=current,
+                function_call_id="failed-closed-execute",
+                invocation_id="inv-failed-closed-execute",
+            )
+            denial = await grounding_callbacks.before_tool_callback(
+                SimpleNamespace(name="execute_sql"),
+                {"sql": "SELECT 1"},
+                tool_context,
+            )
+            self.assertEqual(
+                denial["status"],
+                "VALIBRA_SQL_GROUNDING_FAILED_CLOSED",
+            )
+            self.assertEqual(current["budget_remaining"], budget_before)
+            self.assertEqual(
+                await grounding_callbacks.after_tool_callback(
+                    SimpleNamespace(name="execute_sql"),
+                    {"sql": "SELECT 1"},
+                    tool_context,
+                    denial,
+                ),
+                denial,
+            )
+            self.assertEqual(current.get("tool_trajectory"), [])
+
     async def test_empty_clarifications_continue_directly_to_main(self) -> None:
         current = task_state("clarification-empty")
         original = copy.deepcopy(current[grounding_callbacks.GROUNDING_RUNTIME_KEY])

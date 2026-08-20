@@ -14,7 +14,9 @@ from valibra_agent.sql_grounding.models import (
     GroundingLLMResponse,
     GroundingRuntime,
     SQLGroundingState,
+    UserClarificationRecord,
     UserClarificationRequest,
+    sql_grounding_state_sha256,
 )
 from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
 from valibra_agent.sql_grounding.updater import (
@@ -35,9 +37,9 @@ from tests.valibra.test_stage3_submit_driven_repair import (
 
 
 FOLLOW_UP = "Now include the current power reading."
-PROMPT_SHA = "8f13e7ecc0551b2d940e22546889f6d19a908a380be43c1d50b4f1128bec2fb7"
+PROMPT_SHA = "53dd2dd1a527533af2b71c71851466915436110530f30d8edb2a247676058031"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "ee00b4d7190f6dd2041b0a0ddae6c2059fca5024a6c068b4269b85fc070e61d6"
+CONFIG_SHA = "1d9dd853bcef4685979c2f01a8aea0b9bf09bae18d224d36eca92584b77da8e7"
 P2_SUBMIT_RESPONSE = (
     f"passed\nFollow-up question: {FOLLOW_UP}\nBudget remaining: 4"
 )
@@ -183,10 +185,12 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "column_meanings",
                 "knowledge_definitions",
                 "current_state",
+                "user_clarifications",
             },
         )
         self.assertEqual(updater.inputs[0]["query"], QUERY)
         self.assertEqual(updater.inputs[0]["follow_up"], FOLLOW_UP)
+        self.assertEqual(updater.inputs[0]["user_clarifications"], [])
         self.assertEqual(
             state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
         )
@@ -195,7 +199,17 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             {"1": 1, "2": 1},
         )
         self.assertEqual(load_runtime(state).stage, "P2_INCREMENTAL")
+        self.assertEqual(
+            state[grounding_callbacks.GROUNDING_PHASE_OUTCOMES_KEY]["2"][
+                "status"
+            ],
+            "succeeded",
+        )
         self.assert_bootstrap_once(state)
+        frozen_runtime = load_runtime(state)
+        frozen_sha = sql_grounding_state_sha256(
+            frozen_runtime.grounding_state
+        )
 
         with self.provider_context(updater):
             await self.run_tool(
@@ -217,6 +231,11 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY], 2
         )
+        self.assertEqual(load_runtime(state), frozen_runtime)
+        self.assertEqual(
+            sql_grounding_state_sha256(load_runtime(state).grounding_state),
+            frozen_sha,
+        )
         with self.provider_context(updater):
             await self.run_tool(
                 state,
@@ -232,6 +251,32 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(updater.calls, 1)
         self.assertEqual(load_runtime(state).stage, "DONE")
+
+    async def test_p2_request_contains_answered_phase_one_clarification(self):
+        state = task_state("stage4a-p2-p1-clarification")
+        self.bind(state)
+        record = UserClarificationRecord(
+            phase=1,
+            phrase="maintenance cost",
+            kind="user_intent",
+            question="Which maintenance cost definition should be used?",
+            answer="Use the reported maintenance cost.",
+        )
+        grounding_callbacks._store_clarification_records(state, (record,))
+        updater = QueueUpdater(primary_state())
+
+        await self.enter_p2(state, updater)
+
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(
+            updater.inputs[0]["user_clarifications"],
+            [record.model_dump(mode="json")],
+        )
+        self.assertEqual(
+            state[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
+            {"1": 1, "2": 1},
+        )
+        self.assert_bootstrap_once(state)
 
     async def test_p2_submit_failures_never_trigger_grounding(self):
         state = task_state("stage4a-p2-no-repair")

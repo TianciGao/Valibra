@@ -66,7 +66,11 @@ def render_grounding_view(
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
-    items = _view_items(state) + _clarification_items(clarifications)
+    # Answered user clarifications are the highest-priority model-visible
+    # facts.  Select them before any four-dimensional State item so bounded
+    # views never discard a clarification merely to retain lower-priority
+    # database Grounding content.
+    items = _clarification_items(clarifications) + _view_items(state)
     maximum_kept = min(len(items), max_items)
     for kept in range(maximum_kept, -1, -1):
         text = _assemble(items[:kept], omitted=len(items) - kept)
@@ -142,10 +146,6 @@ def _clarification_items(
 
 def _assemble(items: list[tuple[str, str]], *, omitted: int) -> str:
     lines = [_HEADER]
-    for section, _ in _SECTIONS:
-        lines.extend(("", f"{section}:"))
-        section_items = [value for item_section, value in items if item_section == section]
-        lines.extend(f"- {value}" for value in section_items)
     clarification_items = [
         value for item_section, value in items
         if item_section == _CLARIFICATION_SECTION
@@ -153,6 +153,10 @@ def _assemble(items: list[tuple[str, str]], *, omitted: int) -> str:
     if clarification_items:
         lines.extend(("", _CLARIFICATION_SECTION))
         lines.extend(f"- {value}" for value in clarification_items)
+    for section, _ in _SECTIONS:
+        lines.extend(("", f"{section}:"))
+        section_items = [value for item_section, value in items if item_section == section]
+        lines.extend(f"- {value}" for value in section_items)
     if omitted:
         lines.extend(("", f"... omitted={omitted}"))
     return "\n".join(lines)

@@ -223,7 +223,18 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0),
             0,
         )
-        self.assertEqual(model.calls, 1)
+        # The offline updater deliberately leaves all four dimensions null.
+        # The phase therefore terminates fail-closed instead of falling
+        # through to the local Main model.
+        self.assertEqual(model.calls, 0)
+        phase_outcome = state[
+            grounding_callbacks.GROUNDING_PHASE_OUTCOMES_KEY
+        ]["1"]
+        self.assertEqual(phase_outcome["status"], "failed")
+        self.assertEqual(
+            phase_outcome["error_type"],
+            "state_validation_failed",
+        )
         self.assertEqual(state["budget_remaining"], 7.0)
         trajectory = state["tool_trajectory"]
         self.assertEqual([item["tool"] for item in trajectory], executions)
@@ -281,11 +292,14 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(SCHEMA_SENTINEL, model_visible)
         self.assertNotIn(MEANINGS_SENTINEL, model_visible)
         self.assertNotIn(KNOWLEDGE_SENTINEL, model_visible)
-        for tool_name in grounding_callbacks._BOOTSTRAP_TOOL_SEQUENCE:
-            self.assertIn(
-                f"{grounding_callbacks._BOOTSTRAP_MODEL_VISIBLE_PREFIX}: {tool_name}",
-                model_visible,
+        self.assertEqual(model.requests, [])
+        self.assertTrue(
+            any(
+                "VALIBRA_SQL_GROUNDING_FAILED_CLOSED"
+                in str(getattr(event, "content", ""))
+                for event in events
             )
+        )
 
         trajectory_only = json.dumps(trajectory, ensure_ascii=False, sort_keys=True)
         self.assertIn(SCHEMA_SENTINEL, trajectory_only)

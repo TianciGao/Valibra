@@ -318,6 +318,17 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(runtime.grounding_revision, 1)
         self.assertEqual(runtime.grounding_state, complete_state())
+        phase_outcome = session_state[
+            grounding_callbacks.GROUNDING_PHASE_OUTCOMES_KEY
+        ]["1"]
+        self.assertEqual(phase_outcome["status"], "succeeded")
+        self.assertEqual(phase_outcome["grounding_revision"], 1)
+        self.assertEqual(
+            phase_outcome["state_sha256"],
+            grounding_callbacks.sql_grounding_state_sha256(
+                runtime.grounding_state
+            ),
+        )
         self.assertEqual(runtime.stage, "SQL_ATTEMPT")
         self.assertEqual(runtime.focus_dimension, "none")
         self.assertEqual(session_state["budget_remaining"], 7.0)

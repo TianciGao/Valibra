@@ -25,6 +25,7 @@ from valibra_agent.sql_grounding.models import (
     ContractModel,
     GroundingLLMResponse,
     GroundingRuntime,
+    UserClarificationRecord,
     canonical_json,
 )
 from valibra_agent.sql_grounding.observations import (
@@ -107,7 +108,9 @@ Markdown，也不要添加额外字段。
 持久化四维状态的规则：
 1. Phase 1 Primary Grounding 输入恰好包含 query、schema、column_meanings、
    knowledge_definitions、current_state 五个字段。Phase 2 Follow-up Grounding 复用相同五字段，
-   并增加 follow_up 字段。每个 phase 只调用一次 Grounding，整个 task 最多两次。
+   并增加 follow_up 和 user_clarifications 字段；user_clarifications 只包含 Phase 1 已经由
+   用户回答的独立澄清记录，不属于四维 State。每个 phase 只调用一次 Grounding，整个 task
+   最多两次。
    请在本 phase 的唯一一次响应中完成 tables、join_keys、column_mapping、domain_knowledge
    四个维度；不得等待 execute_sql 或 submit_sql 后再次修订 Grounding State。
 2. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
@@ -651,7 +654,7 @@ def _validated_bundled_grounding_input(
         "knowledge_definitions",
         "current_state",
     }
-    p2_fields = primary_fields | {"follow_up"}
+    p2_fields = primary_fields | {"follow_up", "user_clarifications"}
     expected = p2_fields if runtime.stage == "P2_INCREMENTAL" else primary_fields
     if not isinstance(grounding_input, Mapping) or set(grounding_input) != expected:
         telemetry = _telemetry(
@@ -682,6 +685,43 @@ def _validated_bundled_grounding_input(
             or payload["follow_up"] != follow_up_query
             or follow_up_query != follow_up_query.strip()
         ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        clarifications = payload["user_clarifications"]
+        if not isinstance(clarifications, list):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        try:
+            records = tuple(
+                UserClarificationRecord.model_validate(item)
+                for item in clarifications
+            )
+        except ValidationError as exc:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError(
+                "grounding_bundle_invalid", telemetry
+            ) from exc
+        if any(item.phase != 1 or item.answer is None for item in records):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        questions = [item.question for item in records]
+        if len(questions) != len(set(questions)):
             telemetry = _telemetry(
                 attempted=False,
                 status="rejected",

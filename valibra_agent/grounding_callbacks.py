@@ -103,6 +103,8 @@ GROUNDING_SUPPRESSED_BOOTSTRAP_KEY = (
     "valibra:sql_grounding_suppressed_bootstrap"
 )
 GROUNDING_CLARIFICATIONS_KEY = "valibra:user_clarifications"
+GROUNDING_PHASE_OUTCOMES_KEY = "valibra:sql_grounding_phase_outcomes"
+GROUNDING_FAILED_CLOSED_CALLS_KEY = "valibra:sql_grounding_failed_closed_calls"
 
 # The frozen P6 export module imports these names at module load.  They are
 # retained only so that historical, read-only export code remains importable;
@@ -134,6 +136,8 @@ _MAX_GATE_AUDITS = 64
 _MAX_TOOL_AUDITS = 64
 _MAX_SUPPRESSED_BOOTSTRAP = 64
 _MAX_CLARIFICATION_RECORDS = 16
+_MAX_PHASE_OUTCOMES = 2
+_MAX_FAILED_CLOSED_CALLS = 64
 _MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
 _MAX_ACTIVE_TASK_SYNCHRONIZERS = 512
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -142,6 +146,11 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _BLOCKED_SUBMIT_STATUS = "VALIBRA_FIRST_SUBMIT_BLOCKED"
 _BLOCKED_SUBMIT_GUIDANCE = (
     "Complete the pending Valibra user clarification before retrying submit_sql."
+)
+_GROUNDING_FAILED_CLOSED_STATUS = "VALIBRA_SQL_GROUNDING_FAILED_CLOSED"
+_GROUNDING_FAILED_CLOSED_GUIDANCE = (
+    "A valid SQL Grounding State was not established for this phase. "
+    "Main SQL generation and Official tools are disabled without retry or fallback."
 )
 
 _TOOL_OBSERVATION_TYPES: Mapping[str, ObservationType] = {
@@ -476,15 +485,112 @@ class _SuppressedBootstrapCall:
 
 
 @dataclass(frozen=True, slots=True)
+class _PhaseGroundingOutcome:
+    """One immutable phase terminal outside the four-dimensional Runtime."""
+
+    phase: Literal[1, 2]
+    status: Literal["succeeded", "failed"]
+    observation_id: str
+    error_type: str | None
+    provider_attempted: bool
+    grounding_revision: int
+    state_sha256: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "status": self.status,
+            "observation_id": self.observation_id,
+            "error_type": self.error_type,
+            "provider_attempted": self.provider_attempted,
+            "grounding_revision": self.grounding_revision,
+            "state_sha256": self.state_sha256,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_PhaseGroundingOutcome":
+        required = {
+            "phase",
+            "status",
+            "observation_id",
+            "error_type",
+            "provider_attempted",
+            "grounding_revision",
+            "state_sha256",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid phase Grounding outcome")
+        record = cls(**payload)
+        if record.phase not in (1, 2):
+            raise ValueError("invalid phase Grounding outcome phase")
+        if record.status not in {"succeeded", "failed"}:
+            raise ValueError("invalid phase Grounding outcome status")
+        if not _IDENTIFIER_RE.fullmatch(record.observation_id):
+            raise ValueError("invalid phase Grounding observation_id")
+        if record.status == "succeeded" and record.error_type is not None:
+            raise ValueError("successful phase Grounding cannot have an error")
+        if record.status == "failed":
+            if not isinstance(record.error_type, str) or not _IDENTIFIER_RE.fullmatch(
+                record.error_type
+            ):
+                raise ValueError("failed phase Grounding requires a bounded error")
+        if not isinstance(record.provider_attempted, bool):
+            raise ValueError("invalid phase Grounding attempted flag")
+        if (
+            isinstance(record.grounding_revision, bool)
+            or not isinstance(record.grounding_revision, int)
+            or record.grounding_revision < 0
+        ):
+            raise ValueError("invalid phase Grounding revision")
+        if not re.fullmatch(r"[0-9a-f]{64}", record.state_sha256):
+            raise ValueError("invalid phase Grounding State SHA")
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class _FailedClosedToolCall:
+    """Exact ADK pairing for one tool denied by a failed phase terminal."""
+
+    function_call_id: str
+    tool_name: str
+    phase: Literal[1, 2]
+    response_sha256: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "function_call_id": self.function_call_id,
+            "tool_name": self.tool_name,
+            "phase": self.phase,
+            "response_sha256": self.response_sha256,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_FailedClosedToolCall":
+        required = {"function_call_id", "tool_name", "phase", "response_sha256"}
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid failed-closed tool record")
+        record = cls(**payload)
+        if not _IDENTIFIER_RE.fullmatch(record.function_call_id):
+            raise ValueError("invalid failed-closed function_call_id")
+        if not record.tool_name or len(record.tool_name) > 64:
+            raise ValueError("invalid failed-closed tool name")
+        if record.phase not in (1, 2):
+            raise ValueError("invalid failed-closed phase")
+        if not re.fullmatch(r"[0-9a-f]{64}", record.response_sha256):
+            raise ValueError("invalid failed-closed response SHA")
+        return record
+
+
+@dataclass(frozen=True, slots=True)
 class _ObservationResult:
     runtime: GroundingRuntime
     service_status: str
     observation: SQLGroundingObservation
     service_result: SQLGroundingServiceResult | None = None
     control_events: tuple[dict[str, str], ...] = ()
-    control_status: Literal["not_applicable", "succeeded", "failed_open"] = (
-        "not_applicable"
-    )
+    control_status: Literal[
+        "not_applicable", "succeeded", "failed_open", "failed_closed"
+    ] = "not_applicable"
     control_error_type: str | None = None
     official_outcome: str | None = None
 
@@ -518,6 +624,7 @@ async def before_model_callback(
     control_audit: dict[str, Any] | None = None
     bootstrap_tool: str | None = None
     pending_clarification: UserClarificationRecord | None = None
+    phase_failure: _PhaseGroundingOutcome | None = None
     view_audit: dict[str, Any] = {
         "mode": "active",
         "injected": False,
@@ -531,7 +638,8 @@ async def before_model_callback(
             update_audit = await _consume_bound_user_message(state, runtime)
             runtime, later_degraded = _ensure_runtime(state)
             degraded = degraded or later_degraded
-            if not degraded:
+            phase_failure = _phase_grounding_failure(state)
+            if not degraded and phase_failure is None:
                 bootstrap_tool = _next_bootstrap_tool(
                     state,
                     runtime,
@@ -590,7 +698,26 @@ async def before_model_callback(
                         "control_hint_injected": False,
                     }
                 )
-            if not degraded:
+            if phase_failure is not None:
+                view_audit.update(
+                    {
+                        "injection_status": "failed_closed",
+                        "error_type": phase_failure.error_type,
+                        "failed_closed_phase": phase_failure.phase,
+                        "phase_grounding_observation_id": (
+                            phase_failure.observation_id
+                        ),
+                    }
+                )
+                control_audit.update(
+                    {
+                        "control_status": "failed_closed",
+                        "control_hint_injected": False,
+                        "injection_status": "failed_closed",
+                        "error_type": phase_failure.error_type,
+                    }
+                )
+            if not degraded and phase_failure is None:
                 injection = _inject_active_grounding_context(
                     llm_request,
                     view_text=view.text,
@@ -693,6 +820,8 @@ async def before_model_callback(
                 state,
                 _bounded_error_audit("before_model_audit", exc),
             )
+    if phase_failure is not None:
+        return _failed_closed_model_response(phase_failure)
     if baseline_result is not None:
         return baseline_result
     if bootstrap_tool is not None:
@@ -747,6 +876,47 @@ async def before_tool_callback(
     state = getattr(tool_context, "state", None)
     tool_name = _safe_tool_name(tool)
     control_gate_audit: dict[str, Any] | None = None
+    if state is not None:
+        failure = _phase_grounding_failure(state)
+        if failure is not None:
+            response = _failed_closed_response(failure)
+            try:
+                function_call_id = _require_function_call_id(tool_context)
+                _add_failed_closed_call(
+                    state,
+                    _FailedClosedToolCall(
+                        function_call_id=function_call_id,
+                        tool_name=tool_name,
+                        phase=failure.phase,
+                        response_sha256=_sha256_text(canonical_json(response)),
+                    ),
+                )
+                _upsert_tool_callback_audit(
+                    state,
+                    function_call_id,
+                    shadow_audit={
+                        "service_status": "failed_closed_phase_grounding",
+                        "function_call_id": function_call_id,
+                        "tool_name": tool_name,
+                        "phase_before": failure.phase,
+                        "provider_attempted": False,
+                        "official_tool_executed": False,
+                        "error_type": failure.error_type,
+                        "grounding_revision": failure.grounding_revision,
+                        "state_sha256": failure.state_sha256,
+                    },
+                    control_audit=None,
+                )
+            except Exception as exc:
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit(
+                        "before_tool_failed_closed",
+                        exc,
+                        function_call_id=_valid_context_identifier(tool_context),
+                    ),
+                )
+            return response
     if (
         state is not None
         and tool_name in _BOOTSTRAP_TOOL_SEQUENCE
@@ -973,6 +1143,32 @@ async def after_tool_callback(
     if (
         state is not None
         and function_call_id is not None
+        and _failed_closed_call_present(state, function_call_id)
+    ):
+        try:
+            blocked = _pop_failed_closed_call(state, function_call_id)
+            if blocked is None:
+                raise ValueError("exact failed-closed tool record disappeared")
+            if _safe_tool_name(tool) != blocked.tool_name:
+                raise ValueError("failed-closed tool name mismatch")
+            if _sha256_text(canonical_json(to_jsonable(tool_response))) != (
+                blocked.response_sha256
+            ):
+                raise ValueError("failed-closed response mismatch")
+            return tool_response
+        except Exception as exc:
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "after_tool_failed_closed",
+                    exc,
+                    function_call_id=function_call_id,
+                ),
+            )
+            return tool_response
+    if (
+        state is not None
+        and function_call_id is not None
         and _suppressed_bootstrap_present(state, function_call_id)
     ):
         try:
@@ -1087,6 +1283,7 @@ async def after_tool_callback(
     pending: _PendingToolCall | None = None
     bootstrap_tool_result = False
     bootstrap_tool_succeeded = False
+    phase_grounding_observation: SQLGroundingObservation | None = None
     try:
         function_call_id = _require_function_call_id(tool_context)
         pending = _pop_pending(state, function_call_id)
@@ -1134,12 +1331,8 @@ async def after_tool_callback(
                 bootstrap_tool_result = True
                 bootstrap_tool_succeeded = observation_type != "tool_error"
                 runtime, degraded = _ensure_runtime(state)
-                if (
-                    bootstrap_tool_succeeded
-                    and tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]
-                    and not degraded
-                ):
-                    observation = build_sql_grounding_observation(
+                if tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]:
+                    phase_grounding_observation = build_sql_grounding_observation(
                         task_id=_task_id(state),
                         phase=pending.phase_before,
                         sequence=_next_sequence(state),
@@ -1150,6 +1343,14 @@ async def after_tool_callback(
                         function_call_id=function_call_id,
                         private_raw_ref=private_ref,
                     )
+                if (
+                    bootstrap_tool_succeeded
+                    and tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]
+                    and not degraded
+                ):
+                    observation = phase_grounding_observation
+                    if observation is None:
+                        raise RuntimeError("Primary Grounding Observation is unavailable")
                     bound = _ACTIVE_TURN_MESSAGE.get()
                     if bound is None or bound.task_id != _task_id(state):
                         raise ValueError(
@@ -1174,6 +1375,22 @@ async def after_tool_callback(
                         gate_audit=pending.control_gate_audit,
                     )
                 else:
+                    if (
+                        phase_grounding_observation is not None
+                        and _is_real_provider_mode()
+                    ):
+                        _record_phase_grounding_outcome(
+                            state,
+                            observation=phase_grounding_observation,
+                            runtime=runtime,
+                            status="failed",
+                            error_type=(
+                                "RuntimeValidationError"
+                                if degraded
+                                else "BootstrapToolError"
+                            ),
+                            provider_attempted=False,
+                        )
                     audit = {
                         "service_status": (
                             "stored_bootstrap_tool_error"
@@ -1248,6 +1465,22 @@ async def after_tool_callback(
     except Exception as exc:
         _cleanup_pending_best_effort(state, tool_context)
         runtime, _ = _ensure_runtime(state)
+        if (
+            phase_grounding_observation is not None
+            and _is_real_provider_mode()
+            and _phase_grounding_outcomes(state).get(
+                str(phase_grounding_observation.phase)
+            )
+            is None
+        ):
+            _record_phase_grounding_outcome(
+                state,
+                observation=phase_grounding_observation,
+                runtime=runtime,
+                status="failed",
+                error_type=type(exc).__name__[:128],
+                provider_attempted=False,
+            )
         audit = {
             "service_status": "failed_open",
             "function_call_id": _valid_context_identifier(tool_context),
@@ -1328,6 +1561,12 @@ async def on_tool_error_callback(
     if state is None:
         return None
     function_call_id = _valid_context_identifier(tool_context)
+    if (
+        function_call_id is not None
+        and _failed_closed_call_present(state, function_call_id)
+    ):
+        _pop_failed_closed_call(state, function_call_id)
+        return None
     if (
         function_call_id is not None
         and _suppressed_bootstrap_present(state, function_call_id)
@@ -1510,6 +1749,7 @@ async def _handle_submit_observation(
     follow_up_audit: dict[str, Any] | None = None
     final_runtime = transitioned
     if event == "official_p2_follow_up":
+        follow_up_observation: SQLGroundingObservation | None = None
         try:
             follow_up = _extract_submit_follow_up(tool_response)
             follow_up_observation = build_sql_grounding_observation(
@@ -1541,6 +1781,15 @@ async def _handle_submit_observation(
             final_runtime = follow_up_result.runtime
             follow_up_audit = _observation_audit(follow_up_result)
         except Exception as exc:
+            if follow_up_observation is not None and _is_real_provider_mode():
+                _record_phase_grounding_outcome(
+                    state,
+                    observation=follow_up_observation,
+                    runtime=transitioned,
+                    status="failed",
+                    error_type=type(exc).__name__[:128],
+                    provider_attempted=False,
+                )
             return (
                 _ObservationResult(
                     runtime=transitioned,
@@ -1587,6 +1836,35 @@ async def _handle_observation(
         )
         _store_runtime(state, result.runtime)
         return result
+
+
+def _failed_phase_grounding_result(
+    state: Any,
+    *,
+    runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+    service_status: str,
+    error_type: str,
+    provider_attempted: bool,
+    service_result: SQLGroundingServiceResult | None = None,
+) -> _ObservationResult:
+    if _is_real_provider_mode():
+        _record_phase_grounding_outcome(
+            state,
+            observation=observation,
+            runtime=runtime,
+            status="failed",
+            error_type=error_type,
+            provider_attempted=provider_attempted,
+        )
+    return _ObservationResult(
+        runtime=runtime,
+        service_status=service_status,
+        observation=observation,
+        service_result=service_result,
+        control_status="failed_closed",
+        control_error_type=error_type,
+    )
 
 
 async def _handle_observation_serialized(
@@ -1637,6 +1915,25 @@ async def _handle_observation_serialized(
             observation=observation,
         )
     provider_mode = _is_real_provider_mode()
+    if provider_mode:
+        existing_outcome = _phase_grounding_outcomes(state).get(
+            str(observation.phase)
+        )
+        if existing_outcome is not None:
+            return _ObservationResult(
+                runtime=active_runtime,
+                service_status="skipped_phase_grounding_terminal",
+                observation=observation,
+                control_status=(
+                    "failed_closed"
+                    if existing_outcome.status == "failed"
+                    else "failed_open"
+                ),
+                control_error_type=(
+                    existing_outcome.error_type
+                    or "PhaseGroundingAlreadySucceeded"
+                ),
+            )
     try:
         updater = _resolve_sql_grounding_updater()
         if provider_mode:
@@ -1645,31 +1942,34 @@ async def _handle_observation_serialized(
             phase_calls = _provider_phase_call_count(state, observation.phase)
             expected_phase_calls = 0
             if phase_calls != expected_phase_calls:
-                return _ObservationResult(
+                return _failed_phase_grounding_result(
+                    state,
                     runtime=active_runtime,
-                    service_status="skipped_bundled_call_sequence",
                     observation=observation,
-                    control_status="failed_open",
-                    control_error_type="BundledProviderCallSequenceError",
+                    service_status="skipped_bundled_call_sequence",
+                    error_type="BundledProviderCallSequenceError",
+                    provider_attempted=False,
                 )
             if llm_config.max_calls_per_task != _MAX_PROVIDER_CALLS_PER_TASK:
-                return _ObservationResult(
+                return _failed_phase_grounding_result(
+                    state,
                     runtime=active_runtime,
-                    service_status="degraded_configuration",
                     observation=observation,
-                    control_status="failed_open",
-                    control_error_type="ConfiguredProviderCallLimit",
+                    service_status="degraded_configuration",
+                    error_type="ConfiguredProviderCallLimit",
+                    provider_attempted=False,
                 )
             if (
                 calls >= _MAX_PROVIDER_CALLS_PER_TASK
                 or phase_calls >= _MAX_PROVIDER_CALLS_PER_PHASE
             ):
-                return _ObservationResult(
+                return _failed_phase_grounding_result(
+                    state,
                     runtime=active_runtime,
-                    service_status="skipped_provider_call_limit",
                     observation=observation,
-                    control_status="failed_open",
-                    control_error_type="ProviderCallLimit",
+                    service_status="skipped_provider_call_limit",
+                    error_type="ProviderCallLimit",
+                    provider_attempted=False,
                 )
             if synchronization.provider_slot_reserved:
                 raise RuntimeError("duplicate same-task Provider reservation")
@@ -1678,12 +1978,13 @@ async def _handle_observation_serialized(
             # committed only if telemetry confirms that an HTTP attempt began.
             synchronization.provider_slot_reserved = True
     except Exception as exc:
-        return _ObservationResult(
+        return _failed_phase_grounding_result(
+            state,
             runtime=active_runtime,
-            service_status="degraded_configuration",
             observation=observation,
-            control_status="failed_open",
-            control_error_type=type(exc).__name__[:128],
+            service_status="degraded_configuration",
+            error_type=type(exc).__name__[:128],
+            provider_attempted=False,
         )
     try:
         try:
@@ -1698,21 +1999,25 @@ async def _handle_observation_serialized(
         finally:
             synchronization.provider_slot_reserved = False
     except Exception as exc:
-        return _ObservationResult(
+        return _failed_phase_grounding_result(
+            state,
             runtime=active_runtime,
-            service_status="degraded_service_boundary",
             observation=observation,
-            control_status="failed_open",
-            control_error_type=type(exc).__name__[:128],
+            service_status="degraded_service_boundary",
+            error_type=type(exc).__name__[:128],
+            provider_attempted=False,
         )
     if service_result.llm_telemetry.attempted and provider_mode:
         _record_provider_call(state, observation.phase)
     candidate = service_result.runtime
     control_events: tuple[dict[str, str], ...] = ()
-    control_status: Literal["not_applicable", "succeeded", "failed_open"]
+    control_status: Literal[
+        "not_applicable", "succeeded", "failed_open", "failed_closed"
+    ]
     control_error_type: str | None = None
     if service_result.state_update.status in {"accepted", "noop"}:
         control_status = "succeeded"
+        clarifications_before = _clarification_records(state)
         try:
             if service_result.response is not None:
                 _register_clarification_requests(
@@ -1724,12 +2029,38 @@ async def _handle_observation_serialized(
                 state,
                 candidate,
             )
+            if provider_mode:
+                _record_phase_grounding_outcome(
+                    state,
+                    observation=observation,
+                    runtime=candidate,
+                    status="succeeded",
+                    provider_attempted=service_result.llm_telemetry.attempted,
+                )
         except Exception as exc:
-            control_status = "failed_open"
-            control_error_type = type(exc).__name__[:128]
+            _store_clarification_records(state, clarifications_before)
+            return _failed_phase_grounding_result(
+                state,
+                runtime=active_runtime,
+                observation=observation,
+                service_status="rejected_phase_finalization",
+                error_type=type(exc).__name__[:128],
+                provider_attempted=service_result.llm_telemetry.attempted,
+                service_result=service_result,
+            )
     else:
-        control_status = "failed_open"
-        control_error_type = service_result.state_update.error_type
+        return _failed_phase_grounding_result(
+            state,
+            runtime=active_runtime,
+            observation=observation,
+            service_status=service_result.state_update.status,
+            error_type=(
+                service_result.state_update.error_type
+                or "GroundingStateNotEstablished"
+            ),
+            provider_attempted=service_result.llm_telemetry.attempted,
+            service_result=service_result,
+        )
     return _ObservationResult(
         runtime=candidate,
         service_status=service_result.state_update.status,
@@ -2191,6 +2522,167 @@ def _record_clarification_answer(
     _store_clarification_records(state, tuple(records))
 
 
+def _phase_grounding_outcomes(
+    state: Any,
+) -> dict[str, _PhaseGroundingOutcome]:
+    payload = state.get(GROUNDING_PHASE_OUTCOMES_KEY, {})
+    if not isinstance(payload, dict) or len(payload) > _MAX_PHASE_OUTCOMES:
+        raise ValueError("invalid phase Grounding outcome store")
+    records: dict[str, _PhaseGroundingOutcome] = {}
+    for key, value in payload.items():
+        if key not in {"1", "2"}:
+            raise ValueError("invalid phase Grounding outcome key")
+        record = _PhaseGroundingOutcome.from_json(value)
+        if str(record.phase) != key:
+            raise ValueError("phase Grounding outcome key mismatch")
+        records[key] = record
+    return records
+
+
+def _store_phase_grounding_outcomes(
+    state: Any,
+    records: Mapping[str, _PhaseGroundingOutcome],
+) -> None:
+    if len(records) > _MAX_PHASE_OUTCOMES or any(
+        key not in {"1", "2"} for key in records
+    ):
+        raise ValueError("invalid phase Grounding outcomes")
+    state[GROUNDING_PHASE_OUTCOMES_KEY] = {
+        key: _PhaseGroundingOutcome.from_json(records[key].to_json()).to_json()
+        for key in sorted(records)
+    }
+
+
+def _record_phase_grounding_outcome(
+    state: Any,
+    *,
+    observation: SQLGroundingObservation,
+    runtime: GroundingRuntime,
+    status: Literal["succeeded", "failed"],
+    error_type: str | None = None,
+    provider_attempted: bool,
+) -> _PhaseGroundingOutcome:
+    if status == "succeeded" and (
+        not runtime.grounding_state.all_dimensions_evaluated
+        or runtime.focus_dimension != "none"
+    ):
+        raise ValueError("successful phase Grounding requires a complete State")
+    record = _PhaseGroundingOutcome(
+        phase=observation.phase,
+        status=status,
+        observation_id=observation.observation_id,
+        error_type=error_type,
+        provider_attempted=provider_attempted,
+        grounding_revision=runtime.grounding_revision,
+        state_sha256=sql_grounding_state_sha256(runtime.grounding_state),
+    )
+    record = _PhaseGroundingOutcome.from_json(record.to_json())
+    records = _phase_grounding_outcomes(state)
+    key = str(observation.phase)
+    existing = records.get(key)
+    if existing is not None:
+        if existing == record:
+            return existing
+        raise ValueError("phase Grounding outcome is immutable")
+    records[key] = record
+    _store_phase_grounding_outcomes(state, records)
+    return record
+
+
+def _phase_grounding_failure(
+    state: Any,
+    phase: Literal[1, 2] | None = None,
+) -> _PhaseGroundingOutcome | None:
+    selected_phase = phase or _phase(state.get("current_phase", 1))
+    record = _phase_grounding_outcomes(state).get(str(selected_phase))
+    return record if record is not None and record.status == "failed" else None
+
+
+def _failed_closed_response(
+    failure: _PhaseGroundingOutcome,
+) -> dict[str, Any]:
+    return {
+        "status": _GROUNDING_FAILED_CLOSED_STATUS,
+        "phase": failure.phase,
+        "error_type": failure.error_type,
+        "guidance": _GROUNDING_FAILED_CLOSED_GUIDANCE,
+    }
+
+
+def _failed_closed_model_response(
+    failure: _PhaseGroundingOutcome,
+) -> Any:
+    from google.adk.models.llm_response import LlmResponse as AdkLlmResponse
+    from google.genai import types as genai_types
+
+    return AdkLlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[
+                genai_types.Part.from_text(
+                    text=(
+                        f"{_GROUNDING_FAILED_CLOSED_STATUS}: phase={failure.phase}. "
+                        f"{_GROUNDING_FAILED_CLOSED_GUIDANCE}"
+                    )
+                )
+            ],
+        )
+    )
+
+
+def _load_failed_closed_calls(
+    state: Any,
+) -> dict[str, _FailedClosedToolCall]:
+    payload = state.get(GROUNDING_FAILED_CLOSED_CALLS_KEY, {})
+    if not isinstance(payload, dict) or len(payload) > _MAX_FAILED_CLOSED_CALLS:
+        raise ValueError("invalid failed-closed call store")
+    records: dict[str, _FailedClosedToolCall] = {}
+    for key, value in payload.items():
+        record = _FailedClosedToolCall.from_json(value)
+        if key != record.function_call_id:
+            raise ValueError("failed-closed call key mismatch")
+        records[key] = record
+    return records
+
+
+def _store_failed_closed_calls(
+    state: Any,
+    records: Mapping[str, _FailedClosedToolCall],
+) -> None:
+    if len(records) > _MAX_FAILED_CLOSED_CALLS:
+        raise ValueError("failed-closed call store is full")
+    state[GROUNDING_FAILED_CLOSED_CALLS_KEY] = {
+        key: _FailedClosedToolCall.from_json(records[key].to_json()).to_json()
+        for key in sorted(records)
+    }
+
+
+def _add_failed_closed_call(
+    state: Any,
+    record: _FailedClosedToolCall,
+) -> None:
+    records = _load_failed_closed_calls(state)
+    if record.function_call_id in records:
+        raise ValueError("duplicate failed-closed function_call_id")
+    records[record.function_call_id] = record
+    _store_failed_closed_calls(state, records)
+
+
+def _pop_failed_closed_call(
+    state: Any,
+    function_call_id: str,
+) -> _FailedClosedToolCall | None:
+    records = _load_failed_closed_calls(state)
+    record = records.pop(function_call_id, None)
+    _store_failed_closed_calls(state, records)
+    return record
+
+
+def _failed_closed_call_present(state: Any, function_call_id: str) -> bool:
+    payload = state.get(GROUNDING_FAILED_CLOSED_CALLS_KEY, {})
+    return isinstance(payload, dict) and function_call_id in payload
+
+
 def _bootstrap_function_call_id(state: Any, tool_name: str) -> str:
     if tool_name not in _BOOTSTRAP_TOOL_SEQUENCE:
         raise ValueError("unsupported bootstrap tool")
@@ -2340,9 +2832,15 @@ def _build_p2_grounding_request(
         raise ValueError("P2 Grounding requires P2_INCREMENTAL")
     if not isinstance(follow_up, str) or not follow_up or follow_up != follow_up.strip():
         raise ValueError("bounded P2 follow-up is required")
+    answered_clarifications = [
+        item.model_dump(mode="json")
+        for item in _clarification_records(state)
+        if item.phase == 1 and item.answer is not None
+    ]
     return {
         **_build_grounding_request(state, query=query, runtime=runtime),
         "follow_up": follow_up,
+        "user_clarifications": answered_clarifications,
     }
 
 
@@ -2738,7 +3236,9 @@ def _control_audit_for_observation(
 def _control_audit_for_runtime(
     runtime: GroundingRuntime,
     *,
-    control_status: Literal["not_applicable", "succeeded", "failed_open"],
+    control_status: Literal[
+        "not_applicable", "succeeded", "failed_open", "failed_closed"
+    ],
     error_type: str | None = None,
     events: tuple[dict[str, str], ...] = (),
     gate_audit: dict[str, Any] | None = None,

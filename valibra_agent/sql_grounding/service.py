@@ -15,6 +15,7 @@ from valibra_agent.sql_grounding.models import (
     GroundingRuntime,
     SQLGroundingValidationError,
     StateDiffAuthorization,
+    UserClarificationRecord,
     ValidationContext,
     sql_grounding_state_sha256,
     validate_grounding_llm_response,
@@ -216,7 +217,7 @@ def _validate_service_inputs(
             "knowledge_definitions",
             "current_state",
         }
-        p2_fields = primary_fields | {"follow_up"}
+        p2_fields = primary_fields | {"follow_up", "user_clarifications"}
         primary = (
             runtime.stage == "INITIAL_GROUNDING"
             and observation.phase == 1
@@ -254,6 +255,24 @@ def _validate_service_inputs(
             if grounding_input.get("follow_up") != context.follow_up_query:
                 raise SQLGroundingValidationError(
                     "P2 Grounding follow_up differs from ValidationContext"
+                )
+            clarifications = grounding_input.get("user_clarifications")
+            if not isinstance(clarifications, list):
+                raise SQLGroundingValidationError(
+                    "P2 Grounding user_clarifications must be a list"
+                )
+            records = tuple(
+                UserClarificationRecord.model_validate(item)
+                for item in clarifications
+            )
+            if any(item.phase != 1 or item.answer is None for item in records):
+                raise SQLGroundingValidationError(
+                    "P2 Grounding may include only answered Phase-1 clarifications"
+                )
+            questions = [item.question for item in records]
+            if len(questions) != len(set(questions)):
+                raise SQLGroundingValidationError(
+                    "P2 Grounding clarification questions must be unique"
                 )
     # The strict model performs de-duplication and canonical ordering checks.
     StateDiffAuthorization(

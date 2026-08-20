@@ -443,9 +443,11 @@ class GroundingLLMResponse(ContractModel):
         cls,
         value: tuple[UserClarificationRequest, ...],
     ) -> tuple[UserClarificationRequest, ...]:
-        keys = [(item.phrase, item.kind, item.question) for item in value]
-        if len(keys) != len(set(keys)):
-            raise ValueError("user_clarification_requests must be unique")
+        questions = [item.question for item in value]
+        if len(questions) != len(set(questions)):
+            raise ValueError(
+                "user_clarification_requests.question must be unique within a phase"
+            )
         return value
 
 
