@@ -124,13 +124,13 @@ Markdown，也不要添加额外字段。
    column_mapping；只有 metadata 明确证明前一轮有误时，才能小范围修正 tables、join_keys。
    响应必须让 tables、join_keys、column_mapping 都成为数组，domain_knowledge 保持原值，
    user_clarification_requests 必须为空，next_focus_dimension 必须为 domain_knowledge。
-4. Knowledge Grounding 的阶段 evidence 只有 knowledge_definitions 和当前 mapping 相关的
-   relevant_column_meanings。主要更新 domain_knowledge，必要时可定向修正 column_mapping；
+4. Knowledge Grounding 的阶段 evidence 只有 knowledge_definitions 和当前候选表范围内完整的
+   relevant_column_meanings。主要更新 domain_knowledge，必要时可在候选表内定向修正 column_mapping；
    tables、join_keys 必须保持不变。响应必须把四维都评估为数组，next_focus_dimension 必须
    为 none。只有这一阶段可以产生 user_clarification_requests。
 5. 如果同一 phase 有澄清问题，调用方会先收集全部回答，再至多调用一次
-   Clarification Patch。该请求只含本 phase clarification_qa 及受影响 phrase 的
-   relevant_column_meanings / relevant_knowledge_definitions。它只能修改受回答影响的
+   Clarification Patch。该请求只含本 phase clarification_qa、当前候选表范围内完整的
+   relevant_column_meanings 及受影响的 relevant_knowledge_definitions。它只能修改受回答影响的
    column_mapping / domain_knowledge；不得修改 tables、join_keys 或无关 mapping；不得再次
    产生澄清问题，next_focus_dimension 必须为 none。
 6. P2 从 P1 最终 State 增量开始并复用 task-level bootstrap evidence，不从空 State 重建，

@@ -712,6 +712,170 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected_knowledge.state_update.status, "rejected")
         self.assertEqual(rejected_knowledge.runtime, current)
 
+    async def test_knowledge_can_replace_a_with_unmapped_candidate_table_field_b(
+        self,
+    ):
+        query = "Show the asset identifier and reported maintenance cost."
+        rule = "Reported maintenance cost is stored in payload cost reported."
+        schema = """CREATE TABLE operational_metrics (
+  asset_id TEXT,
+  maintcost NUMERIC,
+  payload JSONB
+);"""
+        meanings = json.dumps(
+            {
+                "stage2|operational_metrics|asset_id": "Stable asset identifier.",
+                "stage2|operational_metrics|maintcost": "Legacy maintenance cost.",
+                "stage2|operational_metrics|payload": {
+                    "column_meaning": "Structured maintenance data.",
+                    "fields_meaning": {
+                        "cost": {"reported": "Reported maintenance cost."}
+                    },
+                },
+                "stage2|unrelated_table|other_column": "Must remain excluded.",
+            },
+            sort_keys=True,
+        )
+        definitions = json.dumps(
+            [{"id": "rule-reported", "definition": rule}],
+            sort_keys=True,
+        )
+        mapping_a = (
+            ColumnMapping(
+                phrase="asset identifier",
+                targets=("operational_metrics.asset_id",),
+            ),
+            ColumnMapping(
+                phrase="reported maintenance cost",
+                targets=("operational_metrics.maintcost",),
+            ),
+        )
+        mapping_b = (
+            mapping_a[0],
+            ColumnMapping(
+                phrase="reported maintenance cost",
+                targets=(
+                    "operational_metrics.payload -> 'cost' ->> 'reported'",
+                ),
+            ),
+        )
+        before_state = SQLGroundingState(
+            tables=("operational_metrics",),
+            join_keys=(),
+            column_mapping=mapping_a,
+        )
+        runtime = GroundingRuntime(
+            grounding_revision=2,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="domain_knowledge",
+            grounding_state=before_state,
+        )
+        trajectory = [
+            {
+                "type": "tool",
+                "tool": "get_schema",
+                "phase": 1,
+                "args": {},
+                "result": schema,
+            },
+            {
+                "type": "tool",
+                "tool": "get_all_column_meanings",
+                "phase": 1,
+                "args": {},
+                "result": meanings,
+            },
+            {
+                "type": "tool",
+                "tool": "get_all_knowledge_definitions",
+                "phase": 1,
+                "args": {},
+                "result": definitions,
+            },
+        ]
+        request_payload = grounding_callbacks._build_staged_grounding_request(
+            {"tool_trajectory": trajectory},
+            call_kind="knowledge",
+            query=query,
+            runtime=runtime,
+            phase=1,
+        )
+        relevant = request_payload["relevant_column_meanings"]
+        self.assertIn("stage2|operational_metrics|maintcost", relevant)
+        self.assertIn("stage2|operational_metrics|payload", relevant)
+        self.assertNotIn("stage2|unrelated_table|other_column", relevant)
+
+        observation = build_sql_grounding_observation(
+            task_id="stage2-knowledge-a-to-b",
+            phase=1,
+            sequence=3,
+            observation_type="knowledge",
+            content=definitions,
+            summary="Official knowledge evidence observed",
+            tool_name="get_all_knowledge_definitions",
+            function_call_id="stage2-a-to-b-knowledge",
+            private_raw_ref="session://tool_trajectory/2",
+        )
+        context = ValidationContext(
+            current_query=query,
+            latest_observation_id=observation.observation_id,
+            official_trajectory_observation_ids=(observation.observation_id,),
+            known_tables=frozenset({"operational_metrics"}),
+            known_columns=frozenset(
+                {
+                    "operational_metrics.asset_id",
+                    "operational_metrics.maintcost",
+                    "operational_metrics.payload",
+                }
+            ),
+            supported_json_paths=frozenset(
+                {
+                    ("operational_metrics.payload", ("cost",)),
+                    ("operational_metrics.payload", ("cost", "reported")),
+                }
+            ),
+            supported_domain_knowledge=frozenset({("business_rule", rule)}),
+        )
+        candidate = before_state.model_copy(
+            update={
+                "column_mapping": mapping_b,
+                "domain_knowledge": (
+                    DomainKnowledge(kind="business_rule", content=rule),
+                ),
+            }
+        )
+        result = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context,
+            SQLGroundingUpdater(
+                CapturingClient(
+                    GroundingLLMResponse(
+                        sql_grounding_state=candidate,
+                        user_clarification_requests=(),
+                        next_focus_dimension="none",
+                    )
+                )
+            ),
+            grounding_input=request_payload,
+        )
+        self.assertEqual(result.state_update.status, "accepted")
+        self.assertEqual(
+            result.state_update.changed_dimensions,
+            ("column_mapping", "domain_knowledge"),
+        )
+        self.assertEqual(result.runtime.grounding_revision, 3)
+        self.assertEqual(
+            result.runtime.grounding_state.tables,
+            before_state.tables,
+        )
+        self.assertEqual(
+            result.runtime.grounding_state.join_keys,
+            before_state.join_keys,
+        )
+        self.assertEqual(result.runtime.grounding_state.column_mapping, mapping_b)
+        self.assertEqual(result.runtime.grounding_state.column_mapping[0], mapping_a[0])
+
     def test_json_paths_require_exact_fields_meaning_projection(self):
         known_columns = {
             "operational_metrics.maintcost",

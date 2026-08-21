@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 
 from valibra_agent import grounding_callbacks
 from valibra_agent.sql_grounding.models import (
+    ColumnMapping,
     GroundingLLMResponse,
     GroundingRuntime,
     SQLGroundingState,
@@ -38,9 +40,9 @@ from tests.valibra.test_stage3_submit_driven_repair import bootstrap_trajectory
 
 
 QUERY = "Show active artists and their revenue."
-PROMPT_SHA = "c35709ee2759a867c9dab3918a14b4c16205f7312395ae801efeb2dbf3904a4d"
+PROMPT_SHA = "812a189320a2f77efed13c99f5f4ba56538570542e341e46167d36f3b2a6f9d6"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "9e5bd50997b57fccb3e69b83836b8479a891367d610b1d718dd55337122eb5e5"
+CONFIG_SHA = "a507a6f3513e53d4c8c784589d15679569070b14251500e74ae77d4597dcf143"
 
 
 def complete_state() -> SQLGroundingState:
@@ -308,7 +310,195 @@ class ClarificationPatchUpdater:
         )
 
 
+class ReplacingClarificationPatchUpdater(ClarificationPatchUpdater):
+    def __init__(self, corrected_state: SQLGroundingState) -> None:
+        super().__init__()
+        self.corrected_state = corrected_state
+
+    async def propose(self, runtime, *args, **kwargs):
+        del runtime, args
+        self.calls += 1
+        self.inputs.append(copy.deepcopy(kwargs["grounding_input"]))
+        return GroundingUpdaterResult(
+            response=GroundingLLMResponse(
+                sql_grounding_state=self.corrected_state,
+                user_clarification_requests=(),
+                next_focus_dimension="none",
+            ),
+            telemetry=GroundingLLMTelemetry(
+                attempted=True,
+                status="succeeded",
+                request_sha256="e" * 64,
+                response_sha256="f" * 64,
+                prompt_sha256=SQL_GROUNDING_PROMPT_SHA256,
+                form_schema_sha256=SQL_GROUNDING_FORM_SCHEMA_SHA256,
+                configuration_sha256=SQL_GROUNDING_CONFIGURATION_SHA256,
+            ),
+            transport_normalization="none",
+        )
+
+
 class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clarification_replaces_a_with_candidate_table_field_b_once(
+        self,
+    ) -> None:
+        query = "Show active artists and their revenue."
+        schema = """CREATE TABLE artists (
+  active_flag BOOLEAN,
+  revenue NUMERIC,
+  status_label TEXT
+);
+CREATE TABLE unrelated (
+  decoy TEXT
+);"""
+        meanings = json.dumps(
+            {
+                "clarification|artists|active_flag": "True for active artists.",
+                "clarification|artists|revenue": "Booked artist revenue.",
+                "clarification|artists|status_label": "Legacy status text.",
+                "clarification|unrelated|decoy": "Must remain excluded.",
+            },
+            sort_keys=True,
+        )
+        mapping_a = (
+            ColumnMapping(phrase="active", targets=("artists.status_label",)),
+            ColumnMapping(phrase="revenue", targets=("artists.revenue",)),
+        )
+        mapping_b = (
+            ColumnMapping(phrase="active", targets=("artists.active_flag",)),
+            mapping_a[1],
+        )
+        initial_state = SQLGroundingState(
+            tables=("artists",),
+            join_keys=(),
+            column_mapping=mapping_a,
+            domain_knowledge=(),
+        )
+        current = task_state("clarification-a-to-b")
+        pending_runtime = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=initial_state,
+        )
+        current.update(
+            {
+                grounding_callbacks.GROUNDING_RUNTIME_KEY: pending_runtime.model_dump(
+                    mode="json"
+                ),
+                grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY: 3,
+                grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY: {
+                    "1": 3,
+                    "2": 0,
+                },
+                "tool_trajectory": [
+                    {
+                        "type": "tool",
+                        "tool": "get_schema",
+                        "phase": 1,
+                        "args": {},
+                        "result": schema,
+                    },
+                    {
+                        "type": "tool",
+                        "tool": "get_all_column_meanings",
+                        "phase": 1,
+                        "args": {},
+                        "result": meanings,
+                    },
+                    {
+                        "type": "tool",
+                        "tool": "get_all_knowledge_definitions",
+                        "phase": 1,
+                        "args": {},
+                        "result": "[]",
+                    },
+                ],
+            }
+        )
+        clarification = UserClarificationRequest(
+            phrase="active",
+            kind="user_intent",
+            question="Should active mean the boolean active flag?",
+        )
+        grounding_callbacks._register_clarification_requests(
+            current,
+            phase=1,
+            requests=(clarification,),
+        )
+        updater = ReplacingClarificationPatchUpdater(
+            initial_state.model_copy(update={"column_mapping": mapping_b})
+        )
+        token = grounding_callbacks._bind_turn_message(
+            current["task_id"], "a-interact", query
+        )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater),
+                patch.object(
+                    grounding_callbacks,
+                    "load_sql_grounding_llm_config",
+                    return_value=SimpleNamespace(max_calls_per_task=8),
+                ),
+            ):
+                forced = await grounding_callbacks.before_model_callback(
+                    SimpleNamespace(state=current),
+                    request(),
+                )
+                function_call = forced.content.parts[0].function_call
+                context = SimpleNamespace(
+                    state=current,
+                    function_call_id=function_call.id,
+                    invocation_id="inv-clarification-a-to-b",
+                )
+                await grounding_callbacks.before_tool_callback(
+                    SimpleNamespace(name="ask_user"),
+                    {"question": function_call.args["question"]},
+                    context,
+                )
+                await grounding_callbacks.after_tool_callback(
+                    SimpleNamespace(name="ask_user"),
+                    {"question": function_call.args["question"]},
+                    context,
+                    "Yes, use the boolean active flag.",
+                )
+        finally:
+            grounding_callbacks._reset_turn_message(token)
+
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(
+            current[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
+            4,
+        )
+        self.assertEqual(
+            current[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
+            {"1": 4, "2": 0},
+        )
+        relevant = updater.inputs[0]["relevant_column_meanings"]
+        self.assertIn("clarification|artists|status_label", relevant)
+        self.assertIn("clarification|artists|active_flag", relevant)
+        self.assertIn("clarification|artists|revenue", relevant)
+        self.assertNotIn("clarification|unrelated|decoy", relevant)
+        final_runtime = GroundingRuntime.model_validate(
+            current[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        self.assertEqual(final_runtime.grounding_revision, 4)
+        self.assertEqual(final_runtime.stage, "SQL_ATTEMPT")
+        self.assertEqual(
+            final_runtime.grounding_state.tables,
+            initial_state.tables,
+        )
+        self.assertEqual(
+            final_runtime.grounding_state.join_keys,
+            initial_state.join_keys,
+        )
+        self.assertEqual(final_runtime.grounding_state.column_mapping, mapping_b)
+        self.assertEqual(
+            final_runtime.grounding_state.column_mapping[1],
+            mapping_a[1],
+        )
+
     async def test_failed_phase_grounding_blocks_model_and_official_tools(self) -> None:
         initial = GroundingRuntime()
         current = {

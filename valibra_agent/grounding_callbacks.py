@@ -3310,37 +3310,16 @@ def _project_column_meanings(
     return json.loads(canonical_json(result))
 
 
-def _mapping_referenced_columns(runtime: GroundingRuntime) -> frozenset[str]:
-    result: set[str] = set()
-    for mapping in runtime.grounding_state.column_mapping or ():
-        for target in mapping.targets:
-            try:
-                expression = sqlglot.parse_one(target, read="postgres")
-            except ParseError:
-                continue
-            for column in expression.find_all(exp.Column):
-                qualifier = ".".join(
-                    part
-                    for part in (column.catalog, column.db, column.table)
-                    if part
-                )
-                if qualifier and column.name:
-                    result.add(f"{qualifier}.{column.name}")
-    return frozenset(result)
-
-
 def _relevant_mapping_column_meanings(
     content: Any,
     runtime: GroundingRuntime,
 ) -> dict[str, Any]:
+    """Expose all Official meanings inside the candidate-table boundary."""
+
     tables = runtime.grounding_state.tables
     if tables is None:
         raise ValueError("relevant metadata requires evaluated tables")
-    return _project_column_meanings(
-        content,
-        tables=tables,
-        columns=_mapping_referenced_columns(runtime),
-    )
+    return _project_column_meanings(content, tables=tables)
 
 
 def _relevant_clarification_column_meanings(
@@ -3348,39 +3327,14 @@ def _relevant_clarification_column_meanings(
     runtime: GroundingRuntime,
     records: tuple[UserClarificationRecord, ...],
 ) -> dict[str, Any]:
+    """Expose candidate-table meanings so a clarification can replace A with B."""
+
+    if not records:
+        raise ValueError("clarification metadata requires answered records")
     tables = runtime.grounding_state.tables
     if tables is None:
         raise ValueError("clarification metadata requires evaluated tables")
-    affected = {item.phrase for item in records}
-    columns: set[str] = set()
-    for mapping in runtime.grounding_state.column_mapping or ():
-        if mapping.phrase not in affected:
-            continue
-        temporary = runtime.model_copy(
-            update={
-                "grounding_state": runtime.grounding_state.model_copy(
-                    update={"column_mapping": (mapping,)}
-                )
-            }
-        )
-        columns.update(_mapping_referenced_columns(temporary))
-    projected = _project_column_meanings(
-        content,
-        tables=tables,
-        columns=frozenset(columns),
-    )
-    if projected:
-        return projected
-    # No existing candidate may be exactly why clarification was required.
-    # A lexical slice remains deterministic and cannot authorize identifiers;
-    # the full ValidationContext still performs the authoritative check.
-    candidate_meanings = _project_column_meanings(content, tables=tables)
-    needles = _clarification_needles(records)
-    return {
-        key: value
-        for key, value in candidate_meanings.items()
-        if any(needle in canonical_json({key: value}).casefold() for needle in needles)
-    }
+    return _project_column_meanings(content, tables=tables)
 
 
 def _relevant_clarification_knowledge(
