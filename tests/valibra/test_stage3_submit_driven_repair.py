@@ -31,9 +31,9 @@ from valibra_agent.sql_grounding.updater import (
 
 QUERY = "Show the maintenance cost."
 RULE = "Use maintcost as reported."
-PROMPT_SHA = "53dd2dd1a527533af2b71c71851466915436110530f30d8edb2a247676058031"
+PROMPT_SHA = "c35709ee2759a867c9dab3918a14b4c16205f7312395ae801efeb2dbf3904a4d"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "1d9dd853bcef4685979c2f01a8aea0b9bf09bae18d224d36eca92584b77da8e7"
+CONFIG_SHA = "9e5bd50997b57fccb3e69b83836b8479a891367d610b1d718dd55337122eb5e5"
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC,
   payload JSONB
@@ -243,7 +243,7 @@ class Stage3SubmitDrivenRepairTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 grounding_callbacks,
                 "load_sql_grounding_llm_config",
-                return_value=SimpleNamespace(max_calls_per_task=2),
+                return_value=SimpleNamespace(max_calls_per_task=8),
             ),
         ):
             yield

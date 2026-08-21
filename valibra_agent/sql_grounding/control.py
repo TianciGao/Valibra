@@ -82,7 +82,11 @@ def render_control_hint(focus: FocusDimension) -> RenderedControlHint:
             + "."
         )
     else:
-        lines.append("No additional Grounding tool direction is suggested.")
+        lines.append(
+            "Grounding is final for this phase. Use the current State for targeted "
+            "verification only; do not repeat get_schema, "
+            "get_all_column_meanings, or get_all_knowledge_definitions."
+        )
     text = "\n".join(lines)
     return RenderedControlHint(
         text=text,

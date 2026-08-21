@@ -34,12 +34,13 @@ from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_PROMPT_SHA256,
     GroundingUpdaterResult,
 )
+from tests.valibra.test_stage3_submit_driven_repair import bootstrap_trajectory
 
 
 QUERY = "Show active artists and their revenue."
-PROMPT_SHA = "53dd2dd1a527533af2b71c71851466915436110530f30d8edb2a247676058031"
+PROMPT_SHA = "c35709ee2759a867c9dab3918a14b4c16205f7312395ae801efeb2dbf3904a4d"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "1d9dd853bcef4685979c2f01a8aea0b9bf09bae18d224d36eca92584b77da8e7"
+CONFIG_SHA = "9e5bd50997b57fccb3e69b83836b8479a891367d610b1d718dd55337122eb5e5"
 
 
 def complete_state() -> SQLGroundingState:
@@ -279,6 +280,34 @@ class IncompleteGroundingUpdater:
         )
 
 
+class ClarificationPatchUpdater:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.inputs = []
+
+    async def propose(self, runtime, *args, **kwargs):
+        del args
+        self.calls += 1
+        self.inputs.append(copy.deepcopy(kwargs["grounding_input"]))
+        return GroundingUpdaterResult(
+            response=GroundingLLMResponse(
+                sql_grounding_state=runtime.grounding_state,
+                user_clarification_requests=(),
+                next_focus_dimension="none",
+            ),
+            telemetry=GroundingLLMTelemetry(
+                attempted=True,
+                status="succeeded",
+                request_sha256="c" * 64,
+                response_sha256="d" * 64,
+                prompt_sha256=SQL_GROUNDING_PROMPT_SHA256,
+                form_schema_sha256=SQL_GROUNDING_FORM_SCHEMA_SHA256,
+                configuration_sha256=SQL_GROUNDING_CONFIGURATION_SHA256,
+            ),
+            transport_normalization="none",
+        )
+
+
 class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_phase_grounding_blocks_model_and_official_tools(self) -> None:
         initial = GroundingRuntime()
@@ -298,18 +327,16 @@ class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
             task_id=current["task_id"],
             phase=1,
             sequence=1,
-            observation_type="knowledge",
-            content="[]",
-            summary="complete Official bootstrap evidence observed",
-            tool_name="get_all_knowledge_definitions",
-            function_call_id="failed-closed-bootstrap-3",
-            private_raw_ref="session://tool_trajectory/2",
+            observation_type="schema",
+            content="CREATE TABLE t (c INTEGER)",
+            summary="Official schema evidence observed",
+            tool_name="get_schema",
+            function_call_id="failed-closed-bootstrap-1",
+            private_raw_ref="session://tool_trajectory/0",
         )
         grounding_input = {
             "query": QUERY,
-            "schema": "schema",
-            "column_meanings": "{}",
-            "knowledge_definitions": "[]",
+            "schema": "CREATE TABLE t (c INTEGER)",
             "current_state": initial.grounding_state.model_dump(mode="json"),
         }
         updater = IncompleteGroundingUpdater()
@@ -324,7 +351,7 @@ class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 grounding_callbacks,
                 "load_sql_grounding_llm_config",
-                return_value=SimpleNamespace(max_calls_per_task=2),
+                return_value=SimpleNamespace(max_calls_per_task=8),
             ),
             patch.object(
                 grounding_callbacks,
@@ -405,6 +432,25 @@ class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_forced_ask_answer_overlay_does_not_reground_or_change_state(self) -> None:
         current = task_state("clarification-answer")
+        pending_runtime = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=complete_state(),
+        )
+        current.update(
+            {
+                grounding_callbacks.GROUNDING_RUNTIME_KEY: pending_runtime.model_dump(
+                    mode="json"
+                ),
+                grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY: 3,
+                grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY: {
+                    "1": 3,
+                    "2": 0,
+                },
+                "tool_trajectory": bootstrap_trajectory(),
+            }
+        )
         clarification = UserClarificationRequest(
             phrase="active",
             kind="user_intent",
@@ -442,24 +488,56 @@ class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
             context,
         )
         self.assertIsNone(before)
-        await grounding_callbacks.after_tool_callback(
-            tool,
-            {"question": clarification.question},
-            context,
-            "Use signed contracts only.",
+        updater = ClarificationPatchUpdater()
+        token = grounding_callbacks._bind_turn_message(
+            current["task_id"], "a-interact", QUERY
         )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(
+                    grounding_callbacks,
+                    "_SQL_GROUNDING_UPDATER",
+                    updater,
+                ),
+                patch.object(
+                    grounding_callbacks,
+                    "load_sql_grounding_llm_config",
+                    return_value=SimpleNamespace(max_calls_per_task=8),
+                ),
+            ):
+                await grounding_callbacks.after_tool_callback(
+                    tool,
+                    {"question": clarification.question},
+                    context,
+                    "Use signed contracts only.",
+                )
+        finally:
+            grounding_callbacks._reset_turn_message(token)
 
         self.assertEqual(
             current[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
-            1,
+            4,
         )
+        self.assertEqual(updater.calls, 1)
         self.assertEqual(
-            current[grounding_callbacks.GROUNDING_RUNTIME_KEY],
-            frozen_runtime,
+            set(updater.inputs[0]),
+            {
+                "query",
+                "current_state",
+                "clarification_qa",
+                "relevant_column_meanings",
+                "relevant_knowledge_definitions",
+            },
         )
+        updated_runtime = GroundingRuntime.model_validate(
+            current[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        self.assertEqual(updated_runtime.grounding_revision, 3)
+        self.assertEqual(updated_runtime.stage, "SQL_ATTEMPT")
         self.assertEqual(
             sql_grounding_state_sha256(
-                GroundingRuntime.model_validate(frozen_runtime).grounding_state
+                updated_runtime.grounding_state
             ),
             frozen_sha,
         )
@@ -507,21 +585,122 @@ class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 current.get(grounding_callbacks.GROUNDING_PENDING_KEY)
             )
 
-    def test_provider_ledger_is_one_per_phase_two_per_task(self) -> None:
+    async def test_multiple_answers_trigger_one_patch_only_after_all_are_complete(self) -> None:
+        current = task_state("clarification-multiple")
+        pending_runtime = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=complete_state(),
+        )
+        current.update(
+            {
+                grounding_callbacks.GROUNDING_RUNTIME_KEY: pending_runtime.model_dump(
+                    mode="json"
+                ),
+                grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY: 3,
+                grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY: {
+                    "1": 3,
+                    "2": 0,
+                },
+                "tool_trajectory": bootstrap_trajectory(),
+            }
+        )
+        requests = (
+            UserClarificationRequest(
+                phrase="active",
+                kind="user_intent",
+                question="What should active mean for this request?",
+            ),
+            UserClarificationRequest(
+                phrase="revenue",
+                kind="missing_knowledge",
+                question="Which revenue rule should be used?",
+            ),
+        )
+        grounding_callbacks._register_clarification_requests(
+            current,
+            phase=1,
+            requests=requests,
+        )
+        updater = ClarificationPatchUpdater()
+        token = grounding_callbacks._bind_turn_message(
+            current["task_id"], "a-interact", QUERY
+        )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(
+                    grounding_callbacks,
+                    "_SQL_GROUNDING_UPDATER",
+                    updater,
+                ),
+                patch.object(
+                    grounding_callbacks,
+                    "load_sql_grounding_llm_config",
+                    return_value=SimpleNamespace(max_calls_per_task=8),
+                ),
+            ):
+                for index, answer in enumerate(
+                    ("Use signed contracts.", "Use booked revenue."),
+                    start=1,
+                ):
+                    forced = await grounding_callbacks.before_model_callback(
+                        SimpleNamespace(state=current),
+                        request(),
+                    )
+                    function_call = forced.content.parts[0].function_call
+                    context = SimpleNamespace(
+                        state=current,
+                        function_call_id=function_call.id,
+                        invocation_id=f"inv-clarification-{index}",
+                    )
+                    await grounding_callbacks.before_tool_callback(
+                        SimpleNamespace(name="ask_user"),
+                        {"question": function_call.args["question"]},
+                        context,
+                    )
+                    await grounding_callbacks.after_tool_callback(
+                        SimpleNamespace(name="ask_user"),
+                        {"question": function_call.args["question"]},
+                        context,
+                        answer,
+                    )
+                    self.assertEqual(updater.calls, int(index == 2))
+        finally:
+            grounding_callbacks._reset_turn_message(token)
+
+        self.assertEqual(
+            current[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
+            {"1": 4, "2": 0},
+        )
+        self.assertEqual(
+            len(updater.inputs[0]["clarification_qa"]),
+            2,
+        )
+        runtime_after = GroundingRuntime.model_validate(
+            current[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        self.assertEqual(runtime_after.stage, "SQL_ATTEMPT")
+        self.assertEqual(runtime_after.grounding_revision, 3)
+
+    def test_provider_ledger_is_four_per_phase_eight_per_task(self) -> None:
         current = {"task_id": "clarification-ledger"}
-        grounding_callbacks._record_provider_call(current, 1)
+        for _ in range(4):
+            grounding_callbacks._record_provider_call(current, 1)
         with self.assertRaises(ValueError):
             grounding_callbacks._record_provider_call(current, 1)
-        grounding_callbacks._record_provider_call(current, 2)
+        for _ in range(4):
+            grounding_callbacks._record_provider_call(current, 2)
         with self.assertRaises(ValueError):
             grounding_callbacks._record_provider_call(current, 2)
         self.assertEqual(
             current[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
-            2,
+            8,
         )
         self.assertEqual(
             current[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
-            {"1": 1, "2": 1},
+            {"1": 4, "2": 4},
         )
 
 

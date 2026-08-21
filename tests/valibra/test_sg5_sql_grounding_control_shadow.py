@@ -26,9 +26,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "53dd2dd1a527533af2b71c71851466915436110530f30d8edb2a247676058031"
+PROMPT_SHA = "c35709ee2759a867c9dab3918a14b4c16205f7312395ae801efeb2dbf3904a4d"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "1d9dd853bcef4685979c2f01a8aea0b9bf09bae18d224d36eca92584b77da8e7"
+CONFIG_SHA = "9e5bd50997b57fccb3e69b83836b8479a891367d610b1d718dd55337122eb5e5"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -139,9 +139,34 @@ class QueueUpdater:
         self.observation_types: list[str] = []
 
     async def propose(self, runtime, observation, **kwargs):
-        del runtime, kwargs
         self.observation_types.append(observation.observation_type)
-        response = self.responses[self.calls]
+        grounding_input = kwargs.get("grounding_input", {})
+        fields = set(grounding_input)
+        target = self.responses[0]
+        if "schema" in fields:
+            response = GroundingLLMResponse(
+                sql_grounding_state=SQLGroundingState(
+                    tables=target.sql_grounding_state.tables,
+                    join_keys=target.sql_grounding_state.join_keys,
+                    column_mapping=runtime.grounding_state.column_mapping,
+                    domain_knowledge=runtime.grounding_state.domain_knowledge,
+                ),
+                user_clarification_requests=(),
+                next_focus_dimension="column_mapping",
+            )
+        elif "column_meanings" in fields:
+            response = GroundingLLMResponse(
+                sql_grounding_state=SQLGroundingState(
+                    tables=target.sql_grounding_state.tables,
+                    join_keys=target.sql_grounding_state.join_keys,
+                    column_mapping=target.sql_grounding_state.column_mapping,
+                    domain_knowledge=runtime.grounding_state.domain_knowledge,
+                ),
+                user_clarification_requests=(),
+                next_focus_dimension="domain_knowledge",
+            )
+        else:
+            response = self.responses.pop(0)
         self.calls += 1
         return GroundingUpdaterResult(
             response=response,
@@ -405,12 +430,15 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
 
         final = load_runtime(current)
         self.assertEqual(final.stage, "P2_INCREMENTAL")
-        self.assertEqual(updater.calls, 1)
-        self.assertEqual(updater.observation_types, ["p2_follow_up"])
+        self.assertEqual(updater.calls, 3)
+        self.assertEqual(updater.observation_types, ["p2_follow_up"] * 3)
         audit = current["tool_trajectory"][-1][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(
-            audit["p2_follow_up"]["service_status"],
-            "accepted",
+            [
+                item["service_status"]
+                for item in audit["p2_follow_up"]["staged_grounding"]
+            ],
+            ["accepted", "accepted", "accepted"],
         )
         control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
@@ -455,8 +483,8 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
 
         final = load_runtime(current)
         self.assertEqual(final.stage, "P2_INCREMENTAL")
-        self.assertEqual(final.grounding_revision, 1)
-        self.assertEqual(updater.calls, 1)
+        self.assertEqual(final.grounding_revision, 2)
+        self.assertEqual(updater.calls, 3)
         control = current["tool_trajectory"][-1][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]

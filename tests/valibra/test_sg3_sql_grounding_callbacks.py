@@ -29,9 +29,9 @@ from valibra_agent.sql_grounding.updater import (
     GroundingUpdaterResult,
 )
 
-PROMPT_SHA = "53dd2dd1a527533af2b71c71851466915436110530f30d8edb2a247676058031"
+PROMPT_SHA = "c35709ee2759a867c9dab3918a14b4c16205f7312395ae801efeb2dbf3904a4d"
 FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "1d9dd853bcef4685979c2f01a8aea0b9bf09bae18d224d36eca92584b77da8e7"
+CONFIG_SHA = "9e5bd50997b57fccb3e69b83836b8479a891367d610b1d718dd55337122eb5e5"
 QUERY = "Show the maintenance cost."
 _ORIGINAL_GROUNDING_UPDATER_MODE = os.environ.get("GROUNDING_UPDATER_MODE")
 
@@ -563,11 +563,15 @@ class SG3ToolLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(returned, "same override")
         audit = current["tool_trajectory"][-1][grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(audit["service_status"], "skipped_control_lifecycle_only")
+        staged = audit["p2_follow_up"]["staged_grounding"]
         self.assertEqual(
-            audit["p2_follow_up"]["service_status"],
-            "noop",
+            [item["service_status"] for item in staged],
+            ["rejected", "rejected", "noop"],
         )
-        self.assertEqual(audit["p2_follow_up"]["observation_type"], "p2_follow_up")
+        self.assertEqual(
+            [item["observation_type"] for item in staged],
+            ["p2_follow_up"] * 3,
+        )
         self.assertEqual(runtime(current).stage, "P2_INCREMENTAL")
 
     async def test_schema_result_is_evidence_only_after_stage3(self):

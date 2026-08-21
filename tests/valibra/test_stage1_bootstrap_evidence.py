@@ -19,6 +19,7 @@ from google.genai import types
 from shared.audit import to_jsonable
 from valibra_agent import grounding_callbacks
 from valibra_agent.sql_grounding.models import (
+    ColumnMapping,
     DomainKnowledge,
     GroundingLLMResponse,
     GroundingRuntime,
@@ -85,21 +86,57 @@ def _state(task_id: str) -> dict[str, Any]:
     }
 
 
-class _NoProviderPrimaryUpdater:
+class _StagedOfflineUpdater:
     calls = 0
+
+    def __init__(self) -> None:
+        self.inputs: list[dict[str, Any]] = []
 
     async def propose(self, runtime: GroundingRuntime, *args: Any, **kwargs: Any) -> Any:
         del args
         self.calls += 1
-        self.grounding_input = kwargs["grounding_input"]
+        grounding_input = copy.deepcopy(kwargs["grounding_input"])
+        self.inputs.append(grounding_input)
+        fields = set(grounding_input)
+        if "schema" in fields:
+            candidate = SQLGroundingState(
+                tables=("operational_metrics",),
+                join_keys=(),
+            )
+            focus = "column_mapping"
+        elif "column_meanings" in fields:
+            candidate = SQLGroundingState(
+                tables=("operational_metrics",),
+                join_keys=(),
+                column_mapping=(
+                    ColumnMapping(
+                        phrase="maintenance cost",
+                        targets=("operational_metrics.maintcost",),
+                    ),
+                ),
+            )
+            focus = "domain_knowledge"
+        else:
+            candidate = SQLGroundingState(
+                tables=("operational_metrics",),
+                join_keys=(),
+                column_mapping=(
+                    ColumnMapping(
+                        phrase="maintenance cost",
+                        targets=("operational_metrics.maintcost",),
+                    ),
+                ),
+                domain_knowledge=(),
+            )
+            focus = "none"
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
-                sql_grounding_state=runtime.grounding_state,
+                sql_grounding_state=candidate,
                 user_clarification_requests=(),
-                next_focus_dimension=runtime.focus_dimension,
+                next_focus_dimension=focus,
             ),
             telemetry=GroundingLLMTelemetry(
-                attempted=False,
+                attempted=True,
                 status="succeeded",
                 request_sha256="",
                 response_sha256="",
@@ -132,7 +169,7 @@ class _FinalLocalModel(BaseLlm):
 
 
 class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_adk_collects_three_official_tools_before_primary(self):
+    async def test_real_adk_interleaves_three_tools_with_staged_grounding(self):
         executions: list[str] = []
 
         def get_schema() -> str:
@@ -148,7 +185,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             return KNOWLEDGE_DEFINITIONS
 
         model = _FinalLocalModel(model="stage1-local")
-        updater = _NoProviderPrimaryUpdater()
+        updater = _StagedOfflineUpdater()
         agent = LlmAgent(
             name="stage1_bootstrap_agent",
             model=model,
@@ -190,7 +227,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     grounding_callbacks,
                     "load_sql_grounding_llm_config",
-                    return_value=SimpleNamespace(max_calls_per_task=2),
+                    return_value=SimpleNamespace(max_calls_per_task=8),
                 ),
             ):
                 events = [
@@ -218,23 +255,16 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             executions,
             list(grounding_callbacks._BOOTSTRAP_TOOL_SEQUENCE),
         )
-        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.calls, 3)
         self.assertEqual(
             state.get(grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY, 0),
-            0,
+            3,
         )
-        # The offline updater deliberately leaves all four dimensions null.
-        # The phase therefore terminates fail-closed instead of falling
-        # through to the local Main model.
-        self.assertEqual(model.calls, 0)
+        self.assertEqual(model.calls, 1)
         phase_outcome = state[
             grounding_callbacks.GROUNDING_PHASE_OUTCOMES_KEY
         ]["1"]
-        self.assertEqual(phase_outcome["status"], "failed")
-        self.assertEqual(
-            phase_outcome["error_type"],
-            "state_validation_failed",
-        )
+        self.assertEqual(phase_outcome["status"], "succeeded")
         self.assertEqual(state["budget_remaining"], 7.0)
         trajectory = state["tool_trajectory"]
         self.assertEqual([item["tool"] for item in trajectory], executions)
@@ -251,11 +281,11 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 record[grounding_callbacks.SHADOW_AUDIT_KEY]["service_status"]
                 for record in ordered_audits
             ],
-            ["stored_bootstrap_evidence", "stored_bootstrap_evidence", "rejected"],
+            ["accepted", "accepted", "accepted"],
         )
         self.assertTrue(
             all(
-                not record[grounding_callbacks.SHADOW_AUDIT_KEY][
+                record[grounding_callbacks.SHADOW_AUDIT_KEY][
                     "provider_attempted"
                 ]
                 for record in ordered_audits
@@ -263,7 +293,7 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             ordered_audits[-1][grounding_callbacks.SHADOW_AUDIT_KEY][
-                "primary_grounding_triggered"
+                "staged_grounding_triggered"
             ]
         )
         self.assertEqual(state[grounding_callbacks.GROUNDING_PENDING_KEY], {})
@@ -271,35 +301,41 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
         runtime = GroundingRuntime.model_validate(
             state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
         )
-        self.assertEqual(runtime, GroundingRuntime())
-        request = grounding_callbacks._build_grounding_request(
+        self.assertEqual(runtime.grounding_revision, 3)
+        self.assertEqual(runtime.stage, "SQL_ATTEMPT")
+        self.assertTrue(runtime.grounding_state.all_dimensions_evaluated)
+        request = grounding_callbacks._build_staged_grounding_request(
             state,
+            call_kind="knowledge",
             query=QUERY,
             runtime=runtime,
+            phase=1,
         )
+        self.assertEqual(set(request), {
+            "query",
+            "current_state",
+            "knowledge_definitions",
+            "relevant_column_meanings",
+        })
         self.assertEqual(
-            request,
-            {
-                "query": QUERY,
-                "schema": SCHEMA,
-                "column_meanings": COLUMN_MEANINGS,
-                "knowledge_definitions": KNOWLEDGE_DEFINITIONS,
-                "current_state": runtime.grounding_state.model_dump(mode="json"),
-            },
+            [set(item) for item in updater.inputs],
+            [
+                {"query", "current_state", "schema"},
+                {"query", "current_state", "column_meanings"},
+                {
+                    "query",
+                    "current_state",
+                    "knowledge_definitions",
+                    "relevant_column_meanings",
+                },
+            ],
         )
 
         model_visible = json.dumps(model.requests, ensure_ascii=False, sort_keys=True)
         self.assertNotIn(SCHEMA_SENTINEL, model_visible)
         self.assertNotIn(MEANINGS_SENTINEL, model_visible)
         self.assertNotIn(KNOWLEDGE_SENTINEL, model_visible)
-        self.assertEqual(model.requests, [])
-        self.assertTrue(
-            any(
-                "VALIBRA_SQL_GROUNDING_FAILED_CLOSED"
-                in str(getattr(event, "content", ""))
-                for event in events
-            )
-        )
+        self.assertTrue(model.requests)
 
         trajectory_only = json.dumps(trajectory, ensure_ascii=False, sort_keys=True)
         self.assertIn(SCHEMA_SENTINEL, trajectory_only)
@@ -401,11 +437,13 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             {"tool": "get_schema", "result": SCHEMA},
             {"tool": "get_all_column_meanings", "result": COLUMN_MEANINGS},
         ]
-        with self.assertRaisesRegex(ValueError, "complete ordered"):
-            grounding_callbacks._build_grounding_request(
+        with self.assertRaisesRegex(ValueError, "requires bootstrap knowledge"):
+            grounding_callbacks._build_staged_grounding_request(
                 state,
+                call_kind="knowledge",
                 query=QUERY,
                 runtime=GroundingRuntime(),
+                phase=1,
             )
 
         state["tool_trajectory"].append(
@@ -415,10 +453,12 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "Official tool error"):
-            grounding_callbacks._build_grounding_request(
+            grounding_callbacks._build_staged_grounding_request(
                 state,
+                call_kind="knowledge",
                 query=QUERY,
                 runtime=GroundingRuntime(),
+                phase=1,
             )
 
     def test_no_runtime_or_evidence_store_field_was_added(self):

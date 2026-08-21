@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeAlias
 from urllib.parse import urlsplit
 
 from pydantic import Field, ValidationError, model_validator
@@ -40,7 +40,13 @@ from valibra_agent.sql_grounding.telemetry import (
 MAX_GROUNDING_REQUEST_CHARS = 262_144
 MAX_GROUNDING_RESPONSE_CHARS = 65_536
 DEFAULT_GROUNDING_TIMEOUT_SECONDS = 600.0
-DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 2
+DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 8
+GroundingCallKind: TypeAlias = Literal[
+    "structure",
+    "mapping",
+    "knowledge",
+    "clarification_patch",
+]
 GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_UPDATER_MODE",
     "GROUNDING_MODEL_PRESET",
@@ -105,23 +111,42 @@ Markdown，也不要添加额外字段。
 - 不存在名为 "target" 的字段。
 - 不要添加以上未列出的任何字段。
 
-持久化四维状态的规则：
-1. Phase 1 Primary Grounding 输入恰好包含 query、schema、column_meanings、
-   knowledge_definitions、current_state 五个字段。Phase 2 Follow-up Grounding 复用相同五字段，
-   并增加 follow_up 和 user_clarifications 字段；user_clarifications 只包含 Phase 1 已经由
-   用户回答的独立澄清记录，不属于四维 State。每个 phase 只调用一次 Grounding，整个 task
-   最多两次。
-   请在本 phase 的唯一一次响应中完成 tables、join_keys、column_mapping、domain_knowledge
-   四个维度；不得等待 execute_sql 或 submit_sql 后再次修订 Grounding State。
-2. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
+分阶段持久化四维状态的规则：
+1. 调度固定为 Structure → Mapping → Knowledge；不能根据 focus 跳步，也不能等待
+   execute_sql 或 submit_sql 后重新 Grounding。每个请求都只包含 query、current_state、
+   当前阶段 evidence；Phase 2 另外包含 follow_up 和 Phase 1 已回答的
+   user_clarifications。不得要求或假装看见前一阶段的完整原始 request。
+2. Structure Grounding 的阶段 evidence 只有 schema。主要更新 tables、join_keys；响应必须让
+   tables、join_keys 都成为数组，column_mapping、domain_knowledge 保持原值（Phase 1 初始时
+   仍为 null），user_clarification_requests 必须为空，next_focus_dimension 必须为
+   column_mapping。优先保证候选表 recall，但不得使用 schema 不支持的名字。
+3. Mapping Grounding 的阶段 evidence 只有候选表相关的 column_meanings。主要更新
+   column_mapping；只有 metadata 明确证明前一轮有误时，才能小范围修正 tables、join_keys。
+   响应必须让 tables、join_keys、column_mapping 都成为数组，domain_knowledge 保持原值，
+   user_clarification_requests 必须为空，next_focus_dimension 必须为 domain_knowledge。
+4. Knowledge Grounding 的阶段 evidence 只有 knowledge_definitions 和当前 mapping 相关的
+   relevant_column_meanings。主要更新 domain_knowledge，必要时可定向修正 column_mapping；
+   tables、join_keys 必须保持不变。响应必须把四维都评估为数组，next_focus_dimension 必须
+   为 none。只有这一阶段可以产生 user_clarification_requests。
+5. 如果同一 phase 有澄清问题，调用方会先收集全部回答，再至多调用一次
+   Clarification Patch。该请求只含本 phase clarification_qa 及受影响 phrase 的
+   relevant_column_meanings / relevant_knowledge_definitions。它只能修改受回答影响的
+   column_mapping / domain_knowledge；不得修改 tables、join_keys 或无关 mapping；不得再次
+   产生澄清问题，next_focus_dimension 必须为 none。
+6. P2 从 P1 最终 State 增量开始并复用 task-level bootstrap evidence，不从空 State 重建，
+   也不重新调用三个 bootstrap 工具。每 phase 无澄清时恰好三次 Provider 调用，有澄清时
+   最多四次；整个 task 最多八次。任何阶段技术或合同失败都 fail-closed，不 retry、不 fallback。
+7. tables 只能使用 schema 支持的真实、完全限定的数据库标识符。join_keys 中的表和字段也必须
    得到 schema 支持。绝不能持久化简写别名或臆造名称。
-3. column_mapping 中的普通字段必须得到 schema 支持；JSON / JSONB target 的真实列必须来自
+8. column_mapping 中的普通字段必须得到 schema 支持；JSON / JSONB target 的真实列必须来自
    schema，其路径 key 必须来自 column_meanings 中该列的 fields_meaning。
-4. domain_knowledge.content 必须逐字复制自 knowledge_definitions 中的 Official BIRD definition。
-   不能从 schema、column_meanings 或模型常识中改写或臆造知识。
-5. 对非 Primary 的兼容离线调用，只能使用 latest_observation 已经支持的真实、完全限定数据库
+9. domain_knowledge.content 必须逐字复制自 knowledge_definitions 中的 Official BIRD
+   definition，或来自当前 missing_knowledge 澄清回答的逐字内容。不能从 schema、
+   column_meanings 或模型常识中改写或臆造知识。只有名字相近、但公式或业务定义不同的邻近
+   knowledge 不能代替精确规则；完成问题依赖缺失或 masked knowledge 时，应提出澄清而不是猜。
+10. 对非分阶段的兼容离线调用，只能使用 latest_observation 已经支持的真实、完全限定数据库
    标识符；该兼容入口不会扩大任何维度授权。
-6. join_keys 和 column_mapping 的 targets 必须是符合 Valibra 受限字段/关联表达式合同的
+11. join_keys 和 column_mapping 的 targets 必须是符合 Valibra 受限字段/关联表达式合同的
    规范化 PostgreSQL 表达式。它们不是自由 SQL，不能包含语句、注释、任意函数或未经
    批准的 AST 结构。
    输出的每个 join_keys 表达式和 column_mapping target，都必须已经采用 sqlglot 26.16.4
@@ -130,25 +155,23 @@ Markdown，也不要添加额外字段。
    -> 和 ->> 的两侧都必须各有一个 ASCII 空格。仅用于展示语法的示例：
    t.c -> 'key' ->> 'leaf'。这个示例只展示格式；除非当前合法观测支持其中的
    标识符或字面量，否则绝不能复制它们。
-7. 每个 column_mapping.phrase 都必须是原始用户问题 query / original_query 或追问 follow_up 中
+12. 每个 column_mapping.phrase 都必须是原始用户问题 query / original_query 或追问 follow_up 中
    非空、逐字连续的子串。
    不要改写 phrase。
-8. domain_knowledge.kind 只能是 business_rule、runtime_state 或 database_capability。
+13. domain_knowledge.kind 只能是 business_rule、runtime_state 或 database_capability。
    每个新增或修改后的非空 domain_knowledge.content，都必须逐字复制自 knowledge_definitions
    或最新合法观测中的 Official BIRD 规范知识陈述。已有且通过验证的 content 只能原样保留。
    绝不能改写或臆造知识。
-9. 每个 phase 的唯一一次 Grounding 可以同时提出四个维度。P2 必须保留所有未受 follow_up
-   影响的现有维度和条目。
-10. null 表示尚未评估；[] 表示已经评估且不需要；非空数组包含通过验证的结果。
-11. 本 phase 的响应必须把四个维度全部评估为数组（可以为空），且
-   next_focus_dimension 必须是 none。
-12. user_clarification_requests=[] 表示不需要用户确认。只有当前 query / follow_up 中确实存在
+14. P2 与 Clarification Patch 必须保留所有未受 follow_up / 当前澄清回答影响的现有维度和条目。
+15. null 表示尚未评估；[] 表示已经评估且不需要；非空数组包含通过验证的结果。
+16. user_clarification_requests=[] 表示不需要用户确认。只有当前 query / follow_up 中确实存在
    无法安全消解的 user_intent，或完成任务必须依赖但用户可能掌握的 missing_knowledge，才可以
    提出问题。不得询问 schema、表名、列名、join、SQL 写法、identifier 或 runtime error；这些
    必须由 Official BIRD 工具证据和 Main Agent 自行处理。不得为了保险而要求用户确认数据库事实。
 
 不要输出 score、confidence、ambiguity、reasoning、Evidence 摘要、SQL plan、Bird-Coin、
-final SQL、tool call 或具体 tool choice。响应只能提出完整的四维状态、有限澄清请求和下一个聚焦维度。
+final SQL、tool call 或具体 tool choice。响应只能提出当前阶段允许的四维状态、有限澄清请求和
+下一个聚焦维度。
 """
 
 SQL_GROUNDING_PROMPT_SHA256 = hashlib.sha256(
@@ -160,6 +183,7 @@ SQL_GROUNDING_FORM_SCHEMA_SHA256 = hashlib.sha256(
 ).hexdigest()
 SQL_GROUNDING_CONFIGURATION = {
     "form_schema_sha256": SQL_GROUNDING_FORM_SCHEMA_SHA256,
+    "max_calls_per_task": DEFAULT_GROUNDING_MAX_CALLS_PER_TASK,
     "max_request_chars": MAX_GROUNDING_REQUEST_CHARS,
     "max_response_chars": MAX_GROUNDING_RESPONSE_CHARS,
     "prompt_sha256": SQL_GROUNDING_PROMPT_SHA256,
@@ -202,7 +226,7 @@ class SQLGroundingLLMConfig(ContractModel):
         if self.preset_config.get("max_tokens") != self.max_tokens:
             raise ValueError("GROUNDING_MAX_TOKENS must equal the frozen preset value")
         if self.max_calls_per_task != DEFAULT_GROUNDING_MAX_CALLS_PER_TASK:
-            raise ValueError("GROUNDING_MAX_CALLS_PER_TASK must equal 2")
+            raise ValueError("GROUNDING_MAX_CALLS_PER_TASK must equal 8")
         return self
 
 
@@ -645,24 +669,20 @@ def _validated_bundled_grounding_input(
     follow_up_query: str | None,
     observation: SQLGroundingObservation,
 ) -> dict[str, Any]:
-    """Copy and validate the exact ephemeral phase Grounding bundle."""
+    """Copy and validate one exact, stage-local Grounding bundle."""
 
-    primary_fields = {
-        "query",
-        "schema",
-        "column_meanings",
-        "knowledge_definitions",
-        "current_state",
-    }
-    p2_fields = primary_fields | {"follow_up", "user_clarifications"}
-    expected = p2_fields if runtime.stage == "P2_INCREMENTAL" else primary_fields
-    if not isinstance(grounding_input, Mapping) or set(grounding_input) != expected:
+    try:
+        call_kind = classify_grounding_input(
+            grounding_input,
+            phase=observation.phase,
+        )
+    except (TypeError, ValueError) as exc:
         telemetry = _telemetry(
             attempted=False,
             status="rejected",
             error_type="grounding_bundle_invalid",
         )
-        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        raise GroundingUpdaterError("grounding_bundle_invalid", telemetry) from exc
     payload = dict(grounding_input)
     if payload["query"] != original_query or payload["query"] != original_query.strip():
         telemetry = _telemetry(
@@ -678,7 +698,7 @@ def _validated_bundled_grounding_input(
             error_type="grounding_bundle_invalid",
         )
         raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
-    if "follow_up" in expected:
+    if observation.phase == 2:
         if (
             not isinstance(follow_up_query, str)
             or not follow_up_query
@@ -728,6 +748,45 @@ def _validated_bundled_grounding_input(
                 error_type="grounding_bundle_invalid",
             )
             raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if call_kind == "clarification_patch":
+        clarification_qa = payload["clarification_qa"]
+        if not isinstance(clarification_qa, list) or not clarification_qa:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        try:
+            records = tuple(
+                UserClarificationRecord.model_validate(item)
+                for item in clarification_qa
+            )
+        except ValidationError as exc:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry) from exc
+        if any(
+            item.phase != observation.phase or item.answer is None
+            for item in records
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        questions = [item.question for item in records]
+        if len(questions) != len(set(questions)):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     try:
         canonical_json(payload)
     except (TypeError, ValueError, RecursionError) as exc:
@@ -738,6 +797,47 @@ def _validated_bundled_grounding_input(
         )
         raise GroundingUpdaterError("grounding_bundle_invalid", telemetry) from exc
     return payload
+
+
+_CALL_KIND_EVIDENCE_FIELDS: Mapping[GroundingCallKind, frozenset[str]] = {
+    "structure": frozenset({"schema"}),
+    "mapping": frozenset({"column_meanings"}),
+    "knowledge": frozenset(
+        {"knowledge_definitions", "relevant_column_meanings"}
+    ),
+    "clarification_patch": frozenset(
+        {
+            "clarification_qa",
+            "relevant_column_meanings",
+            "relevant_knowledge_definitions",
+        }
+    ),
+}
+
+
+def classify_grounding_input(
+    grounding_input: Mapping[str, Any],
+    *,
+    phase: Literal[1, 2],
+) -> GroundingCallKind:
+    """Classify one 1.2 request only by its exact finite field set."""
+
+    if not isinstance(grounding_input, Mapping):
+        raise TypeError("Grounding input must be a mapping")
+    common = {"query", "current_state"}
+    if phase == 2:
+        common.update({"follow_up", "user_clarifications"})
+    elif phase != 1:
+        raise ValueError("Grounding phase must be 1 or 2")
+    fields = set(grounding_input)
+    matches = [
+        call_kind
+        for call_kind, evidence_fields in _CALL_KIND_EVIDENCE_FIELDS.items()
+        if fields == common | set(evidence_fields)
+    ]
+    if len(matches) != 1:
+        raise ValueError("Grounding input has an invalid stage-local field set")
+    return matches[0]
 
 
 def normalize_grounding_transport(

@@ -5,6 +5,7 @@ import json
 import os
 import unittest
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -26,6 +27,7 @@ from valibra_agent.sql_grounding.models import (
     SQLGroundingState,
     SQLGroundingValidationError,
     ValidationContext,
+    UserClarificationRecord,
     canonical_json,
     validate_sql_grounding_state,
 )
@@ -90,6 +92,21 @@ def complete_state() -> SQLGroundingState:
         domain_knowledge=(
             DomainKnowledge(kind="business_rule", content=RULE),
         ),
+    )
+
+
+def structure_state() -> SQLGroundingState:
+    return SQLGroundingState(
+        tables=("operational_metrics",),
+        join_keys=(),
+    )
+
+
+def mapping_state() -> SQLGroundingState:
+    return SQLGroundingState(
+        tables=("operational_metrics",),
+        join_keys=(),
+        column_mapping=complete_state().column_mapping,
     )
 
 
@@ -162,11 +179,21 @@ class PrimaryFakeUpdater:
         del runtime, args
         self.calls += 1
         self.inputs.append(copy.deepcopy(kwargs["grounding_input"]))
+        fields = set(self.inputs[-1])
+        if "schema" in fields:
+            candidate = structure_state()
+            focus = "column_mapping"
+        elif "column_meanings" in fields:
+            candidate = mapping_state()
+            focus = "domain_knowledge"
+        else:
+            candidate = complete_state()
+            focus = "none"
         return GroundingUpdaterResult(
             response=GroundingLLMResponse(
-                sql_grounding_state=complete_state(),
+                sql_grounding_state=candidate,
                 user_clarification_requests=(),
-                next_focus_dimension="none",
+                next_focus_dimension=focus,
             ),
             telemetry=GroundingLLMTelemetry(
                 attempted=True,
@@ -218,7 +245,7 @@ class CapturingClient:
 
 
 class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_adk_three_tools_trigger_exactly_one_primary_update(self):
+    async def test_real_adk_three_tools_trigger_three_staged_updates(self):
         executions: list[str] = []
 
         def get_schema() -> str:
@@ -270,7 +297,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     grounding_callbacks,
                     "load_sql_grounding_llm_config",
-                    return_value=SimpleNamespace(max_calls_per_task=2),
+                    return_value=SimpleNamespace(max_calls_per_task=8),
                 ),
             ):
                 events = [
@@ -296,33 +323,40 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         session_state = final.state
 
         self.assertEqual(executions, list(grounding_callbacks._BOOTSTRAP_TOOL_SEQUENCE))
-        self.assertEqual(updater.calls, 1)
+        self.assertEqual(updater.calls, 3)
         self.assertEqual(
             session_state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
-            1,
+            3,
         )
         self.assertEqual(set(updater.inputs[0]), {
             "query",
             "schema",
-            "column_meanings",
-            "knowledge_definitions",
             "current_state",
         })
         self.assertEqual(updater.inputs[0]["schema"], SCHEMA)
-        self.assertEqual(updater.inputs[0]["column_meanings"], COLUMN_MEANINGS)
         self.assertEqual(
-            updater.inputs[0]["knowledge_definitions"], KNOWLEDGE_DEFINITIONS
+            [set(item) for item in updater.inputs],
+            [
+                {"query", "schema", "current_state"},
+                {"query", "column_meanings", "current_state"},
+                {
+                    "query",
+                    "knowledge_definitions",
+                    "relevant_column_meanings",
+                    "current_state",
+                },
+            ],
         )
         runtime = GroundingRuntime.model_validate(
             session_state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
         )
-        self.assertEqual(runtime.grounding_revision, 1)
+        self.assertEqual(runtime.grounding_revision, 3)
         self.assertEqual(runtime.grounding_state, complete_state())
         phase_outcome = session_state[
             grounding_callbacks.GROUNDING_PHASE_OUTCOMES_KEY
         ]["1"]
         self.assertEqual(phase_outcome["status"], "succeeded")
-        self.assertEqual(phase_outcome["grounding_revision"], 1)
+        self.assertEqual(phase_outcome["grounding_revision"], 3)
         self.assertEqual(
             phase_outcome["state_sha256"],
             grounding_callbacks.sql_grounding_state_sha256(
@@ -338,43 +372,103 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         ordered = [audits[key][grounding_callbacks.SHADOW_AUDIT_KEY] for key in sorted(audits)]
         self.assertEqual(
             [item["service_status"] for item in ordered],
-            ["stored_bootstrap_evidence", "stored_bootstrap_evidence", "accepted"],
+            ["accepted", "accepted", "accepted"],
         )
         self.assertEqual(
-            ordered[-1]["changed_dimensions"],
-            ["tables", "join_keys", "column_mapping", "domain_knowledge"],
+            [item["changed_dimensions"] for item in ordered],
+            [
+                ["tables", "join_keys"],
+                ["column_mapping"],
+                ["domain_knowledge"],
+            ],
         )
         self.assertTrue(ordered[-1]["provider_attempted"])
-        self.assertTrue(ordered[-1]["primary_grounding_triggered"])
+        self.assertTrue(ordered[-1]["staged_grounding_triggered"])
 
         model_visible = canonical_json(model.requests)
         self.assertNotIn(SCHEMA_SENTINEL, model_visible)
         self.assertNotIn(MEANINGS_SENTINEL, model_visible)
         self.assertNotIn(COLUMN_MEANINGS, model_visible)
 
-    async def test_updater_receives_exact_five_fields_and_service_is_atomic(self):
+    async def test_updater_receives_exact_stage_fields_and_service_is_atomic(self):
         runtime = GroundingRuntime()
-        observation = primary_observation()
-        context = validation_context(observation)
-        valid_response = GroundingLLMResponse(
-            sql_grounding_state=complete_state(),
-            user_clarification_requests=(),
-            next_focus_dimension="none",
+        stages = (
+            (
+                "schema",
+                "get_schema",
+                SCHEMA,
+                {"schema": SCHEMA},
+                structure_state(),
+                "column_mapping",
+            ),
+            (
+                "metadata",
+                "get_all_column_meanings",
+                COLUMN_MEANINGS,
+                {"column_meanings": json.loads(COLUMN_MEANINGS)},
+                mapping_state(),
+                "domain_knowledge",
+            ),
+            (
+                "knowledge",
+                "get_all_knowledge_definitions",
+                KNOWLEDGE_DEFINITIONS,
+                {
+                    "knowledge_definitions": json.loads(KNOWLEDGE_DEFINITIONS),
+                    "relevant_column_meanings": json.loads(COLUMN_MEANINGS),
+                },
+                complete_state(),
+                "none",
+            ),
         )
-        client = CapturingClient(valid_response)
-        result = await process_sql_grounding_observation(
-            runtime,
-            observation,
-            context,
-            SQLGroundingUpdater(client),
-            grounding_input=primary_input(runtime),
-        )
-        self.assertEqual(result.state_update.status, "accepted")
-        self.assertEqual(result.runtime.grounding_revision, 1)
-        request_payload = json.loads(client.requests[0].input_json)
-        self.assertEqual(request_payload, primary_input(runtime))
-        self.assertNotIn("latest_observation", request_payload)
-        self.assertEqual(client.requests[0].observation_id, observation.observation_id)
+        observations = []
+        for sequence, (
+            observation_type,
+            tool_name,
+            content,
+            evidence,
+            candidate,
+            focus,
+        ) in enumerate(stages, start=1):
+            observation = build_sql_grounding_observation(
+                task_id="stage2-service-task",
+                phase=1,
+                sequence=sequence,
+                observation_type=observation_type,
+                content=content,
+                summary=f"{tool_name} evidence",
+                tool_name=tool_name,
+                function_call_id=f"stage2-call-{sequence}",
+                private_raw_ref=f"session://tool_trajectory/{sequence - 1}",
+            )
+            observations.append(observation)
+            grounding_input = {
+                "query": QUERY,
+                "current_state": runtime.grounding_state.model_dump(mode="json"),
+                **evidence,
+            }
+            client = CapturingClient(
+                GroundingLLMResponse(
+                    sql_grounding_state=candidate,
+                    user_clarification_requests=(),
+                    next_focus_dimension=focus,
+                )
+            )
+            result = await process_sql_grounding_observation(
+                runtime,
+                observation,
+                validation_context(observation),
+                SQLGroundingUpdater(client),
+                grounding_input=grounding_input,
+            )
+            self.assertEqual(result.state_update.status, "accepted")
+            request_payload = json.loads(client.requests[0].input_json)
+            self.assertEqual(request_payload, grounding_input)
+            self.assertNotIn("latest_observation", request_payload)
+            runtime = result.runtime
+
+        self.assertEqual(runtime.grounding_revision, 3)
+        self.assertEqual(runtime.grounding_state, complete_state())
 
         invalid_state = complete_state().model_copy(
             update={
@@ -394,15 +488,23 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         rejected = await process_sql_grounding_observation(
-            runtime,
-            observation,
-            context,
+            GroundingRuntime(
+                grounding_revision=2,
+                grounding_state=mapping_state(),
+                focus_dimension="domain_knowledge",
+            ),
+            observations[-1],
+            validation_context(observations[-1]),
             SQLGroundingUpdater(invalid_client),
-            grounding_input=primary_input(runtime),
+            grounding_input={
+                "query": QUERY,
+                "current_state": mapping_state().model_dump(mode="json"),
+                "knowledge_definitions": json.loads(KNOWLEDGE_DEFINITIONS),
+                "relevant_column_meanings": json.loads(COLUMN_MEANINGS),
+            },
         )
         self.assertEqual(rejected.state_update.status, "rejected")
-        self.assertEqual(rejected.runtime, runtime)
-        self.assertEqual(rejected.runtime.grounding_revision, 0)
+        self.assertEqual(rejected.runtime.grounding_revision, 2)
 
         partial_client = CapturingClient(
             GroundingLLMResponse(
@@ -412,14 +514,18 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         partial = await process_sql_grounding_observation(
-            runtime,
-            observation,
-            context,
+            GroundingRuntime(),
+            observations[0],
+            validation_context(observations[0]),
             SQLGroundingUpdater(partial_client),
-            grounding_input=primary_input(runtime),
+            grounding_input={
+                "query": QUERY,
+                "current_state": GroundingRuntime().grounding_state.model_dump(mode="json"),
+                "schema": SCHEMA,
+            },
         )
         self.assertEqual(partial.state_update.status, "rejected")
-        self.assertEqual(partial.runtime, runtime)
+        self.assertEqual(partial.runtime, GroundingRuntime())
 
     async def test_incomplete_bundle_is_rejected_before_client_call(self):
         runtime = GroundingRuntime()
@@ -431,8 +537,12 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
                 next_focus_dimension="none",
             )
         )
-        incomplete = primary_input(runtime)
-        incomplete.pop("knowledge_definitions")
+        incomplete = {
+            "query": QUERY,
+            "current_state": runtime.grounding_state.model_dump(mode="json"),
+            "schema": SCHEMA,
+            "column_meanings": json.loads(COLUMN_MEANINGS),
+        }
         result = await process_sql_grounding_observation(
             runtime,
             observation,
@@ -443,6 +553,164 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state_update.status, "rejected")
         self.assertEqual(result.runtime, runtime)
         self.assertEqual(client.requests, [])
+
+    async def test_stage_permissions_and_clarification_scope_fail_closed(self):
+        alternate_rule = "Use active-contract maintenance cost only."
+        base_context = ValidationContext(
+            current_query="Show active maintenance cost.",
+            latest_observation_id="placeholder",
+            known_tables=frozenset({"operational_metrics", "other_metrics"}),
+            known_columns=frozenset(
+                {
+                    "operational_metrics.maintcost",
+                    "operational_metrics.payload",
+                }
+            ),
+            supported_json_paths=frozenset(
+                {("operational_metrics.payload", ("cost",))}
+            ),
+            supported_domain_knowledge=frozenset(
+                {
+                    ("business_rule", RULE),
+                    ("business_rule", alternate_rule),
+                }
+            ),
+        )
+
+        structure_observation = build_sql_grounding_observation(
+            task_id="stage2-permissions",
+            phase=1,
+            sequence=1,
+            observation_type="schema",
+            content=SCHEMA,
+            summary="schema evidence",
+            tool_name="get_schema",
+            function_call_id="stage2-permission-structure",
+            private_raw_ref="session://tool_trajectory/0",
+        )
+        invalid_structure = structure_state().model_copy(
+            update={"column_mapping": complete_state().column_mapping}
+        )
+        result = await process_sql_grounding_observation(
+            GroundingRuntime(),
+            structure_observation,
+            replace(
+                base_context,
+                latest_observation_id=structure_observation.observation_id,
+            ),
+            SQLGroundingUpdater(
+                CapturingClient(
+                    GroundingLLMResponse(
+                        sql_grounding_state=invalid_structure,
+                        user_clarification_requests=(),
+                        next_focus_dimension="column_mapping",
+                    )
+                )
+            ),
+            grounding_input={
+                "query": "Show active maintenance cost.",
+                "current_state": SQLGroundingState().model_dump(mode="json"),
+                "schema": SCHEMA,
+            },
+        )
+        self.assertEqual(result.state_update.status, "rejected")
+        self.assertEqual(result.runtime, GroundingRuntime())
+
+        current = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=complete_state(),
+        )
+        answer = UserClarificationRecord(
+            phase=1,
+            phrase="active",
+            kind="user_intent",
+            question="What should active mean?",
+            answer="Use active contracts.",
+        )
+        patch_observation = build_sql_grounding_observation(
+            task_id="stage2-permissions",
+            phase=1,
+            sequence=2,
+            observation_type="user_answer",
+            content=answer.answer,
+            summary="clarification answer",
+            tool_name="ask_user",
+            function_call_id="stage2-permission-answer",
+            private_raw_ref="session://tool_trajectory/1",
+        )
+        unrelated_mapping = complete_state().model_copy(
+            update={
+                "column_mapping": (
+                    ColumnMapping(
+                        phrase="maintenance cost",
+                        targets=("operational_metrics.payload ->> 'cost'",),
+                    ),
+                )
+            }
+        )
+        patch_context = replace(
+            base_context,
+            latest_observation_id=patch_observation.observation_id,
+        )
+        rejected = await process_sql_grounding_observation(
+            current,
+            patch_observation,
+            patch_context,
+            SQLGroundingUpdater(
+                CapturingClient(
+                    GroundingLLMResponse(
+                        sql_grounding_state=unrelated_mapping,
+                        user_clarification_requests=(),
+                        next_focus_dimension="none",
+                    )
+                )
+            ),
+            grounding_input={
+                "query": "Show active maintenance cost.",
+                "current_state": complete_state().model_dump(mode="json"),
+                "clarification_qa": [answer.model_dump(mode="json")],
+                "relevant_column_meanings": {},
+                "relevant_knowledge_definitions": [],
+            },
+        )
+        self.assertEqual(rejected.state_update.status, "rejected")
+        self.assertEqual(rejected.runtime, current)
+
+        unrelated_knowledge = complete_state().model_copy(
+            update={
+                "domain_knowledge": (
+                    DomainKnowledge(
+                        kind="business_rule",
+                        content=alternate_rule,
+                    ),
+                )
+            }
+        )
+        rejected_knowledge = await process_sql_grounding_observation(
+            current,
+            patch_observation,
+            patch_context,
+            SQLGroundingUpdater(
+                CapturingClient(
+                    GroundingLLMResponse(
+                        sql_grounding_state=unrelated_knowledge,
+                        user_clarification_requests=(),
+                        next_focus_dimension="none",
+                    )
+                )
+            ),
+            grounding_input={
+                "query": "Show active maintenance cost.",
+                "current_state": complete_state().model_dump(mode="json"),
+                "clarification_qa": [answer.model_dump(mode="json")],
+                "relevant_column_meanings": {},
+                "relevant_knowledge_definitions": [],
+            },
+        )
+        self.assertEqual(rejected_knowledge.state_update.status, "rejected")
+        self.assertEqual(rejected_knowledge.runtime, current)
 
     def test_json_paths_require_exact_fields_meaning_projection(self):
         known_columns = {

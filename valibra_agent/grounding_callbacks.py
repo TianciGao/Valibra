@@ -67,7 +67,9 @@ from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT_SHA256,
     GroundingUpdaterResult,
+    GroundingCallKind,
     build_real_sql_grounding_updater,
+    classify_grounding_input,
     load_sql_grounding_llm_config,
     requested_sql_grounding_updater_mode,
 )
@@ -187,8 +189,8 @@ _BOOTSTRAP_TOOL_SEQUENCE: tuple[str, ...] = (
 )
 _BOOTSTRAP_MODEL_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_STORED"
 _BOOTSTRAP_ALREADY_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_ALREADY_STORED"
-_MAX_PROVIDER_CALLS_PER_PHASE = 1
-_MAX_PROVIDER_CALLS_PER_TASK = 2
+_MAX_PROVIDER_CALLS_PER_PHASE = 4
+_MAX_PROVIDER_CALLS_PER_TASK = 8
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
 )
@@ -1283,7 +1285,9 @@ async def after_tool_callback(
     pending: _PendingToolCall | None = None
     bootstrap_tool_result = False
     bootstrap_tool_succeeded = False
+    grounding_clarification_answered = False
     phase_grounding_observation: SQLGroundingObservation | None = None
+    grounding_input: Mapping[str, Any] | None = None
     try:
         function_call_id = _require_function_call_id(tool_context)
         pending = _pop_pending(state, function_call_id)
@@ -1320,6 +1324,7 @@ async def after_tool_callback(
                         question=question,
                         answer=tool_response,
                     )
+                    grounding_clarification_answered = True
             phase_after = _phase(
                 state.get("current_phase", pending.phase_before)
             )
@@ -1331,35 +1336,38 @@ async def after_tool_callback(
                 bootstrap_tool_result = True
                 bootstrap_tool_succeeded = observation_type != "tool_error"
                 runtime, degraded = _ensure_runtime(state)
-                if tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]:
-                    phase_grounding_observation = build_sql_grounding_observation(
-                        task_id=_task_id(state),
-                        phase=pending.phase_before,
-                        sequence=_next_sequence(state),
-                        observation_type=observation_type,
-                        content=raw_content,
-                        summary="complete Official bootstrap evidence observed",
-                        tool_name=tool_name,
-                        function_call_id=function_call_id,
-                        private_raw_ref=private_ref,
-                    )
+                phase_grounding_observation = build_sql_grounding_observation(
+                    task_id=_task_id(state),
+                    phase=pending.phase_before,
+                    sequence=_next_sequence(state),
+                    observation_type=observation_type,
+                    content=raw_content,
+                    summary=f"Official {tool_name} evidence observed for staged Grounding",
+                    tool_name=tool_name,
+                    function_call_id=function_call_id,
+                    private_raw_ref=private_ref,
+                )
                 if (
                     bootstrap_tool_succeeded
-                    and tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]
                     and not degraded
                 ):
                     observation = phase_grounding_observation
-                    if observation is None:
-                        raise RuntimeError("Primary Grounding Observation is unavailable")
                     bound = _ACTIVE_TURN_MESSAGE.get()
                     if bound is None or bound.task_id != _task_id(state):
                         raise ValueError(
-                            "current bound query is required for Primary Grounding"
+                            "current bound query is required for staged Grounding"
                         )
-                    grounding_input = _build_grounding_request(
+                    call_kind: GroundingCallKind = {
+                        "get_schema": "structure",
+                        "get_all_column_meanings": "mapping",
+                        "get_all_knowledge_definitions": "knowledge",
+                    }[tool_name]
+                    grounding_input = _build_staged_grounding_request(
                         state,
+                        call_kind=call_kind,
                         query=_user_message_query(bound.message),
                         runtime=runtime,
+                        phase=1,
                     )
                     result = await _handle_observation(
                         state,
@@ -1368,17 +1376,17 @@ async def after_tool_callback(
                     )
                     runtime = result.runtime
                     audit = _observation_audit(result)
-                    audit["primary_grounding_triggered"] = True
-                    audit["bootstrap_evidence_complete"] = True
+                    audit["staged_grounding_kind"] = call_kind
+                    audit["staged_grounding_triggered"] = True
+                    audit["bootstrap_evidence_complete"] = (
+                        tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]
+                    )
                     control_audit = _control_audit_for_observation(
                         result,
                         gate_audit=pending.control_gate_audit,
                     )
                 else:
-                    if (
-                        phase_grounding_observation is not None
-                        and _is_real_provider_mode()
-                    ):
+                    if _is_real_provider_mode():
                         _record_phase_grounding_outcome(
                             state,
                             observation=phase_grounding_observation,
@@ -1440,10 +1448,49 @@ async def after_tool_callback(
                         private_ref=private_ref,
                     )
                 else:
-                    result = await _handle_observation(state, observation)
+                    grounding_input = None
+                    if (
+                        tool_name == "ask_user"
+                        and grounding_clarification_answered
+                        and not any(
+                            item.phase == pending.phase_before
+                            and item.answer is None
+                            for item in _clarification_records(state)
+                        )
+                        and _phase_grounding_outcomes(state).get(
+                            str(pending.phase_before)
+                        )
+                        is None
+                    ):
+                        bound = _ACTIVE_TURN_MESSAGE.get()
+                        if bound is None or bound.task_id != _task_id(state):
+                            raise ValueError(
+                                "current bound query is required for Clarification Patch"
+                            )
+                        follow_up = (
+                            _official_p2_follow_up(state)
+                            if pending.phase_before == 2
+                            else None
+                        )
+                        patch_runtime = _ensure_runtime(state)[0]
+                        grounding_input = _build_staged_grounding_request(
+                            state,
+                            call_kind="clarification_patch",
+                            query=_user_message_query(bound.message),
+                            runtime=patch_runtime,
+                            phase=pending.phase_before,
+                            follow_up=follow_up,
+                        )
+                    result = await _handle_observation(
+                        state,
+                        observation,
+                        grounding_input=grounding_input,
+                    )
                     follow_up_audit = None
                 runtime = result.runtime
                 audit = _observation_audit(result)
+                if grounding_input is not None:
+                    audit["staged_grounding_kind"] = "clarification_patch"
                 audit.update(
                     {
                         "function_call_id": function_call_id,
@@ -1752,34 +1799,43 @@ async def _handle_submit_observation(
         follow_up_observation: SQLGroundingObservation | None = None
         try:
             follow_up = _extract_submit_follow_up(tool_response)
-            follow_up_observation = build_sql_grounding_observation(
-                task_id=_task_id(state),
-                phase=2,
-                sequence=_next_sequence(state),
-                observation_type="p2_follow_up",
-                content=follow_up,
-                summary="official Phase-2 follow-up observed",
-                private_raw_ref=private_ref,
-            )
             bound = _ACTIVE_TURN_MESSAGE.get()
             if bound is None or bound.task_id != _task_id(state):
                 raise ValueError(
                     "current bound query is required for P2 Grounding"
                 )
-            grounding_input = _build_p2_grounding_request(
-                state,
-                query=_user_message_query(bound.message),
-                follow_up=follow_up,
-                runtime=transitioned,
-            )
-            follow_up_result = await _handle_observation(
-                state,
-                follow_up_observation,
-                transitioned,
-                grounding_input=grounding_input,
-            )
-            final_runtime = follow_up_result.runtime
-            follow_up_audit = _observation_audit(follow_up_result)
+            staged_audits: list[dict[str, Any]] = []
+            for call_kind in ("structure", "mapping", "knowledge"):
+                follow_up_observation = build_sql_grounding_observation(
+                    task_id=_task_id(state),
+                    phase=2,
+                    sequence=_next_sequence(state),
+                    observation_type="p2_follow_up",
+                    content=follow_up,
+                    summary=f"official Phase-2 follow-up for {call_kind} Grounding",
+                    private_raw_ref=private_ref,
+                )
+                grounding_input = _build_staged_grounding_request(
+                    state,
+                    call_kind=call_kind,
+                    query=_user_message_query(bound.message),
+                    follow_up=follow_up,
+                    runtime=final_runtime,
+                    phase=2,
+                )
+                follow_up_result = await _handle_observation(
+                    state,
+                    follow_up_observation,
+                    final_runtime,
+                    grounding_input=grounding_input,
+                )
+                final_runtime = follow_up_result.runtime
+                stage_audit = _observation_audit(follow_up_result)
+                stage_audit["staged_grounding_kind"] = call_kind
+                staged_audits.append(stage_audit)
+                if _phase_grounding_failure(state, 2) is not None:
+                    break
+            follow_up_audit = {"staged_grounding": staged_audits}
         except Exception as exc:
             if follow_up_observation is not None and _is_real_provider_mode():
                 _record_phase_grounding_outcome(
@@ -1896,7 +1952,7 @@ async def _handle_observation_serialized(
             service_status="skipped_tool_error_audit_only",
             observation=observation,
         )
-    if observation.observation_type == "user_answer":
+    if observation.observation_type == "user_answer" and grounding_input is None:
         return _ObservationResult(
             runtime=active_runtime,
             service_status="skipped_affected_dimensions_unfrozen",
@@ -1913,6 +1969,20 @@ async def _handle_observation_serialized(
             runtime=active_runtime,
             service_status="stored_official_evidence_only",
             observation=observation,
+        )
+    try:
+        call_kind = classify_grounding_input(
+            grounding_input,
+            phase=observation.phase,
+        )
+    except Exception as exc:
+        return _failed_phase_grounding_result(
+            state,
+            runtime=active_runtime,
+            observation=observation,
+            service_status="rejected_staged_grounding_input",
+            error_type=type(exc).__name__[:128],
+            provider_attempted=False,
         )
     provider_mode = _is_real_provider_mode()
     if provider_mode:
@@ -1940,7 +2010,12 @@ async def _handle_observation_serialized(
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
             phase_calls = _provider_phase_call_count(state, observation.phase)
-            expected_phase_calls = 0
+            expected_phase_calls = {
+                "structure": 0,
+                "mapping": 1,
+                "knowledge": 2,
+                "clarification_patch": 3,
+            }[call_kind]
             if phase_calls != expected_phase_calls:
                 return _failed_phase_grounding_result(
                     state,
@@ -2019,24 +2094,35 @@ async def _handle_observation_serialized(
         control_status = "succeeded"
         clarifications_before = _clarification_records(state)
         try:
-            if service_result.response is not None:
+            if (
+                call_kind == "knowledge"
+                and service_result.response is not None
+            ):
                 _register_clarification_requests(
                     state,
                     phase=observation.phase,
                     requests=service_result.response.user_clarification_requests,
                 )
-            candidate, control_events = _advance_ready_control_stage(
-                state,
-                candidate,
-            )
-            if provider_mode:
-                _record_phase_grounding_outcome(
-                    state,
-                    observation=observation,
-                    runtime=candidate,
-                    status="succeeded",
-                    provider_attempted=service_result.llm_telemetry.attempted,
+            phase_ready = call_kind == "clarification_patch" or (
+                call_kind == "knowledge"
+                and not any(
+                    item.phase == observation.phase and item.answer is None
+                    for item in _clarification_records(state)
                 )
+            )
+            if phase_ready:
+                candidate, control_events = _advance_ready_control_stage(
+                    state,
+                    candidate,
+                )
+                if provider_mode:
+                    _record_phase_grounding_outcome(
+                        state,
+                        observation=observation,
+                        runtime=candidate,
+                        status="succeeded",
+                        provider_attempted=service_result.llm_telemetry.attempted,
+                    )
         except Exception as exc:
             _store_clarification_records(state, clarifications_before)
             return _failed_phase_grounding_result(
@@ -2217,6 +2303,14 @@ def _build_validation_context(
             supported_json_paths=supported_json_paths,
             supported_knowledge=supported_knowledge,
         )
+    for clarification in _clarification_records(state):
+        if (
+            clarification.kind == "missing_knowledge"
+            and clarification.answer is not None
+            and clarification.answer == clarification.answer.strip()
+            and len(clarification.answer) <= 2_048
+        ):
+            supported_knowledge.add(("business_rule", clarification.answer))
     _project_official_evidence(
         tool_name=observation.tool_name,
         observation_type=observation.observation_type,
@@ -2331,7 +2425,6 @@ def _next_bootstrap_tool(
         not _is_real_provider_mode()
         or runtime.stage != "INITIAL_GROUNDING"
         or _phase(state.get("current_phase", 1)) != 1
-        or _provider_call_count(state) != 0
         or not _request_exposes_bootstrap_tools(llm_request)
     ):
         return None
@@ -2343,6 +2436,8 @@ def _next_bootstrap_tool(
     expected_prefix = _BOOTSTRAP_TOOL_SEQUENCE[: len(observed)]
     if observed != expected_prefix:
         raise ValueError("Official bootstrap trajectory is duplicate or out of order")
+    if _provider_phase_call_count(state, 1) != len(observed):
+        raise ValueError("bootstrap evidence and staged Grounding calls differ")
     if len(observed) == len(_BOOTSTRAP_TOOL_SEQUENCE):
         return None
     return _BOOTSTRAP_TOOL_SEQUENCE[len(observed)]
@@ -2766,6 +2861,22 @@ def _bootstrap_evidence_events(state: Any) -> tuple[dict[str, Any], ...]:
     return events
 
 
+def _bootstrap_evidence_prefix(state: Any) -> tuple[dict[str, Any], ...]:
+    """Return the unique successful Official bootstrap prefix seen so far."""
+
+    events = tuple(
+        event
+        for event in _completed_sql_grounding_trajectory(state)
+        if event["tool_name"] in _BOOTSTRAP_TOOL_SEQUENCE
+    )
+    observed = tuple(event["tool_name"] for event in events)
+    if observed != _BOOTSTRAP_TOOL_SEQUENCE[: len(observed)]:
+        raise ValueError("bootstrap evidence is duplicate or out of order")
+    if any(event["observation_type"] == "tool_error" for event in events):
+        raise ValueError("bootstrap evidence contains an Official tool error")
+    return events
+
+
 def _official_p2_follow_up(state: Any) -> str:
     """Recover the unique Official P2 question from a successful P1 submit."""
 
@@ -2795,52 +2906,114 @@ def _validation_follow_up_query(
     return None
 
 
-def _build_grounding_request(
+def _phase_request_common(
     state: Any,
     *,
     query: str,
     runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    follow_up: str | None = None,
 ) -> dict[str, Any]:
-    """Rebuild the five-field Primary input ephemerally from Official facts."""
+    """Build only the stable query/State fields shared by one staged call."""
 
     if not isinstance(query, str) or not query or query != query.strip():
         raise ValueError("bounded original query is required")
-    events = _bootstrap_evidence_events(state)
-    by_tool = {event["tool_name"]: event["content"] for event in events}
-    _parse_schema_projection(by_tool["get_schema"])
-    _exact_all_column_meanings(by_tool["get_all_column_meanings"])
-    _exact_knowledge_definitions(by_tool["get_all_knowledge_definitions"])
-    return {
+    result: dict[str, Any] = {
         "query": query,
-        "schema": by_tool["get_schema"],
-        "column_meanings": by_tool["get_all_column_meanings"],
-        "knowledge_definitions": by_tool["get_all_knowledge_definitions"],
         "current_state": runtime.grounding_state.model_dump(mode="json"),
     }
+    if phase == 2:
+        if (
+            runtime.stage != "P2_INCREMENTAL"
+            or not isinstance(follow_up, str)
+            or not follow_up
+            or follow_up != follow_up.strip()
+        ):
+            raise ValueError("P2 staged Grounding requires a bounded follow-up")
+        result.update(
+            {
+                "follow_up": follow_up,
+                "user_clarifications": [
+                    item.model_dump(mode="json")
+                    for item in _clarification_records(state)
+                    if item.phase == 1 and item.answer is not None
+                ],
+            }
+        )
+    elif phase != 1:
+        raise ValueError("Grounding phase must be 1 or 2")
+    return result
 
 
-def _build_p2_grounding_request(
+def _build_staged_grounding_request(
     state: Any,
     *,
+    call_kind: GroundingCallKind,
     query: str,
-    follow_up: str,
     runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    follow_up: str | None = None,
 ) -> dict[str, Any]:
-    """Reuse the one task-level bootstrap for one Phase-2 follow-up call."""
+    """Project only the evidence authorized for one fixed 1.2 call."""
 
-    if runtime.stage != "P2_INCREMENTAL":
-        raise ValueError("P2 Grounding requires P2_INCREMENTAL")
-    if not isinstance(follow_up, str) or not follow_up or follow_up != follow_up.strip():
-        raise ValueError("bounded P2 follow-up is required")
-    answered_clarifications = [
-        item.model_dump(mode="json")
+    events = _bootstrap_evidence_prefix(state)
+    by_tool = {event["tool_name"]: event["content"] for event in events}
+    base = _phase_request_common(
+        state,
+        query=query,
+        runtime=runtime,
+        phase=phase,
+        follow_up=follow_up,
+    )
+    if call_kind == "structure":
+        schema = by_tool.get("get_schema")
+        _parse_schema_projection(schema)
+        return {**base, "schema": schema}
+    if call_kind == "mapping":
+        meanings = by_tool.get("get_all_column_meanings")
+        if runtime.grounding_state.tables is None:
+            raise ValueError("Mapping Grounding requires evaluated candidate tables")
+        return {
+            **base,
+            "column_meanings": _project_column_meanings(
+                meanings,
+                tables=runtime.grounding_state.tables,
+            ),
+        }
+    if call_kind == "knowledge":
+        definitions = by_tool.get("get_all_knowledge_definitions")
+        if definitions is None:
+            raise ValueError("Knowledge Grounding requires bootstrap knowledge")
+        return {
+            **base,
+            "knowledge_definitions": _normalized_knowledge_definitions(definitions),
+            "relevant_column_meanings": _relevant_mapping_column_meanings(
+                by_tool.get("get_all_column_meanings"),
+                runtime,
+            ),
+        }
+    if call_kind != "clarification_patch":
+        raise ValueError("unsupported staged Grounding call kind")
+    records = tuple(
+        item
         for item in _clarification_records(state)
-        if item.phase == 1 and item.answer is not None
-    ]
+        if item.phase == phase
+    )
+    if not records or any(item.answer is None for item in records):
+        raise ValueError("Clarification Patch requires all phase answers")
     return {
-        **_build_grounding_request(state, query=query, runtime=runtime),
-        "follow_up": follow_up,
-        "user_clarifications": answered_clarifications,
+        **base,
+        "clarification_qa": [item.model_dump(mode="json") for item in records],
+        "relevant_column_meanings": _relevant_clarification_column_meanings(
+            by_tool.get("get_all_column_meanings"),
+            runtime,
+            records,
+        ),
+        "relevant_knowledge_definitions": _relevant_clarification_knowledge(
+            by_tool.get("get_all_knowledge_definitions"),
+            runtime,
+            records,
+        ),
     }
 
 
@@ -3066,6 +3239,184 @@ def _exact_knowledge_definitions(content: Any) -> tuple[str, ...]:
             raise ValueError("bulk knowledge entry has no canonical definition")
         definitions.append(definition)
     return tuple(definitions)
+
+
+def _normalized_knowledge_definitions(content: Any) -> list[dict[str, Any]]:
+    """Return the validated Official list as finite JSON, never raw history."""
+
+    value = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(
+                value,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("bulk knowledge definitions must be strict JSON") from exc
+    _exact_knowledge_definitions(value)
+    normalized = json.loads(canonical_json(value))
+    if not isinstance(normalized, list):
+        raise ValueError("bulk knowledge definitions must be a JSON list")
+    return normalized
+
+
+def _project_column_meanings(
+    content: Any,
+    *,
+    tables: tuple[str, ...],
+    columns: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Keep only metadata for candidate tables and, optionally, exact fields."""
+
+    meanings = _exact_all_column_meanings(content)
+    table_names = set(tables)
+    short_tables = {table.rsplit(".", 1)[-1] for table in tables}
+    result: dict[str, Any] = {}
+    for raw_key, value in meanings.items():
+        if not isinstance(raw_key, str):
+            continue
+        parts = raw_key.split("|")
+        if len(parts) >= 3:
+            table = parts[-2]
+            column = f"{table}.{parts[-1]}"
+            if table not in table_names and table not in short_tables:
+                continue
+            if columns is not None and not any(
+                candidate == column
+                or candidate.endswith(f".{column}")
+                for candidate in columns
+            ):
+                continue
+            result[raw_key] = value
+            continue
+        if raw_key not in table_names and raw_key not in short_tables:
+            continue
+        if not isinstance(value, dict) or columns is None:
+            result[raw_key] = value
+            continue
+        selected = {
+            name: meaning
+            for name, meaning in value.items()
+            if isinstance(name, str)
+            and any(
+                candidate == f"{raw_key}.{name}"
+                or candidate.endswith(f".{raw_key}.{name}")
+                for candidate in columns
+            )
+        }
+        if selected:
+            result[raw_key] = selected
+    return json.loads(canonical_json(result))
+
+
+def _mapping_referenced_columns(runtime: GroundingRuntime) -> frozenset[str]:
+    result: set[str] = set()
+    for mapping in runtime.grounding_state.column_mapping or ():
+        for target in mapping.targets:
+            try:
+                expression = sqlglot.parse_one(target, read="postgres")
+            except ParseError:
+                continue
+            for column in expression.find_all(exp.Column):
+                qualifier = ".".join(
+                    part
+                    for part in (column.catalog, column.db, column.table)
+                    if part
+                )
+                if qualifier and column.name:
+                    result.add(f"{qualifier}.{column.name}")
+    return frozenset(result)
+
+
+def _relevant_mapping_column_meanings(
+    content: Any,
+    runtime: GroundingRuntime,
+) -> dict[str, Any]:
+    tables = runtime.grounding_state.tables
+    if tables is None:
+        raise ValueError("relevant metadata requires evaluated tables")
+    return _project_column_meanings(
+        content,
+        tables=tables,
+        columns=_mapping_referenced_columns(runtime),
+    )
+
+
+def _relevant_clarification_column_meanings(
+    content: Any,
+    runtime: GroundingRuntime,
+    records: tuple[UserClarificationRecord, ...],
+) -> dict[str, Any]:
+    tables = runtime.grounding_state.tables
+    if tables is None:
+        raise ValueError("clarification metadata requires evaluated tables")
+    affected = {item.phrase for item in records}
+    columns: set[str] = set()
+    for mapping in runtime.grounding_state.column_mapping or ():
+        if mapping.phrase not in affected:
+            continue
+        temporary = runtime.model_copy(
+            update={
+                "grounding_state": runtime.grounding_state.model_copy(
+                    update={"column_mapping": (mapping,)}
+                )
+            }
+        )
+        columns.update(_mapping_referenced_columns(temporary))
+    projected = _project_column_meanings(
+        content,
+        tables=tables,
+        columns=frozenset(columns),
+    )
+    if projected:
+        return projected
+    # No existing candidate may be exactly why clarification was required.
+    # A lexical slice remains deterministic and cannot authorize identifiers;
+    # the full ValidationContext still performs the authoritative check.
+    candidate_meanings = _project_column_meanings(content, tables=tables)
+    needles = _clarification_needles(records)
+    return {
+        key: value
+        for key, value in candidate_meanings.items()
+        if any(needle in canonical_json({key: value}).casefold() for needle in needles)
+    }
+
+
+def _relevant_clarification_knowledge(
+    content: Any,
+    runtime: GroundingRuntime,
+    records: tuple[UserClarificationRecord, ...],
+) -> list[dict[str, Any]]:
+    definitions = _normalized_knowledge_definitions(content)
+    retained = {
+        item.content for item in runtime.grounding_state.domain_knowledge or ()
+    }
+    needles = _clarification_needles(records)
+    result: list[dict[str, Any]] = []
+    for item in definitions:
+        definition = _exact_knowledge_definition(item)
+        if definition is None:
+            continue
+        folded = definition.casefold()
+        if definition in retained or any(needle in folded for needle in needles):
+            result.append(item)
+    return json.loads(canonical_json(result))
+
+
+def _clarification_needles(
+    records: tuple[UserClarificationRecord, ...],
+) -> frozenset[str]:
+    values = " ".join(
+        part
+        for item in records
+        for part in (item.phrase, item.question, item.answer or "")
+    ).casefold()
+    return frozenset(
+        token
+        for token in re.findall(r"[\w$]+", values, flags=re.UNICODE)
+        if len(token) >= 3
+    )
 
 
 def _column_meaning_json_paths(

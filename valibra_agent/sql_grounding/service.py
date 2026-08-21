@@ -9,7 +9,6 @@ from pydantic import Field
 
 from valibra_agent.sql_grounding.models import (
     ContractModel,
-    GROUNDING_DIMENSIONS,
     GroundingDimension,
     GroundingLLMResponse,
     GroundingRuntime,
@@ -29,8 +28,10 @@ from valibra_agent.sql_grounding.telemetry import (
     StateUpdateTelemetry,
 )
 from valibra_agent.sql_grounding.updater import (
+    GroundingCallKind,
     GroundingUpdaterError,
     SQLGroundingUpdater,
+    classify_grounding_input,
 )
 
 
@@ -60,7 +61,7 @@ async def process_sql_grounding_observation(
 
     old_sha = sql_grounding_state_sha256(runtime.grounding_state)
     try:
-        _validate_service_inputs(
+        call_kind = _validate_service_inputs(
             runtime,
             observation,
             context,
@@ -111,7 +112,7 @@ async def process_sql_grounding_observation(
             runtime,
             observation,
             affected_dimensions=affected_dimensions,
-            bundled_grounding=grounding_input is not None,
+            call_kind=call_kind,
         )
         changed = validate_grounding_state_transition(
             runtime.grounding_state,
@@ -123,7 +124,8 @@ async def process_sql_grounding_observation(
             observation,
             response,
             changed=changed,
-            bundled_grounding=grounding_input is not None,
+            call_kind=call_kind,
+            grounding_input=grounding_input,
         )
         candidate = GroundingRuntime(
             grounding_revision=runtime.grounding_revision + int(bool(changed)),
@@ -178,7 +180,7 @@ def _validate_service_inputs(
     context: ValidationContext,
     affected_dimensions: tuple[GroundingDimension, ...],
     grounding_input: Mapping[str, Any] | None,
-) -> None:
+) -> GroundingCallKind | None:
     if context.latest_observation_id != observation.observation_id:
         raise SQLGroundingValidationError(
             "ValidationContext must identify the latest legal Observation"
@@ -205,41 +207,43 @@ def _validate_service_inputs(
         raise SQLGroundingValidationError(
             "explicit affected_dimensions are only valid for a P2 follow-up"
         )
+    call_kind: GroundingCallKind | None = None
     if grounding_input is not None:
         if affected_dimensions:
             raise SQLGroundingValidationError(
-                "Primary Grounding cannot combine affected_dimensions"
+                "staged Grounding cannot combine affected_dimensions"
             )
-        primary_fields = {
-            "query",
-            "schema",
-            "column_meanings",
-            "knowledge_definitions",
-            "current_state",
-        }
-        p2_fields = primary_fields | {"follow_up", "user_clarifications"}
-        primary = (
+        call_kind = classify_grounding_input(
+            grounding_input,
+            phase=observation.phase,
+        )
+        expected_observation = {
+            "structure": ("schema", "get_schema"),
+            "mapping": ("metadata", "get_all_column_meanings"),
+            "knowledge": ("knowledge", "get_all_knowledge_definitions"),
+            "clarification_patch": ("user_answer", "ask_user"),
+        }[call_kind]
+        p1_staged = (
             runtime.stage == "INITIAL_GROUNDING"
             and observation.phase == 1
-            and observation.observation_type == "knowledge"
-            and observation.tool_name == "get_all_knowledge_definitions"
+            and observation.observation_type == expected_observation[0]
+            and observation.tool_name == expected_observation[1]
         )
-        p2_follow_up = (
+        p2_staged = (
             runtime.stage == "P2_INCREMENTAL"
             and observation.phase == 2
-            and observation.observation_type == "p2_follow_up"
-        )
-        if not primary and not p2_follow_up:
-            raise SQLGroundingValidationError(
-                "bundled Grounding requires P1 Primary or P2 follow-up"
+            and (
+                observation.observation_type == "p2_follow_up"
+                if call_kind != "clarification_patch"
+                else (
+                    observation.observation_type == "user_answer"
+                    and observation.tool_name == "ask_user"
+                )
             )
-        if primary:
-            expected_fields = primary_fields
-        else:
-            expected_fields = p2_fields
-        if set(grounding_input) != expected_fields:
+        )
+        if not p1_staged and not p2_staged:
             raise SQLGroundingValidationError(
-                "bundled Grounding input has an invalid field set"
+                "staged Grounding requires the matching P1 evidence or P2 follow-up"
             )
         if grounding_input.get("query") != context.current_query:
             raise SQLGroundingValidationError(
@@ -251,7 +255,7 @@ def _validate_service_inputs(
             raise SQLGroundingValidationError(
                 "bundled Grounding current_state differs from Runtime"
             )
-        if p2_follow_up:
+        if observation.phase == 2:
             if grounding_input.get("follow_up") != context.follow_up_query:
                 raise SQLGroundingValidationError(
                     "P2 Grounding follow_up differs from ValidationContext"
@@ -279,6 +283,7 @@ def _validate_service_inputs(
         stage=runtime.stage,
         authorized_dimensions=affected_dimensions,
     )
+    return call_kind
 
 
 def _authorization_for_observation(
@@ -286,12 +291,21 @@ def _authorization_for_observation(
     observation: SQLGroundingObservation,
     *,
     affected_dimensions: tuple[GroundingDimension, ...],
-    bundled_grounding: bool,
+    call_kind: GroundingCallKind | None,
 ) -> StateDiffAuthorization:
-    if bundled_grounding:
+    if call_kind is not None:
+        dimensions_by_kind: dict[
+            GroundingCallKind,
+            tuple[GroundingDimension, ...],
+        ] = {
+            "structure": ("tables", "join_keys"),
+            "mapping": ("tables", "join_keys", "column_mapping"),
+            "knowledge": ("column_mapping", "domain_knowledge"),
+            "clarification_patch": ("column_mapping", "domain_knowledge"),
+        }
         return StateDiffAuthorization(
             stage=runtime.stage,
-            authorized_dimensions=GROUNDING_DIMENSIONS,
+            authorized_dimensions=dimensions_by_kind[call_kind],
         )
     observation_type = observation.observation_type
     if observation_type == "schema":
@@ -321,14 +335,15 @@ def _validate_observation_specific_diff(
     response: GroundingLLMResponse,
     *,
     changed: tuple[GroundingDimension, ...],
-    bundled_grounding: bool,
+    call_kind: GroundingCallKind | None,
+    grounding_input: Mapping[str, Any] | None,
 ) -> None:
-    if bundled_grounding and (
-        not response.sql_grounding_state.all_dimensions_evaluated
-        or response.next_focus_dimension != "none"
-    ):
-        raise SQLGroundingValidationError(
-            "the phase Grounding response must complete all dimensions with focus none"
+    if call_kind is not None:
+        _validate_staged_response(
+            runtime,
+            response,
+            call_kind=call_kind,
+            grounding_input=grounding_input,
         )
     if (
         observation.observation_type in {"schema", "metadata"}
@@ -341,7 +356,7 @@ def _validate_observation_specific_diff(
                 f"{observation.observation_type} can only resolve null "
                 "domain_knowledge to []"
             )
-    if observation.observation_type in {
+    if call_kind is None and observation.observation_type in {
         "user_query",
         "tool_error",
         "user_answer",
@@ -350,7 +365,7 @@ def _validate_observation_specific_diff(
         raise SQLGroundingValidationError(
             f"{observation.observation_type} cannot directly change Grounding State"
         )
-    if observation.observation_type in {
+    if call_kind is None and observation.observation_type in {
         "tool_error",
         "user_answer",
         "sql_execution",
@@ -359,9 +374,125 @@ def _validate_observation_specific_diff(
         raise SQLGroundingValidationError(
             f"{observation.observation_type} cannot change Grounding focus"
         )
-    if observation.observation_type == "submission" and changed:
+    if call_kind is None and observation.observation_type == "submission" and changed:
         raise SQLGroundingValidationError(
             "submission cannot change Grounding State"
+        )
+
+
+def _validate_staged_response(
+    runtime: GroundingRuntime,
+    response: GroundingLLMResponse,
+    *,
+    call_kind: GroundingCallKind,
+    grounding_input: Mapping[str, Any] | None,
+) -> None:
+    old = runtime.grounding_state
+    new = response.sql_grounding_state
+    if call_kind == "structure":
+        if new.tables is None or new.join_keys is None:
+            raise SQLGroundingValidationError(
+                "Structure Grounding must evaluate tables and join_keys"
+            )
+        if (
+            new.column_mapping != old.column_mapping
+            or new.domain_knowledge != old.domain_knowledge
+        ):
+            raise SQLGroundingValidationError(
+                "Structure Grounding cannot change mapping or knowledge"
+            )
+        expected_focus = "column_mapping"
+    elif call_kind == "mapping":
+        if (
+            new.tables is None
+            or new.join_keys is None
+            or new.column_mapping is None
+        ):
+            raise SQLGroundingValidationError(
+                "Mapping Grounding must evaluate structure and column_mapping"
+            )
+        if new.domain_knowledge != old.domain_knowledge:
+            raise SQLGroundingValidationError(
+                "Mapping Grounding cannot change domain_knowledge"
+            )
+        expected_focus = "domain_knowledge"
+    elif call_kind == "knowledge":
+        if not new.all_dimensions_evaluated:
+            raise SQLGroundingValidationError(
+                "Knowledge Grounding must complete all four dimensions"
+            )
+        if new.tables != old.tables or new.join_keys != old.join_keys:
+            raise SQLGroundingValidationError(
+                "Knowledge Grounding cannot change tables or join_keys"
+            )
+        expected_focus = "none"
+    else:
+        if not new.all_dimensions_evaluated:
+            raise SQLGroundingValidationError(
+                "Clarification Patch requires a complete State"
+            )
+        if new.tables != old.tables or new.join_keys != old.join_keys:
+            raise SQLGroundingValidationError(
+                "Clarification Patch cannot change tables or join_keys"
+            )
+        if grounding_input is None:
+            raise SQLGroundingValidationError(
+                "Clarification Patch requires its bounded Q/A input"
+            )
+        clarifications = tuple(
+            UserClarificationRecord.model_validate(item)
+            for item in grounding_input.get("clarification_qa", ())
+        )
+        affected_phrases = {item.phrase for item in clarifications}
+        old_mappings = {item.phrase: item for item in old.column_mapping or ()}
+        new_mappings = {item.phrase: item for item in new.column_mapping or ()}
+        changed_phrases = {
+            phrase
+            for phrase in old_mappings.keys() | new_mappings.keys()
+            if old_mappings.get(phrase) != new_mappings.get(phrase)
+        }
+        if not changed_phrases.issubset(affected_phrases):
+            raise SQLGroundingValidationError(
+                "Clarification Patch changed an unrelated column_mapping phrase"
+            )
+        allowed_knowledge_content = {
+            item.get("definition")
+            for item in grounding_input.get(
+                "relevant_knowledge_definitions",
+                (),
+            )
+            if isinstance(item, Mapping)
+            and isinstance(item.get("definition"), str)
+        }
+        allowed_knowledge_content.update(
+            item.answer
+            for item in clarifications
+            if item.kind == "missing_knowledge" and item.answer is not None
+        )
+        old_knowledge = {
+            (item.kind, item.content)
+            for item in old.domain_knowledge or ()
+        }
+        new_knowledge = {
+            (item.kind, item.content)
+            for item in new.domain_knowledge or ()
+        }
+        changed_knowledge = old_knowledge.symmetric_difference(new_knowledge)
+        if any(
+            content not in allowed_knowledge_content
+            for _kind, content in changed_knowledge
+        ):
+            raise SQLGroundingValidationError(
+                "Clarification Patch changed unrelated domain_knowledge"
+            )
+        expected_focus = "none"
+    if response.next_focus_dimension != expected_focus:
+        raise SQLGroundingValidationError(
+            f"{call_kind} Grounding must set focus to {expected_focus}"
+        )
+    if call_kind != "knowledge" and response.user_clarification_requests:
+        raise SQLGroundingValidationError(
+            "only Knowledge Grounding may create clarification requests"
         )
 
 
