@@ -148,18 +148,72 @@ Markdown 或额外文字。
     + _COMMON_EXPRESSION_RULES
 )
 CHECK_GROUNDING_PROMPT = (
-    """你负责统一 Grounding Check。检查 query 与 current_state 是否已经具备安全写 SQL 所需
-的数据库语义。你只能返回 status、missing_information、next_tool、column_mapping、
-domain_knowledge。tables/join_keys 不可修改。
+    """你负责 Grounding Check。
 
-若完整：status=complete，missing_information=null，next_tool=null，并原样或有证据地更新
-mapping/knowledge。若不完整：必须写一个具体、可验证的新缺口，并精确选择一个工具：
-ask_user、get_column_meaning、get_all_external_knowledge_names（仅确有必要）、
-get_knowledge_definition、execute_sql。严禁 get_schema、get_all_column_meanings、
-get_all_knowledge_definitions、submit_sql。ask_user 只能询问 user_intent 或
-missing_knowledge，并必须同时填写 user_clarification_request；数据库实现问题不能问用户。
-每次输入只含当前 State，以及 initial 标记、最新一次工具结果或最新一次用户回答之一；
-不得假装看见更早的原始 Check 结果。
+输入包括：
+- query / follow_up
+- current_state
+- 最新一次补充证据或用户回答（如有）
+
+你的任务是检查：当前 State 是否已经有足够证据完成 Query。
+
+如果已经足够：
+- status = "complete"
+- missing_information = null
+- next_tool = null
+
+如果还不够：
+- status = "incomplete"
+- missing_information 必须明确写出当前还缺哪一条具体信息。
+- 只选择一个最相关的 Official tool。
+- 不要为了“再确认一下”调用工具。
+
+允许的 next_tool 形状只有：
+
+get_column_meaning：
+{"tool_name": "get_column_meaning",
+ "arguments": {"table_name": "...", "column_name": "..."},
+ "user_clarification_request": null}
+
+get_all_external_knowledge_names：
+{"tool_name": "get_all_external_knowledge_names",
+ "arguments": {},
+ "user_clarification_request": null}
+
+get_knowledge_definition：
+{"tool_name": "get_knowledge_definition",
+ "arguments": {"knowledge_name": "..."},
+ "user_clarification_request": null}
+
+execute_sql：
+{"tool_name": "execute_sql",
+ "arguments": {"sql": "..."},
+ "user_clarification_request": null}
+
+ask_user：
+{"tool_name": "ask_user",
+ "arguments": {"question": "..."},
+ "user_clarification_request": {
+   "phrase": "...", "kind": "user_intent", "question": "..."}}
+
+重要：
+- next_tool 必须是上述对象之一或 null，不能是字符串。
+- user_clarification_request 只能位于 next_tool 内部，不能放在顶层。
+- ask_user 的 kind 只能精确为 user_intent 或 missing_knowledge。
+- ask_user 只用于用户才能回答的意图或缺失知识，不能询问数据库、schema 或 SQL 实现问题。
+- 不允许调用 get_schema、get_all_column_meanings、get_all_knowledge_definitions 或 submit_sql。
+- column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有新证据需要修改时，必须原样保留，不能随意清空。
+- 只能根据当前 State 和最新证据修正 column_mapping / domain_knowledge，不能修改 tables / join_keys。
+- 没有足够证据时不要猜。
+
+只返回下面五个顶层字段：
+{"status": "complete 或 incomplete",
+ "missing_information": null,
+ "next_tool": null,
+ "column_mapping": [],
+ "domain_knowledge": []}
+
+不要返回其他顶层字段，不要输出解释、reasoning、Markdown 或额外文字。
 """.strip()
     + "\n\n"
     + _COMMON_EXPRESSION_RULES

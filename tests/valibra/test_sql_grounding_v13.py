@@ -41,14 +41,14 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "c18b3e366e8bf14de1f5cf1fa5144977e352cb96fabae9de6da579a46d03f6ed"
+PROMPT_SHA = "b319827f5c34bc38d30f9cf85048331bd9fef195814466baa6df9a9bc93dbda0"
 FORM_SHA = "58f44fbc8ea1ed1d38603b06fe13ec4a8a60d6d3512597de7ee6554b7e73df48"
-CONFIG_SHA = "20503be3af181db8cc3df1d9680d5e62e5fc50e4436f22e658303023546e24cb"
+CONFIG_SHA = "2ba5d5628f4028acdfe23c60e892d690514a5ef1bc18d5336e74738b42ffcebf"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "1fd863c27c20ea9cc83ff4ed34322bcf49aed1e10a3ccbff65c71638ccce7869",
     "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "b492e1fd0634a136dd00e8205918734890644d631663afa2209890ff28c6dd8e",
+    "check": "2af0859010675c8efc7097b1b1cfec7a6208accd844048468a0b6ab5aa141ac0",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -154,6 +154,18 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         )
         self.assertIn("不是选择 knowledge 的依据", knowledge_prompt)
         self.assertIn("不生成 SQL", knowledge_prompt)
+        check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
+        self.assertIn(
+            "next_tool 必须是上述对象之一或 null，不能是字符串",
+            check_prompt,
+        )
+        self.assertIn(
+            "user_clarification_request 只能位于 next_tool 内部",
+            check_prompt,
+        )
+        self.assertIn('"tool_name": "get_column_meaning"', check_prompt)
+        self.assertIn('"tool_name": "ask_user"', check_prompt)
+        self.assertIn("必须原样保留，不能随意清空", check_prompt)
 
     def test_stage_forms_have_only_authorized_fields(self) -> None:
         self.assertEqual(
@@ -167,6 +179,16 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         self.assertEqual(
             set(SQL_GROUNDING_STAGE_FORM_SCHEMAS["knowledge"]["properties"]),
             {"column_mapping", "selected_knowledge_ids"},
+        )
+        self.assertEqual(
+            set(SQL_GROUNDING_STAGE_FORM_SCHEMAS["check"]["properties"]),
+            {
+                "status",
+                "missing_information",
+                "next_tool",
+                "column_mapping",
+                "domain_knowledge",
+            },
         )
 
     def test_knowledge_selection_form_is_strict_and_ids_are_unique(self) -> None:
@@ -215,6 +237,39 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             GroundingCheckToolRequest(
                 tool_name="execute_sql",
                 arguments={"sql": "DELETE FROM operational_metrics"},
+            )
+        with self.assertRaises(ValidationError):
+            GroundingCheckResponse.model_validate(
+                {
+                    "status": "incomplete",
+                    "missing_information": "Need the exact maintenance field.",
+                    "next_tool": "get_column_meaning",
+                    "column_mapping": [],
+                    "domain_knowledge": [],
+                }
+            )
+        with self.assertRaises(ValidationError):
+            GroundingCheckResponse.model_validate(
+                {
+                    "status": "incomplete",
+                    "missing_information": "Need the user's intended measure.",
+                    "next_tool": {
+                        "tool_name": "ask_user",
+                        "arguments": {"question": "Which measure do you mean?"},
+                        "user_clarification_request": {
+                            "phrase": "maintenance cost",
+                            "kind": "user_intent",
+                            "question": "Which measure do you mean?",
+                        },
+                    },
+                    "user_clarification_request": {
+                        "phrase": "maintenance cost",
+                        "kind": "user_intent",
+                        "question": "Which measure do you mean?",
+                    },
+                    "column_mapping": [],
+                    "domain_knowledge": [],
+                }
             )
 
     def test_column_targets_are_joint_requirements_not_candidates(self) -> None:

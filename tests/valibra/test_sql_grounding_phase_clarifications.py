@@ -41,9 +41,9 @@ from tests.valibra.test_stage3_submit_driven_repair import bootstrap_trajectory
 
 
 QUERY = "Show active artists and their revenue."
-PROMPT_SHA = "c18b3e366e8bf14de1f5cf1fa5144977e352cb96fabae9de6da579a46d03f6ed"
+PROMPT_SHA = "b319827f5c34bc38d30f9cf85048331bd9fef195814466baa6df9a9bc93dbda0"
 FORM_SHA = "58f44fbc8ea1ed1d38603b06fe13ec4a8a60d6d3512597de7ee6554b7e73df48"
-CONFIG_SHA = "20503be3af181db8cc3df1d9680d5e62e5fc50e4436f22e658303023546e24cb"
+CONFIG_SHA = "2ba5d5628f4028acdfe23c60e892d690514a5ef1bc18d5336e74738b42ffcebf"
 
 
 def complete_state() -> SQLGroundingState:
