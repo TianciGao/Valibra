@@ -119,7 +119,9 @@ async def process_sql_grounding_observation(
         if isinstance(response, GroundingCheckResponse):
             tool = response.next_tool
             clarification = (
-                tool.user_clarification_request if tool is not None else None
+                tool.materialize_user_clarification_request()
+                if tool is not None
+                else None
             )
             if clarification is not None and not any(
                 clarification.phrase in source for source in context.query_texts

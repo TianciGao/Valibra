@@ -2457,7 +2457,7 @@ def _schedule_check_tool(
         raise ValueError("budget_exhausted")
 
     if request.tool_name == "ask_user":
-        clarification = request.user_clarification_request
+        clarification = request.materialize_user_clarification_request()
         if clarification is None:
             raise ValueError("ask_user Check is missing clarification metadata")
         _register_clarification_requests(

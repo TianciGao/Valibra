@@ -109,6 +109,15 @@ MAPPING_GROUNDING_PROMPT = (
     """你负责 Mapping Grounding。读取 query、current_state 和候选表内 column_meanings。
 填写固定表单 {tables, join_keys, column_mapping}。优先完成 phrase→确定字段表达式映射；
 只有 metadata 明确证明 Structure 有误时，才小范围修正 tables/join_keys。
+
+输出形状必须精确为：
+{"tables": ["..."],
+ "join_keys": ["..."],
+ "column_mapping": [{"phrase": "...", "targets": ["..."]}]}
+
+column_mapping 的字段名必须是 targets，不能是 target。targets 永远是 JSON array；
+即使只有一个确定字段，也必须写成 ["table.column"]。多个 targets 只允许表示共同
+参与同一计算或判断的字段，不是候选集合。
 """.strip()
     + "\n\n"
     + _COMMON_EXPRESSION_RULES
@@ -194,12 +203,14 @@ ask_user：
 {"tool_name": "ask_user",
  "arguments": {"question": "..."},
  "user_clarification_request": {
-   "phrase": "...", "kind": "user_intent", "question": "..."}}
+   "phrase": "...", "kind": "user_intent"}}
 
 重要：
 - next_tool 必须是上述对象之一或 null，不能是字符串。
 - user_clarification_request 只能位于 next_tool 内部，不能放在顶层。
 - ask_user 的 kind 只能精确为 user_intent 或 missing_knowledge。
+- ask_user 的 question 只写一次，只能位于 arguments.question；user_clarification_request
+  只填 phrase 和 kind，不得重复填写 question。
 - ask_user 只用于用户才能回答的意图或缺失知识，不能询问数据库、schema 或 SQL 实现问题。
 - 不允许调用 get_schema、get_all_column_meanings、get_all_knowledge_definitions 或 submit_sql。
 - column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有新证据需要修改时，必须原样保留，不能随意清空。

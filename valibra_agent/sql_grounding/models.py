@@ -565,12 +565,42 @@ class KnowledgeGroundingResponse(ContractModel):
         return tuple(sorted(value))
 
 
+class GroundingCheckClarificationProposal(ContractModel):
+    """Provider-only clarification metadata; the question has one source."""
+
+    phrase: Annotated[str, Field(min_length=1, max_length=MAX_PHRASE_CHARS)]
+    kind: UserClarificationKind
+
+    @field_validator("phrase")
+    @classmethod
+    def validate_phrase(cls, value: str) -> str:
+        return _require_bounded_text(
+            value,
+            label="Grounding Check clarification phrase",
+            maximum=MAX_PHRASE_CHARS,
+        )
+
+
 class GroundingCheckToolRequest(ContractModel):
     """One precise Official tool requested by an incomplete Check."""
 
     tool_name: GroundingCheckToolName
     arguments: dict[str, str]
-    user_clarification_request: UserClarificationRequest | None = None
+    user_clarification_request: GroundingCheckClarificationProposal | None = None
+
+    def materialize_user_clarification_request(
+        self,
+    ) -> UserClarificationRequest | None:
+        """Copy the sole Provider question into the durable typed record."""
+
+        clarification = self.user_clarification_request
+        if self.tool_name != "ask_user" or clarification is None:
+            return None
+        return UserClarificationRequest(
+            phrase=clarification.phrase,
+            kind=clarification.kind,
+            question=self.arguments["question"],
+        )
 
     @model_validator(mode="after")
     def validate_tool_arguments(self) -> "GroundingCheckToolRequest":
@@ -593,8 +623,7 @@ class GroundingCheckToolRequest(ContractModel):
         if self.tool_name == "ask_user":
             if clarification is None:
                 raise ValueError("ask_user requires a typed clarification request")
-            if self.arguments["question"] != clarification.question:
-                raise ValueError("ask_user question differs from clarification request")
+            self.materialize_user_clarification_request()
         elif clarification is not None:
             raise ValueError("only ask_user may carry a clarification request")
         if self.tool_name == "execute_sql":

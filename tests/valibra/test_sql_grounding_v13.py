@@ -13,6 +13,7 @@ from valibra_agent import grounding_callbacks
 from valibra_agent.sql_grounding.models import (
     ColumnMapping,
     DomainKnowledge,
+    GroundingCheckClarificationProposal,
     GroundingCheckResponse,
     GroundingCheckToolRequest,
     GroundingRuntime,
@@ -41,20 +42,20 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "b319827f5c34bc38d30f9cf85048331bd9fef195814466baa6df9a9bc93dbda0"
-FORM_SHA = "58f44fbc8ea1ed1d38603b06fe13ec4a8a60d6d3512597de7ee6554b7e73df48"
-CONFIG_SHA = "2ba5d5628f4028acdfe23c60e892d690514a5ef1bc18d5336e74738b42ffcebf"
+PROMPT_SHA = "9d6ebec81d63a7741b6aa031c481d4382d781192c055e18c80fdb4e56ab6f7ed"
+FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
+CONFIG_SHA = "d2475dac834970e16f232d694a567831991a8e4f116618122b279962006c469c"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
-    "mapping": "1fd863c27c20ea9cc83ff4ed34322bcf49aed1e10a3ccbff65c71638ccce7869",
+    "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "2af0859010675c8efc7097b1b1cfec7a6208accd844048468a0b6ab5aa141ac0",
+    "check": "4487a54437fd229ad8f3bf1ebb77f5b48b4db9cd5a1b9505b8e5f3407880c796",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
     "mapping": "7a1e8cb588d1c0b89546bfd02b8be0d254ca015cdee753e5e2d23e0da5ea3b44",
     "knowledge": "c80f6dc31b8bc4aad425fb73fe62e361dd06362551827473ee8e9302052ed246",
-    "check": "e8d6b0715866c505630b1d973368d3b9f89ec73504af72030199fe4249acce93",
+    "check": "ed4bdaf32e5415be3b4f30bd041c0c4dba4225705736c55bd0b516f5079327e6",
 }
 SCHEMA_WITH_ROWS = """CREATE TABLE operational_metrics (
   asset_id INTEGER PRIMARY KEY,
@@ -154,6 +155,10 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         )
         self.assertIn("不是选择 knowledge 的依据", knowledge_prompt)
         self.assertIn("不生成 SQL", knowledge_prompt)
+        mapping_prompt = SQL_GROUNDING_STAGE_PROMPTS["mapping"]
+        self.assertIn('"targets": ["..."]', mapping_prompt)
+        self.assertIn("字段名必须是 targets，不能是 target", mapping_prompt)
+        self.assertIn('必须写成 ["table.column"]', mapping_prompt)
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         self.assertIn(
             "next_tool 必须是上述对象之一或 null，不能是字符串",
@@ -165,6 +170,8 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         )
         self.assertIn('"tool_name": "get_column_meaning"', check_prompt)
         self.assertIn('"tool_name": "ask_user"', check_prompt)
+        self.assertIn("question 只写一次", check_prompt)
+        self.assertIn("只填 phrase 和 kind", check_prompt)
         self.assertIn("必须原样保留，不能随意清空", check_prompt)
 
     def test_stage_forms_have_only_authorized_fields(self) -> None:
@@ -190,6 +197,29 @@ class SQLGroundingV13FormTests(unittest.TestCase):
                 "domain_knowledge",
             },
         )
+        clarification_schema = SQL_GROUNDING_STAGE_FORM_SCHEMAS["check"]["$defs"][
+            "GroundingCheckClarificationProposal"
+        ]
+        self.assertEqual(
+            set(clarification_schema["properties"]),
+            {"phrase", "kind"},
+        )
+        self.assertFalse(clarification_schema.get("additionalProperties", True))
+
+    def test_mapping_rejects_singular_target_field(self) -> None:
+        with self.assertRaises(ValidationError):
+            MappingGroundingResponse.model_validate(
+                {
+                    "tables": ["operational_metrics"],
+                    "join_keys": [],
+                    "column_mapping": [
+                        {
+                            "phrase": "maintenance cost",
+                            "target": "operational_metrics.maintcost",
+                        }
+                    ],
+                }
+            )
 
     def test_knowledge_selection_form_is_strict_and_ids_are_unique(self) -> None:
         empty = KnowledgeGroundingResponse(
@@ -248,6 +278,55 @@ class SQLGroundingV13FormTests(unittest.TestCase):
                     "domain_knowledge": [],
                 }
             )
+
+    def test_check_ask_user_question_is_materialized_from_arguments_once(self) -> None:
+        question = "Which maintenance cost meaning do you intend?"
+        response = GroundingCheckResponse.model_validate(
+            {
+                "status": "incomplete",
+                "missing_information": "The intended maintenance metric is unknown.",
+                "next_tool": {
+                    "tool_name": "ask_user",
+                    "arguments": {"question": question},
+                    "user_clarification_request": {
+                        "phrase": "maintenance cost",
+                        "kind": "user_intent",
+                    },
+                },
+                "column_mapping": [],
+                "domain_knowledge": [],
+            }
+        )
+        materialized = (
+            response.next_tool.materialize_user_clarification_request()
+            if response.next_tool is not None
+            else None
+        )
+        self.assertIsNotNone(materialized)
+        self.assertEqual(materialized.question, question)
+        self.assertEqual(materialized.phrase, "maintenance cost")
+        self.assertEqual(materialized.kind, "user_intent")
+
+        with self.assertRaises(ValidationError):
+            GroundingCheckToolRequest(
+                tool_name="get_column_meaning",
+                arguments={
+                    "table_name": "operational_metrics",
+                    "column_name": "maintcost",
+                },
+                user_clarification_request=GroundingCheckClarificationProposal(
+                    phrase="maintenance cost",
+                    kind="user_intent",
+                ),
+            )
+        ordinary = GroundingCheckToolRequest(
+            tool_name="get_column_meaning",
+            arguments={
+                "table_name": "operational_metrics",
+                "column_name": "maintcost",
+            },
+        )
+        self.assertIsNone(ordinary.user_clarification_request)
         with self.assertRaises(ValidationError):
             GroundingCheckResponse.model_validate(
                 {
@@ -572,10 +651,9 @@ class SQLGroundingV13CallbackContractTests(unittest.TestCase):
             else {"question": "Which maintenance cost meaning do you intend?"}
         )
         clarification = (
-            UserClarificationRequest(
+            GroundingCheckClarificationProposal(
                 phrase="maintenance cost",
                 kind="user_intent",
-                question=args["question"],
             )
             if tool == "ask_user"
             else None
@@ -661,10 +739,9 @@ class SQLGroundingV13CallbackContractTests(unittest.TestCase):
             next_tool=GroundingCheckToolRequest(
                 tool_name="ask_user",
                 arguments={"question": second_question},
-                user_clarification_request=UserClarificationRequest(
+                user_clarification_request=GroundingCheckClarificationProposal(
                     phrase="maintenance cost",
                     kind="missing_knowledge",
-                    question=second_question,
                 ),
             ),
             column_mapping=complete_state().column_mapping or (),
