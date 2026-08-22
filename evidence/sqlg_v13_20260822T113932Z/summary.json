@@ -51,7 +51,7 @@
     "check_calls": 0,
     "tasks": [
       {
-        "task_id": "solar_panel_1",
+        "smoke_case_id": "solar_panel_1",
         "reward": 0.0,
         "p1": false,
         "p2": false,
@@ -61,7 +61,7 @@
         "wall_seconds": 346.82424759864807
       },
       {
-        "task_id": "solar_panel_5",
+        "smoke_case_id": "solar_panel_5",
         "reward": 0.0,
         "p1": false,
         "p2": false,
@@ -71,7 +71,7 @@
         "wall_seconds": 323.3179349899292
       },
       {
-        "task_id": "solar_panel_7",
+        "smoke_case_id": "solar_panel_7",
         "reward": 0.0,
         "p1": false,
         "p2": false,
@@ -81,7 +81,7 @@
         "wall_seconds": 300.296373128891
       },
       {
-        "task_id": "solar_panel_12",
+        "smoke_case_id": "solar_panel_12",
         "reward": 0.0,
         "p1": false,
         "p2": false,
@@ -91,7 +91,7 @@
         "wall_seconds": 307.81439185142517
       },
       {
-        "task_id": "solar_panel_20",
+        "smoke_case_id": "solar_panel_20",
         "reward": 0.0,
         "p1": false,
         "p2": false,

@@ -3404,7 +3404,7 @@ def _build_staged_grounding_request(
     if call_kind == "structure":
         schema = by_tool.get("get_schema")
         _parse_schema_projection(schema)
-        return {**base, "schema": _ddl_only_schema(schema)}
+        return {**base, "schema": schema}
     if call_kind == "mapping":
         meanings = by_tool.get("get_all_column_meanings")
         if runtime.grounding_state.tables is None:
@@ -3640,31 +3640,6 @@ def _parse_schema_projection(content: Any) -> tuple[frozenset[str], frozenset[st
                     raise ValueError("schema column has no identifier")
                 columns.add(f"{table}.{name}")
     return frozenset(tables), frozenset(columns)
-
-
-def _ddl_only_schema(content: Any) -> str:
-    """Return only complete CREATE TABLE DDL, never sample rows or values."""
-
-    if not isinstance(content, str) or not content:
-        raise ValueError("schema content must be text")
-    statements: list[str] = []
-    active: list[str] | None = None
-    for line in content.splitlines():
-        if active is None:
-            if re.match(r'^\s*(?:CREATE|"CREATE")\s+TABLE\b', line, re.IGNORECASE):
-                active = [line]
-            continue
-        active.append(line)
-        if re.match(r"^\s*\);\s*$", line):
-            statements.append("\n".join(active))
-            active = None
-    if active is not None or not statements:
-        raise ValueError("schema contains no complete CREATE TABLE DDL")
-    projected = "\n\n".join(statements)
-    _parse_schema_projection(projected)
-    if re.search(r"First\s+3\s+rows|sample", projected, re.IGNORECASE):
-        raise ValueError("DDL-only projection retained sample data")
-    return projected
 
 
 def _ddl_table_identifier(table: exp.Table) -> str:

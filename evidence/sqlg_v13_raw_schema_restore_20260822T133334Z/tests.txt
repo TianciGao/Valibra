@@ -1,0 +1,12 @@
+Focused V1.3 and lifecycle suite: Ran 74, OK (4 retired V1.2 tests skipped)
+Tracked repository suite: Ran 503, OK (4 retired V1.2 tests skipped)
+Plain discovery also found the pre-existing untracked SG7 draft test and its
+frozen-HEAD failures; that unrelated user-owned draft was preserved and excluded.
+pip check: PASS
+compileall valibra_agent tests/valibra: PASS
+git diff --check: PASS
+SHA boundary check: PASS
+system_agent diff: 0
+dependency diff: 0
+External calls during offline gates: 0
+Real smoke cases: 5/5 completed exactly once; reruns: 0

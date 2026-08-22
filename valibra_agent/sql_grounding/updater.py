@@ -98,7 +98,7 @@ targets。targets 不是候选字段集合，不得把 A/B 候选一起塞入。
 """.strip()
 
 STRUCTURE_GROUNDING_PROMPT = (
-    """你负责 Structure Grounding。只读取 query、current_state 和 DDL-only schema。
+    """你负责 Structure Grounding。只读取 query、current_state 和原始 get_schema evidence。
 填写固定表单 {tables, join_keys}。tables 是高召回但由 DDL 支持的候选表；join_keys 是
 由 PK/FK/DDL 支持的 canonical 关联表达式。不要填写字段映射、知识、工具或 SQL。
 """.strip()

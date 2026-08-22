@@ -41,11 +41,11 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "3dd763e99e05cb6842799f97407679b0e4e77b34c2c480673acbfe2bdc5f689e"
+PROMPT_SHA = "8d4e53fd2f53ea2635d4ddfb8bcca5c32da271546e0c181614e5cb5690b1635c"
 FORM_SHA = "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642"
-CONFIG_SHA = "5e39d275e62927353d6a82776189bed5a1d96cb1a15c4f2b4ea229d607401932"
+CONFIG_SHA = "24b00b82a2ee3a8219fadba8728a31fe7d29c9b97e51d8892e0c87a3093f7557"
 STAGE_PROMPT_SHA = {
-    "structure": "ad6b0fce71aee88e394fe51cf734eaea3894f5b09fb8f44178178348a0059e53",
+    "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "1fd863c27c20ea9cc83ff4ed34322bcf49aed1e10a3ccbff65c71638ccce7869",
     "knowledge": "8a34b636420f1b77f5cecaf6455869488888143a88cfaff65cffa98c1d021234",
     "check": "b492e1fd0634a136dd00e8205918734890644d631663afa2209890ff28c6dd8e",
@@ -60,11 +60,12 @@ SCHEMA_WITH_ROWS = """CREATE TABLE operational_metrics (
   asset_id INTEGER PRIMARY KEY,
   maintcost NUMERIC,
   reported_cost NUMERIC,
-  status TEXT
+  status TEXT,
+  payload JSONB
 );
 First 3 rows:
-asset_id | maintcost | reported_cost | status
-1 | 4 | 5 | active
+asset_id | maintcost | reported_cost | status | payload
+1 | 4 | 5 | active | {"quality": {"score": 0.98}}
 ...
 """
 
@@ -196,12 +197,29 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             "check",
         )
 
-    def test_structure_projection_strips_rows_and_values(self) -> None:
-        projected = grounding_callbacks._ddl_only_schema(SCHEMA_WITH_ROWS)
-        self.assertIn("CREATE TABLE", projected)
-        self.assertNotIn("First 3 rows", projected)
-        self.assertNotIn("active", projected)
-        self.assertNotIn("1 | 4", projected)
+    def test_structure_request_preserves_raw_schema_rows_values_and_jsonb(self) -> None:
+        state = {
+            "task_id": "v13-raw-schema",
+            "tool_trajectory": [
+                {
+                    "tool": "get_schema",
+                    "args": {},
+                    "result": SCHEMA_WITH_ROWS,
+                    "phase": 1,
+                }
+            ],
+        }
+        payload = grounding_callbacks._build_staged_grounding_request(
+            state,
+            call_kind="structure",
+            query=QUERY,
+            runtime=GroundingRuntime(),
+            phase=1,
+        )
+        self.assertEqual(payload["schema"], SCHEMA_WITH_ROWS)
+        self.assertIn("First 3 rows", payload["schema"])
+        self.assertIn("active", payload["schema"])
+        self.assertIn('{"quality": {"score": 0.98}}', payload["schema"])
 
 
 class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -542,7 +560,7 @@ class SQLGroundingV13CallbackContractTests(unittest.TestCase):
                             function_response=types.FunctionResponse(
                                 id="bootstrap-schema",
                                 name="get_schema",
-                                response={"result": "CREATE TABLE secret_raw (...)"},
+                                response={"result": SCHEMA_WITH_ROWS},
                             )
                         )
                     ],
@@ -604,7 +622,8 @@ class SQLGroundingV13CallbackContractTests(unittest.TestCase):
         self.assertIn(QUERY, serialized)
         self.assertIn("execute_sql", serialized)
         self.assertNotIn("get_schema", serialized)
-        self.assertNotIn("secret_raw", serialized)
+        self.assertNotIn("First 3 rows", serialized)
+        self.assertNotIn('{"quality": {"score": 0.98}}', serialized)
 
     def test_main_execution_observation_does_not_change_frozen_state(self) -> None:
         state = complete_state()
