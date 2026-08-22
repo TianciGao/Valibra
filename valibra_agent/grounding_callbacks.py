@@ -1366,6 +1366,14 @@ async def after_tool_callback(
             # Official result by falling through to Baseline after_tool.
             return tool_response
 
+    consumed_check: _PendingCheckTool | None = None
+    if state is not None and function_call_id is not None:
+        consumed_check = _consume_pending_check_tool(
+            state,
+            function_call_id=function_call_id,
+            tool_name=_safe_tool_name(tool),
+        )
+
     trajectory_before = _trajectory_length(state)
     try:
         baseline_override = await baseline_callbacks.after_tool_callback(
@@ -1374,9 +1382,15 @@ async def after_tool_callback(
             tool_context,
             tool_response,
         )
-    except BaseException:
+    except BaseException as exc:
         if state is not None:
             _cleanup_pending_best_effort(state, tool_context)
+            if consumed_check is not None:
+                _fail_closed_consumed_check(
+                    state,
+                    consumed_check,
+                    exc,
+                )
         raise
     if state is None:
         return baseline_override
@@ -1393,7 +1407,7 @@ async def after_tool_callback(
     bootstrap_tool_result = False
     bootstrap_tool_succeeded = False
     grounding_clarification_answered = False
-    pending_check: _PendingCheckTool | None = None
+    pending_check = consumed_check
     phase_grounding_observation: SQLGroundingObservation | None = None
     grounding_input: Mapping[str, Any] | None = None
     try:
@@ -1410,12 +1424,6 @@ async def after_tool_callback(
             tool_name = _tool_name(tool)
             if pending.tool_name != tool_name:
                 raise ValueError("pending tool name does not match function_call_id")
-            if _is_check_function_call(
-                state,
-                function_call_id=function_call_id,
-                tool_name=tool_name,
-            ):
-                pending_check = _pending_check_tool(state)
             raw_content = to_jsonable(tool_response)
             observation_type = _classify_tool_observation_type(
                 tool_name,
@@ -1603,6 +1611,7 @@ async def after_tool_callback(
                 else:
                     grounding_input = None
                     if pending_check is not None:
+                        phase_grounding_observation = observation
                         bound = _ACTIVE_TURN_MESSAGE.get()
                         if bound is None or bound.task_id != _task_id(state):
                             raise ValueError(
@@ -1637,8 +1646,8 @@ async def after_tool_callback(
                                 and grounding_clarification_answered
                                 else None
                             ),
+                            paired_check_tool=pending_check,
                         )
-                        _store_pending_check_tool(state, None)
                     result = await _handle_observation(
                         state,
                         observation,
@@ -1670,6 +1679,11 @@ async def after_tool_callback(
     except Exception as exc:
         _cleanup_pending_best_effort(state, tool_context)
         runtime, _ = _ensure_runtime(state)
+        if pending_check is not None:
+            # A subsequent Check may already have been scheduled before an
+            # audit failure.  Never allow either the consumed action or a
+            # partially finalized successor to be dispatched after failure.
+            _store_pending_check_tool(state, None)
         if (
             phase_grounding_observation is not None
             and _is_real_provider_mode()
@@ -1687,7 +1701,9 @@ async def after_tool_callback(
                 provider_attempted=False,
             )
         audit = {
-            "service_status": "failed_open",
+            "service_status": (
+                "failed_closed" if pending_check is not None else "failed_open"
+            ),
             "function_call_id": _valid_context_identifier(tool_context),
             "tool_name": _safe_tool_name(tool),
             "private_raw_ref": private_ref,
@@ -1696,7 +1712,9 @@ async def after_tool_callback(
         }
         control_audit = _control_audit_for_runtime(
             runtime,
-            control_status="failed_open",
+            control_status=(
+                "failed_closed" if pending_check is not None else "failed_open"
+            ),
             error_type=type(exc).__name__[:128],
             gate_audit=(
                 pending.control_gate_audit if pending is not None else None
@@ -2875,11 +2893,76 @@ def _pending_check_tool(state: Any) -> _PendingCheckTool | None:
 
 def _store_pending_check_tool(state: Any, record: _PendingCheckTool | None) -> None:
     if record is None:
-        state.pop(GROUNDING_PENDING_CHECK_KEY, None)
+        # google.adk.sessions.state.State intentionally has no pop/del API.
+        # Persisting null is its supported, delta-visible representation of no
+        # pending Check action; _pending_check_tool already interprets it so.
+        state[GROUNDING_PENDING_CHECK_KEY] = None
         return
     if _pending_check_tool(state) is not None:
         raise ValueError("a Check tool is already pending")
     state[GROUNDING_PENDING_CHECK_KEY] = record.to_json()
+
+
+def _consume_pending_check_tool(
+    state: Any,
+    *,
+    function_call_id: str,
+    tool_name: str,
+) -> _PendingCheckTool | None:
+    """Consume one exact Check action before any fallible after-tool work."""
+
+    record = _pending_check_tool(state)
+    if (
+        record is None
+        or record.function_call_id != function_call_id
+        or record.tool_name != tool_name
+    ):
+        return None
+    _store_pending_check_tool(state, None)
+    return record
+
+
+def _fail_closed_consumed_check(
+    state: Any,
+    record: _PendingCheckTool,
+    error: BaseException,
+) -> None:
+    """Terminate a phase after its one-shot Official Check action was consumed."""
+
+    runtime, _ = _ensure_runtime(state)
+    error_type = type(error).__name__[:128]
+    observation = build_sql_grounding_observation(
+        task_id=_task_id(state),
+        phase=record.phase,
+        sequence=_next_sequence(state),
+        observation_type="tool_error",
+        content={"error_type": error_type},
+        summary="consumed Check tool result processing failed",
+        tool_name=record.tool_name,
+        function_call_id=record.function_call_id,
+    )
+    if (
+        _is_real_provider_mode()
+        and _phase_grounding_outcomes(state).get(str(record.phase)) is None
+    ):
+        _record_phase_grounding_outcome(
+            state,
+            observation=observation,
+            runtime=runtime,
+            status="failed",
+            error_type=error_type,
+            provider_attempted=False,
+        )
+    _append_error_audit(
+        state,
+        {
+            "service_status": "failed_closed",
+            "function_call_id": record.function_call_id,
+            "tool_name": record.tool_name,
+            "error_type": error_type,
+            **_runtime_audit(runtime),
+        },
+    )
 
 
 def _is_check_function_call(
@@ -3443,6 +3526,7 @@ def _build_check_grounding_request(
     latest_tool_arguments: Any = None,
     latest_tool_result: Any = None,
     latest_user_answer: Any = None,
+    paired_check_tool: _PendingCheckTool | None = None,
 ) -> dict[str, Any]:
     """Build one Check request with no accumulated raw Check history."""
 
@@ -3459,8 +3543,7 @@ def _build_check_grounding_request(
     if initial:
         return {**base, "check_context": {"kind": "initial"}}
     if latest_user_answer is not None:
-        pending = _pending_check_tool(state)
-        # after_tool clears pending only after this payload is built
+        pending = paired_check_tool or _pending_check_tool(state)
         if pending is None or pending.tool_name != "ask_user":
             raise ValueError("latest user answer has no paired Check request")
         return {

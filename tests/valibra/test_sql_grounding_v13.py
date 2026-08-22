@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from google.adk.models.llm_request import LlmRequest
+from google.adk.sessions.state import State
 from google.genai import types
 from pydantic import ValidationError
 
+from system_agent import callbacks as baseline_callbacks
 from valibra_agent import grounding_callbacks
 from valibra_agent.sql_grounding.models import (
     ColumnMapping,
@@ -634,7 +637,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class SQLGroundingV13CallbackContractTests(unittest.TestCase):
+class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
     def state(self, *, budget: float = 10.0) -> dict[str, object]:
         return {
             "task_id": "v13-task",
@@ -670,6 +673,132 @@ class SQLGroundingV13CallbackContractTests(unittest.TestCase):
             domain_knowledge=(),
         )
 
+    def adk_check_state(self) -> State:
+        value = self.state()
+        value.update(
+            {
+                "initial_budget": 10.0,
+                grounding_callbacks.GROUNDING_RUNTIME_KEY: GroundingRuntime(
+                    grounding_revision=3,
+                    stage="INITIAL_GROUNDING",
+                    focus_dimension="none",
+                    grounding_state=complete_state(),
+                ).model_dump(mode="json"),
+                grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY: 3,
+                grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY: {
+                    "1": 3,
+                    "2": 0,
+                },
+                "tool_trajectory": [
+                    {
+                        "type": "tool",
+                        "tool": "get_schema",
+                        "phase": 1,
+                        "args": {},
+                        "result": SCHEMA_WITH_ROWS,
+                    }
+                ],
+            }
+        )
+        return State(value, {})
+
+    async def run_check_tool(
+        self,
+        state: State,
+        *,
+        updater: FakeUpdater,
+        build_error: BaseException | None = None,
+    ) -> tuple[object, object, AsyncMock]:
+        pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=1,
+            response=self.incomplete_check(),
+        )
+        tool = SimpleNamespace(name=pending.tool_name)
+        context = SimpleNamespace(
+            state=state,
+            function_call_id=pending.function_call_id,
+            invocation_id="v13-check-exactly-once",
+        )
+        baseline_before = AsyncMock(return_value=None)
+
+        async def baseline_after(
+            _tool: object,
+            args: dict,
+            tool_context: object,
+            tool_response: object,
+        ) -> object:
+            self.assertIsNone(
+                grounding_callbacks._pending_check_tool(tool_context.state)
+            )
+            trajectory = list(tool_context.state.get("tool_trajectory", []))
+            trajectory.append(
+                {
+                    "type": "tool",
+                    "tool": pending.tool_name,
+                    "phase": 1,
+                    "args": args,
+                    "result": tool_response,
+                }
+            )
+            tool_context.state["tool_trajectory"] = trajectory
+            return "baseline-after"
+
+        build_patch = (
+            patch.object(
+                grounding_callbacks,
+                "_build_check_grounding_request",
+                side_effect=build_error,
+            )
+            if build_error is not None
+            else patch.object(
+                grounding_callbacks,
+                "_build_check_grounding_request",
+                wraps=grounding_callbacks._build_check_grounding_request,
+            )
+        )
+        token = grounding_callbacks._bind_turn_message(
+            state["task_id"],
+            "a-interact",
+            QUERY,
+        )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(grounding_callbacks, "_SQL_GROUNDING_UPDATER", updater),
+                patch.object(
+                    grounding_callbacks,
+                    "load_sql_grounding_llm_config",
+                    return_value=SimpleNamespace(max_calls_per_task=8),
+                ),
+                patch.object(
+                    baseline_callbacks,
+                    "before_tool_callback",
+                    baseline_before,
+                ),
+                patch.object(
+                    baseline_callbacks,
+                    "after_tool_callback",
+                    side_effect=baseline_after,
+                ),
+                build_patch,
+            ):
+                await grounding_callbacks.before_tool_callback(
+                    tool,
+                    pending.arguments,
+                    context,
+                )
+                state["budget_remaining"] = 9.5
+                returned = await grounding_callbacks.after_tool_callback(
+                    tool,
+                    pending.arguments,
+                    context,
+                    "reported maintenance cost",
+                )
+        finally:
+            grounding_callbacks._reset_turn_message(token)
+        return pending, returned, baseline_before
+
     def test_check_requires_budget_after_call_at_least_six(self) -> None:
         state = self.state(budget=6.4)
         with self.assertRaisesRegex(ValueError, "budget_exhausted"):
@@ -680,6 +809,139 @@ class SQLGroundingV13CallbackContractTests(unittest.TestCase):
             )
         audit = grounding_callbacks._check_audits(state)[0]
         self.assertEqual(audit["blocked_reason"], "budget_exhausted")
+
+    async def test_check_official_result_is_consumed_once_and_enters_next_check(
+        self,
+    ) -> None:
+        state = self.adk_check_state()
+        complete = GroundingCheckResponse(
+            status="complete",
+            column_mapping=complete_state().column_mapping or (),
+            domain_knowledge=(),
+        )
+        updater = FakeUpdater(complete, "check")
+
+        pending, returned, baseline_before = await self.run_check_tool(
+            state,
+            updater=updater,
+        )
+
+        self.assertEqual(returned, "baseline-after")
+        self.assertEqual(baseline_before.await_count, 1)
+        self.assertIsNone(grounding_callbacks._pending_check_tool(state))
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(
+            state[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
+            4,
+        )
+        self.assertEqual(
+            [
+                item["tool"]
+                for item in state["tool_trajectory"]
+                if item["tool"] == pending.tool_name
+            ],
+            [pending.tool_name],
+        )
+        self.assertTrue(grounding_callbacks._phase_grounding_succeeded(state, 1))
+
+    async def test_check_after_tool_error_consumes_once_and_fails_closed(
+        self,
+    ) -> None:
+        state = self.adk_check_state()
+        updater = FakeUpdater(
+            GroundingCheckResponse(
+                status="complete",
+                column_mapping=complete_state().column_mapping or (),
+                domain_knowledge=(),
+            ),
+            "check",
+        )
+        pending, returned, baseline_before = await self.run_check_tool(
+            state,
+            updater=updater,
+            build_error=AttributeError("synthetic Check result failure"),
+        )
+
+        self.assertEqual(returned, "baseline-after")
+        self.assertEqual(baseline_before.await_count, 1)
+        self.assertEqual(state["budget_remaining"], 9.5)
+        self.assertIsNone(grounding_callbacks._pending_check_tool(state))
+        self.assertEqual(updater.calls, 0)
+        failure = grounding_callbacks._phase_grounding_failure(state, 1)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.error_type, "AttributeError")
+        error = state[grounding_callbacks.GROUNDING_ERROR_AUDIT_KEY][-1]
+        self.assertEqual(error["service_status"], "failed_closed")
+        self.assertEqual(error["error_type"], "AttributeError")
+        self.assertEqual(error["function_call_id"], pending.function_call_id)
+
+        before_model = AsyncMock(return_value=None)
+        token = grounding_callbacks._bind_turn_message(
+            state["task_id"],
+            "a-interact",
+            QUERY,
+        )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(
+                    baseline_callbacks,
+                    "before_model_callback",
+                    before_model,
+                ),
+            ):
+                response = await grounding_callbacks.before_model_callback(
+                    SimpleNamespace(state=state),
+                    LlmRequest(
+                        contents=[
+                            types.Content(
+                                role="user",
+                                parts=[types.Part.from_text(text=QUERY)],
+                            )
+                        ],
+                        config=types.GenerateContentConfig(),
+                    ),
+                )
+        finally:
+            grounding_callbacks._reset_turn_message(token)
+
+        self.assertEqual(state["budget_remaining"], 9.5)
+        self.assertIsNotNone(response)
+        self.assertIn(
+            "VALIBRA_SQL_GROUNDING_FAILED_CLOSED",
+            response.content.parts[0].text,
+        )
+        self.assertIsNone(response.content.parts[0].function_call)
+        self.assertEqual(baseline_before.await_count, 1)
+
+        with self.assertRaisesRegex(ValueError, "new concrete gap"):
+            grounding_callbacks._schedule_check_tool(
+                state,
+                phase=1,
+                response=self.incomplete_check(),
+            )
+        same_tool_new_gap = self.incomplete_check().model_copy(
+            update={"missing_information": "A different concrete gap."}
+        )
+        with self.assertRaisesRegex(ValueError, "identical arguments"):
+            grounding_callbacks._schedule_check_tool(
+                state,
+                phase=1,
+                response=same_tool_new_gap,
+            )
+
+        duplicate = grounding_callbacks._PendingToolCall(
+            function_call_id=pending.function_call_id,
+            tool_name=pending.tool_name,
+            phase_before=1,
+            args_digest="0" * 64,
+            args_summary="{}",
+            sequence=99,
+        )
+        grounding_callbacks._add_pending(state, duplicate)
+        with self.assertRaisesRegex(ValueError, "duplicate pending function_call_id"):
+            grounding_callbacks._add_pending(state, duplicate)
+        grounding_callbacks._pop_pending(state, pending.function_call_id)
 
     def test_check_rejects_repeated_gap_and_duplicate_call(self) -> None:
         state = self.state()
