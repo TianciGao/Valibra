@@ -1,11 +1,10 @@
-"""SQL Grounding V1 callbacks around the frozen B0 callbacks.
+"""SQL Grounding callbacks around the frozen Official BIRD lifecycle.
 
-SG6a injects the bounded four-dimensional Grounding View and Control Hint into
-the model system instruction.  SG6b hard-blocks only a safely pairable,
-premature first submit before B0 can charge it.  A narrowly frozen budget
-liveness policy bypasses that block when every current-focus Grounding tool is
-unaffordable, so the Baseline forced-exit path remains reachable.  Baseline is
-still the only source of Official tool, Bird-Coin, and submit lifecycle facts.
+Version 1.3 interleaves the one-time bootstrap with Structure, Mapping, and
+Knowledge forms, then runs a bounded unified Check loop.  Only a complete Check
+enters the SQL Writer surface, where the Main Agent sees the final four-
+dimensional view plus answered clarifications and exactly execute/submit tools.
+Baseline remains the only source of Official tools, Bird-Coin, and submit facts.
 """
 
 from __future__ import annotations
@@ -31,8 +30,11 @@ from shared.audit import to_jsonable
 from shared.config import PROJECT_ROOT
 from valibra_agent.sql_grounding.models import (
     SQL_GROUNDING_RUNTIME_KEY,
+    GroundingCheckResponse,
+    GroundingCheckToolRequest,
     GroundingLLMResponse,
     GroundingRuntime,
+    KnowledgeGroundingResponse,
     UserClarificationRecord,
     UserClarificationRequest,
     ValidationContext,
@@ -107,6 +109,8 @@ GROUNDING_SUPPRESSED_BOOTSTRAP_KEY = (
 GROUNDING_CLARIFICATIONS_KEY = "valibra:user_clarifications"
 GROUNDING_PHASE_OUTCOMES_KEY = "valibra:sql_grounding_phase_outcomes"
 GROUNDING_FAILED_CLOSED_CALLS_KEY = "valibra:sql_grounding_failed_closed_calls"
+GROUNDING_PENDING_CHECK_KEY = "valibra:sql_grounding_pending_check"
+GROUNDING_CHECK_AUDITS_KEY = "valibra:sql_grounding_check_audits"
 
 # The frozen P6 export module imports these names at module load.  They are
 # retained only so that historical, read-only export code remains importable;
@@ -120,6 +124,8 @@ GROUNDING_VIEW_BEGIN = "[VALIBRA GROUNDING VIEW BEGIN]"
 GROUNDING_VIEW_END = "[VALIBRA GROUNDING VIEW END]"
 CONTROL_HINT_BEGIN = "[VALIBRA CONTROL HINT BEGIN]"
 CONTROL_HINT_END = "[VALIBRA CONTROL HINT END]"
+SQL_WRITER_CONTEXT_BEGIN = "[VALIBRA SQL WRITER CONTEXT BEGIN]"
+SQL_WRITER_CONTEXT_END = "[VALIBRA SQL WRITER CONTEXT END]"
 _ACTIVE_CONTEXT_MARKERS = (
     GROUNDING_VIEW_BEGIN,
     GROUNDING_VIEW_END,
@@ -189,8 +195,17 @@ _BOOTSTRAP_TOOL_SEQUENCE: tuple[str, ...] = (
 )
 _BOOTSTRAP_MODEL_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_STORED"
 _BOOTSTRAP_ALREADY_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_ALREADY_STORED"
-_MAX_PROVIDER_CALLS_PER_PHASE = 4
-_MAX_PROVIDER_CALLS_PER_TASK = 8
+_MAX_PROVIDER_CALLS_PER_TASK = 32
+_MIN_BUDGET_AFTER_CHECK_TOOL = 6.0
+_MAX_CHECK_AUDITS = 32
+_SQL_WRITER_TOOL_NAMES = ("execute_sql", "submit_sql")
+_SQL_WRITER_PROMPT = """Grounding 已完成，数据库语义结果视为本 phase 的最终结果。
+你的任务是根据 Original Query、可选 Follow-up、Final Grounding State 和已回答澄清写 PostgreSQL SQL。
+你可以处理 JOIN、JSON、CAST、NULL、聚合、排序、DISTINCT、latest record 等 SQL 实现问题；
+必要时只用 execute_sql 做小范围验证和修正，最终用 submit_sql 提交。
+不要重新探索 schema、column meaning 或 knowledge；不要查询 information_schema / pg_catalog；
+不要 SELECT *；不要提出新问题；不要修改或重新解释 Grounding State。
+State.tables 是允许使用的候选表范围，不代表每张表都必须出现在最终 SQL。"""
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
 )
@@ -550,6 +565,73 @@ class _PhaseGroundingOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class _PendingCheckTool:
+    """One Check-selected Official action, outside four-dimensional State."""
+
+    phase: Literal[1, 2]
+    function_call_id: str
+    missing_information: str
+    tool_name: str
+    arguments: dict[str, str]
+    request_digest: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "function_call_id": self.function_call_id,
+            "missing_information": self.missing_information,
+            "tool_name": self.tool_name,
+            "arguments": dict(self.arguments),
+            "request_digest": self.request_digest,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_PendingCheckTool":
+        required = {
+            "phase",
+            "function_call_id",
+            "missing_information",
+            "tool_name",
+            "arguments",
+            "request_digest",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid pending Check tool")
+        record = cls(**payload)
+        if record.phase not in (1, 2):
+            raise ValueError("invalid pending Check phase")
+        if not _IDENTIFIER_RE.fullmatch(record.function_call_id):
+            raise ValueError("invalid pending Check function_call_id")
+        if record.tool_name not in {
+            "ask_user",
+            "get_column_meaning",
+            "get_all_external_knowledge_names",
+            "get_knowledge_definition",
+            "execute_sql",
+        }:
+            raise ValueError("invalid pending Check tool name")
+        if not isinstance(record.arguments, dict):
+            raise ValueError("invalid pending Check arguments")
+        if record.tool_name == "ask_user":
+            if set(record.arguments) != {"question"}:
+                raise ValueError("invalid pending ask_user arguments")
+            question = record.arguments["question"]
+            if not isinstance(question, str) or not question or len(question) > 1_024:
+                raise ValueError("invalid pending ask_user question")
+        else:
+            GroundingCheckToolRequest(
+                tool_name=record.tool_name,
+                arguments=record.arguments,
+                user_clarification_request=None,
+            )
+        if not record.missing_information or len(record.missing_information) > 1_024:
+            raise ValueError("invalid pending Check gap")
+        if not re.fullmatch(r"[0-9a-f]{64}", record.request_digest):
+            raise ValueError("invalid pending Check digest")
+        return record
+
+
+@dataclass(frozen=True, slots=True)
 class _FailedClosedToolCall:
     """Exact ADK pairing for one tool denied by a failed phase terminal."""
 
@@ -625,7 +707,7 @@ async def before_model_callback(
     update_audit: dict[str, Any] | None = None
     control_audit: dict[str, Any] | None = None
     bootstrap_tool: str | None = None
-    pending_clarification: UserClarificationRecord | None = None
+    pending_check_tool: _PendingCheckTool | None = None
     phase_failure: _PhaseGroundingOutcome | None = None
     view_audit: dict[str, Any] = {
         "mode": "active",
@@ -648,7 +730,7 @@ async def before_model_callback(
                     llm_request,
                 )
                 if bootstrap_tool is None:
-                    pending_clarification = _next_pending_clarification(state)
+                    pending_check_tool = _pending_check_tool(state)
             view = render_grounding_view(
                 runtime.grounding_state,
                 clarifications=_clarification_records(state),
@@ -658,6 +740,7 @@ async def before_model_callback(
                 control_status="failed_open" if degraded else "succeeded",
                 error_type="RuntimeValidationError" if degraded else None,
             )
+            phase_ready = _phase_grounding_succeeded(state)
             hint = render_control_hint(runtime.focus_dimension)
             hint_tokens = count_grounding_view_tokens(hint.text)
             control_audit.update(
@@ -720,11 +803,35 @@ async def before_model_callback(
                     }
                 )
             if not degraded and phase_failure is None:
-                injection = _inject_active_grounding_context(
-                    llm_request,
-                    view_text=view.text,
-                    control_hint_text=hint.text,
-                )
+                if phase_ready and bootstrap_tool is None and pending_check_tool is None:
+                    bound = _ACTIVE_TURN_MESSAGE.get()
+                    if bound is None or bound.task_id != _task_id(state):
+                        raise ValueError("current bound query is required for SQL Writer")
+                    injection = _inject_sql_writer_context(
+                        llm_request,
+                        phase=_phase(state.get("current_phase", 1)),
+                        original_query=_user_message_query(bound.message),
+                        follow_up=(
+                            _official_p2_follow_up(state)
+                            if _phase(state.get("current_phase", 1)) == 2
+                            else None
+                        ),
+                        view_text=view.text,
+                        budget_remaining=state.get("budget_remaining"),
+                    )
+                    control_audit.update(
+                        {
+                            "mode": "sql_writer",
+                            "control_hint_injected": False,
+                            "writer_tools": list(_SQL_WRITER_TOOL_NAMES),
+                        }
+                    )
+                else:
+                    injection = _inject_active_grounding_context(
+                        llm_request,
+                        view_text=view.text,
+                        control_hint_text=hint.text,
+                    )
                 view_audit.update(
                     {
                         "injected": True,
@@ -735,17 +842,17 @@ async def before_model_callback(
                         "view_block_sha256": injection[
                             "grounding_view_block_sha256"
                         ],
-                        "request_changed_only_system_instruction": True,
+                        "request_changed_only_system_instruction": not phase_ready,
                     }
                 )
                 control_audit.update(
                     {
-                        "control_hint_injected": True,
+                        "control_hint_injected": not phase_ready,
                         "injection_status": "succeeded",
-                        "control_hint_block_sha256": injection[
+                        "control_hint_block_sha256": injection.get(
                             "control_hint_block_sha256"
-                        ],
-                        "request_changed_only_system_instruction": True,
+                        ),
+                        "request_changed_only_system_instruction": not phase_ready,
                     }
                 )
         view_audit["request_sha256_after_injection"] = _request_sha256(
@@ -836,11 +943,11 @@ async def before_model_callback(
                     _bounded_error_audit("before_model_bootstrap", exc),
                 )
             return None
-    if pending_clarification is not None:
+    if pending_check_tool is not None:
         try:
-            return _clarification_function_call_response(
+            return _check_tool_function_call_response(
                 state,
-                pending_clarification,
+                pending_check_tool,
             )
         except Exception as exc:
             if state is not None:
@@ -1286,6 +1393,7 @@ async def after_tool_callback(
     bootstrap_tool_result = False
     bootstrap_tool_succeeded = False
     grounding_clarification_answered = False
+    pending_check: _PendingCheckTool | None = None
     phase_grounding_observation: SQLGroundingObservation | None = None
     grounding_input: Mapping[str, Any] | None = None
     try:
@@ -1302,6 +1410,12 @@ async def after_tool_callback(
             tool_name = _tool_name(tool)
             if pending.tool_name != tool_name:
                 raise ValueError("pending tool name does not match function_call_id")
+            if _is_check_function_call(
+                state,
+                function_call_id=function_call_id,
+                tool_name=tool_name,
+            ):
+                pending_check = _pending_check_tool(state)
             raw_content = to_jsonable(tool_response)
             observation_type = _classify_tool_observation_type(
                 tool_name,
@@ -1381,6 +1495,45 @@ async def after_tool_callback(
                     audit["bootstrap_evidence_complete"] = (
                         tool_name == _BOOTSTRAP_TOOL_SEQUENCE[-1]
                     )
+                    if (
+                        call_kind == "knowledge"
+                        and result.service_status in {"accepted", "noop"}
+                        and _phase_grounding_failure(state, 1) is None
+                        and result.service_result is not None
+                        and isinstance(
+                            result.service_result.response,
+                            KnowledgeGroundingResponse,
+                        )
+                    ):
+                        stage_audit = dict(audit)
+                        check_observation = build_sql_grounding_observation(
+                            task_id=_task_id(state),
+                            phase=1,
+                            sequence=_next_sequence(state),
+                            observation_type="knowledge",
+                            content=raw_content,
+                            summary="initial unified Grounding Check",
+                            tool_name=tool_name,
+                            function_call_id=function_call_id,
+                            private_raw_ref=private_ref,
+                        )
+                        check_input = _build_check_grounding_request(
+                            state,
+                            query=_user_message_query(bound.message),
+                            runtime=runtime,
+                            phase=1,
+                            initial=True,
+                        )
+                        result = await _handle_observation(
+                            state,
+                            check_observation,
+                            runtime,
+                            grounding_input=check_input,
+                        )
+                        runtime = result.runtime
+                        audit = _observation_audit(result)
+                        audit["staged_grounding_kind"] = "check"
+                        audit["preceding_knowledge"] = stage_audit
                     control_audit = _control_audit_for_observation(
                         result,
                         gate_audit=pending.control_gate_audit,
@@ -1449,23 +1602,11 @@ async def after_tool_callback(
                     )
                 else:
                     grounding_input = None
-                    if (
-                        tool_name == "ask_user"
-                        and grounding_clarification_answered
-                        and not any(
-                            item.phase == pending.phase_before
-                            and item.answer is None
-                            for item in _clarification_records(state)
-                        )
-                        and _phase_grounding_outcomes(state).get(
-                            str(pending.phase_before)
-                        )
-                        is None
-                    ):
+                    if pending_check is not None:
                         bound = _ACTIVE_TURN_MESSAGE.get()
                         if bound is None or bound.task_id != _task_id(state):
                             raise ValueError(
-                                "current bound query is required for Clarification Patch"
+                                "current bound query is required for Check"
                             )
                         follow_up = (
                             _official_p2_follow_up(state)
@@ -1473,14 +1614,31 @@ async def after_tool_callback(
                             else None
                         )
                         patch_runtime = _ensure_runtime(state)[0]
-                        grounding_input = _build_staged_grounding_request(
+                        grounding_input = _build_check_grounding_request(
                             state,
-                            call_kind="clarification_patch",
                             query=_user_message_query(bound.message),
                             runtime=patch_runtime,
                             phase=pending.phase_before,
                             follow_up=follow_up,
+                            latest_tool_name=(
+                                None if grounding_clarification_answered else tool_name
+                            ),
+                            latest_tool_arguments=(
+                                None if grounding_clarification_answered else args
+                            ),
+                            latest_tool_result=(
+                                None
+                                if grounding_clarification_answered
+                                else raw_content
+                            ),
+                            latest_user_answer=(
+                                tool_response
+                                if tool_name == "ask_user"
+                                and grounding_clarification_answered
+                                else None
+                            ),
                         )
+                        _store_pending_check_tool(state, None)
                     result = await _handle_observation(
                         state,
                         observation,
@@ -1490,7 +1648,7 @@ async def after_tool_callback(
                 runtime = result.runtime
                 audit = _observation_audit(result)
                 if grounding_input is not None:
-                    audit["staged_grounding_kind"] = "clarification_patch"
+                    audit["staged_grounding_kind"] = "check"
                 audit.update(
                     {
                         "function_call_id": function_call_id,
@@ -1603,7 +1761,6 @@ async def on_tool_error_callback(
 ) -> None:
     """Observe an ADK exception, clear its exact pending call, and stay invisible."""
 
-    del args
     state = getattr(tool_context, "state", None)
     if state is None:
         return None
@@ -1666,7 +1823,33 @@ async def on_tool_error_callback(
             tool_name=tool_name,
             function_call_id=exact_id,
         )
-        result = await _handle_observation(state, observation)
+        grounding_input = None
+        if _is_check_function_call(
+            state,
+            function_call_id=exact_id,
+            tool_name=tool_name,
+        ):
+            bound = _ACTIVE_TURN_MESSAGE.get()
+            if bound is None or bound.task_id != _task_id(state):
+                raise ValueError("current bound query is required for Check")
+            runtime = _ensure_runtime(state)[0]
+            phase = pending.phase_before
+            grounding_input = _build_check_grounding_request(
+                state,
+                query=_user_message_query(bound.message),
+                follow_up=_official_p2_follow_up(state) if phase == 2 else None,
+                runtime=runtime,
+                phase=phase,
+                latest_tool_name=tool_name,
+                latest_tool_arguments=args,
+                latest_tool_result={"error_type": type(error).__name__[:128]},
+            )
+            _store_pending_check_tool(state, None)
+        result = await _handle_observation(
+            state,
+            observation,
+            grounding_input=grounding_input,
+        )
         _store_runtime(state, result.runtime)
         audit = _observation_audit(result)
         audit.update(
@@ -1835,6 +2018,41 @@ async def _handle_submit_observation(
                 staged_audits.append(stage_audit)
                 if _phase_grounding_failure(state, 2) is not None:
                     break
+            if (
+                _phase_grounding_failure(state, 2) is None
+                and follow_up_result.service_result is not None
+                and isinstance(
+                    follow_up_result.service_result.response,
+                    KnowledgeGroundingResponse,
+                )
+            ):
+                check_observation = build_sql_grounding_observation(
+                    task_id=_task_id(state),
+                    phase=2,
+                    sequence=_next_sequence(state),
+                    observation_type="p2_follow_up",
+                    content=follow_up,
+                    summary="initial Phase-2 unified Grounding Check",
+                    private_raw_ref=private_ref,
+                )
+                check_input = _build_check_grounding_request(
+                    state,
+                    query=_user_message_query(bound.message),
+                    follow_up=follow_up,
+                    runtime=final_runtime,
+                    phase=2,
+                    initial=True,
+                )
+                check_result = await _handle_observation(
+                    state,
+                    check_observation,
+                    final_runtime,
+                    grounding_input=check_input,
+                )
+                final_runtime = check_result.runtime
+                check_audit = _observation_audit(check_result)
+                check_audit["staged_grounding_kind"] = "check"
+                staged_audits.append(check_audit)
             follow_up_audit = {"staged_grounding": staged_audits}
         except Exception as exc:
             if follow_up_observation is not None and _is_real_provider_mode():
@@ -1946,7 +2164,7 @@ async def _handle_observation_serialized(
             service_status="skipped_control_lifecycle_only",
             observation=observation,
         )
-    if observation.observation_type == "tool_error":
+    if observation.observation_type == "tool_error" and grounding_input is None:
         return _ObservationResult(
             runtime=active_runtime,
             service_status="skipped_tool_error_audit_only",
@@ -2010,13 +2228,13 @@ async def _handle_observation_serialized(
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
             phase_calls = _provider_phase_call_count(state, observation.phase)
-            expected_phase_calls = {
-                "structure": 0,
-                "mapping": 1,
-                "knowledge": 2,
-                "clarification_patch": 3,
-            }[call_kind]
-            if phase_calls != expected_phase_calls:
+            sequence_ok = (
+                (call_kind == "structure" and phase_calls == 0)
+                or (call_kind == "mapping" and phase_calls == 1)
+                or (call_kind == "knowledge" and phase_calls == 2)
+                or (call_kind == "check" and phase_calls >= 3)
+            )
+            if not sequence_ok:
                 return _failed_phase_grounding_result(
                     state,
                     runtime=active_runtime,
@@ -2025,25 +2243,13 @@ async def _handle_observation_serialized(
                     error_type="BundledProviderCallSequenceError",
                     provider_attempted=False,
                 )
-            if llm_config.max_calls_per_task != _MAX_PROVIDER_CALLS_PER_TASK:
-                return _failed_phase_grounding_result(
-                    state,
-                    runtime=active_runtime,
-                    observation=observation,
-                    service_status="degraded_configuration",
-                    error_type="ConfiguredProviderCallLimit",
-                    provider_attempted=False,
-                )
-            if (
-                calls >= _MAX_PROVIDER_CALLS_PER_TASK
-                or phase_calls >= _MAX_PROVIDER_CALLS_PER_PHASE
-            ):
+            if calls >= llm_config.max_calls_per_task:
                 return _failed_phase_grounding_result(
                     state,
                     runtime=active_runtime,
                     observation=observation,
                     service_status="skipped_provider_call_limit",
-                    error_type="ProviderCallLimit",
+                    error_type="ProviderSafetyLimit",
                     provider_attempted=False,
                 )
             if synchronization.provider_slot_reserved:
@@ -2092,25 +2298,48 @@ async def _handle_observation_serialized(
     control_error_type: str | None = None
     if service_result.state_update.status in {"accepted", "noop"}:
         control_status = "succeeded"
-        clarifications_before = _clarification_records(state)
         try:
-            if (
-                call_kind == "knowledge"
-                and service_result.response is not None
+            if call_kind == "check":
+                if not isinstance(service_result.response, GroundingCheckResponse):
+                    raise ValueError("Check returned the wrong typed response")
+                if service_result.response.status == "complete":
+                    _append_check_audit(
+                        state,
+                        {
+                            "phase": observation.phase,
+                            "status": "complete",
+                            "missing_information": None,
+                            "tool_name": None,
+                            "budget_before": _finite_budget(state),
+                            "tool_cost": 0.0,
+                            "budget_after": _finite_budget(state),
+                            "blocked_reason": None,
+                        },
+                    )
+                    candidate, control_events = _advance_ready_control_stage(
+                        state,
+                        candidate,
+                    )
+                    if provider_mode:
+                        _record_phase_grounding_outcome(
+                            state,
+                            observation=observation,
+                            runtime=candidate,
+                            status="succeeded",
+                            provider_attempted=service_result.llm_telemetry.attempted,
+                        )
+                else:
+                    _schedule_check_tool(
+                        state,
+                        phase=observation.phase,
+                        response=service_result.response,
+                    )
+            elif call_kind == "knowledge" and isinstance(
+                service_result.response,
+                GroundingLLMResponse,
             ):
-                _register_clarification_requests(
-                    state,
-                    phase=observation.phase,
-                    requests=service_result.response.user_clarification_requests,
-                )
-            phase_ready = call_kind == "clarification_patch" or (
-                call_kind == "knowledge"
-                and not any(
-                    item.phase == observation.phase and item.answer is None
-                    for item in _clarification_records(state)
-                )
-            )
-            if phase_ready:
+                # Archived injected-client fixtures use the retired whole-State
+                # response.  Real 1.3 Provider calls cannot reach this branch.
                 candidate, control_events = _advance_ready_control_stage(
                     state,
                     candidate,
@@ -2124,13 +2353,12 @@ async def _handle_observation_serialized(
                         provider_attempted=service_result.llm_telemetry.attempted,
                     )
         except Exception as exc:
-            _store_clarification_records(state, clarifications_before)
             return _failed_phase_grounding_result(
                 state,
                 runtime=active_runtime,
                 observation=observation,
                 service_status="rejected_phase_finalization",
-                error_type=type(exc).__name__[:128],
+                error_type=_grounding_control_error_type(exc),
                 provider_attempted=service_result.llm_telemetry.attempted,
                 service_result=service_result,
             )
@@ -2156,6 +2384,123 @@ async def _handle_observation_serialized(
         control_status=control_status,
         control_error_type=control_error_type,
     )
+
+
+def _grounding_control_error_type(exc: Exception) -> str:
+    if str(exc) == "budget_exhausted":
+        return "budget_exhausted"
+    return type(exc).__name__[:128]
+
+
+def _finite_budget(state: Any) -> float:
+    value = state.get("budget_remaining")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise ValueError("budget_remaining must be finite")
+    return float(value)
+
+
+def _schedule_check_tool(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    response: GroundingCheckResponse,
+) -> _PendingCheckTool:
+    """Apply duplicate/gap/budget guardrails before any Official tool call."""
+
+    request = response.next_tool
+    gap = response.missing_information
+    if response.status != "incomplete" or request is None or gap is None:
+        raise ValueError("only an incomplete Check can schedule one tool")
+    if _pending_check_tool(state) is not None:
+        raise ValueError("a Check tool is already pending")
+    phase_audits = [
+        item for item in _check_audits(state) if item.get("phase") == phase
+    ]
+    if any(item.get("missing_information") == gap for item in phase_audits):
+        raise ValueError("Check did not identify a new concrete gap")
+    args_json = canonical_json(request.arguments)
+    request_digest = _sha256_text(f"{request.tool_name}:{args_json}")
+    if any(item.get("request_digest") == request_digest for item in phase_audits):
+        raise ValueError("Check repeated an Official tool with identical arguments")
+
+    from system_agent import callbacks as baseline_callbacks
+
+    cost = baseline_callbacks.TOOL_COSTS.get(request.tool_name)
+    if (
+        isinstance(cost, bool)
+        or not isinstance(cost, (int, float))
+        or not math.isfinite(float(cost))
+        or float(cost) < 0
+    ):
+        raise ValueError("Check tool has no valid Official Bird-Coin cost")
+    budget_before = _finite_budget(state)
+    budget_after = budget_before - float(cost)
+    if budget_after < _MIN_BUDGET_AFTER_CHECK_TOOL:
+        _append_check_audit(
+            state,
+            {
+                "phase": phase,
+                "status": "incomplete",
+                "missing_information": gap,
+                "tool_name": request.tool_name,
+                "request_digest": request_digest,
+                "budget_before": budget_before,
+                "tool_cost": float(cost),
+                "budget_after": budget_after,
+                "blocked_reason": "budget_exhausted",
+            },
+        )
+        raise ValueError("budget_exhausted")
+
+    if request.tool_name == "ask_user":
+        clarification = request.user_clarification_request
+        if clarification is None:
+            raise ValueError("ask_user Check is missing clarification metadata")
+        _register_clarification_requests(
+            state,
+            phase=phase,
+            requests=(clarification,),
+        )
+        record = next(
+            item
+            for item in _clarification_records(state)
+            if item.phase == phase and item.question == clarification.question
+        )
+        function_call_id = _clarification_function_call_id(state, record)
+    else:
+        function_call_id = (
+            f"valibra-check-{phase}-{len(phase_audits) + 1}-"
+            f"{request_digest[:16]}"
+        )
+    pending = _PendingCheckTool(
+        phase=phase,
+        function_call_id=function_call_id,
+        missing_information=gap,
+        tool_name=request.tool_name,
+        arguments=dict(request.arguments),
+        request_digest=request_digest,
+    )
+    _store_pending_check_tool(state, pending)
+    _append_check_audit(
+        state,
+        {
+            "phase": phase,
+            "status": "incomplete",
+            "missing_information": gap,
+            "tool_name": request.tool_name,
+            "arguments_sha256": _sha256_text(args_json),
+            "request_digest": request_digest,
+            "budget_before": budget_before,
+            "tool_cost": float(cost),
+            "budget_after": budget_after,
+            "blocked_reason": None,
+        },
+    )
+    return pending
 
 
 def _apply_control_event(
@@ -2367,7 +2712,7 @@ def _provider_phase_call_counts(state: Any) -> dict[str, int]:
     total = _provider_call_count(state)
     payload = state.get(GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY)
     if payload is None:
-        if total > _MAX_PROVIDER_CALLS_PER_PHASE:
+        if total > _MAX_PROVIDER_CALLS_PER_TASK:
             raise ValueError("legacy Provider counter exceeds the P1 phase limit")
         return {"1": total, "2": 0}
     if not isinstance(payload, dict) or set(payload) != {"1", "2"}:
@@ -2378,7 +2723,7 @@ def _provider_phase_call_counts(state: Any) -> dict[str, int]:
         if (
             isinstance(value, bool)
             or not isinstance(value, int)
-            or not 0 <= value <= _MAX_PROVIDER_CALLS_PER_PHASE
+            or not 0 <= value <= _MAX_PROVIDER_CALLS_PER_TASK
         ):
             raise ValueError("invalid SQL Grounding phase call counter")
         counts[key] = value
@@ -2397,7 +2742,6 @@ def _record_provider_call(state: Any, phase: Literal[1, 2]) -> None:
     key = str(phase)
     if (
         total >= _MAX_PROVIDER_CALLS_PER_TASK
-        or counts[key] >= _MAX_PROVIDER_CALLS_PER_PHASE
     ):
         raise ValueError("SQL Grounding Provider call limit exceeded")
     counts[key] += 1
@@ -2436,10 +2780,10 @@ def _next_bootstrap_tool(
     expected_prefix = _BOOTSTRAP_TOOL_SEQUENCE[: len(observed)]
     if observed != expected_prefix:
         raise ValueError("Official bootstrap trajectory is duplicate or out of order")
-    if _provider_phase_call_count(state, 1) != len(observed):
-        raise ValueError("bootstrap evidence and staged Grounding calls differ")
     if len(observed) == len(_BOOTSTRAP_TOOL_SEQUENCE):
         return None
+    if _provider_phase_call_count(state, 1) != len(observed):
+        raise ValueError("bootstrap evidence and staged Grounding calls differ")
     return _BOOTSTRAP_TOOL_SEQUENCE[len(observed)]
 
 
@@ -2494,6 +2838,86 @@ def _clarification_function_call_response(
     )
 
 
+def _check_tool_function_call_response(
+    state: Any,
+    record: _PendingCheckTool,
+) -> Any:
+    """Force exactly the bounded Official action selected by Check."""
+
+    current = _pending_check_tool(state)
+    if current != record:
+        raise ValueError("pending Check tool changed before dispatch")
+    from google.adk.models.llm_response import LlmResponse as AdkLlmResponse
+    from google.genai import types as genai_types
+
+    return AdkLlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[
+                genai_types.Part(
+                    function_call=genai_types.FunctionCall(
+                        id=record.function_call_id,
+                        name=record.tool_name,
+                        args=record.arguments,
+                    )
+                )
+            ],
+        )
+    )
+
+
+def _pending_check_tool(state: Any) -> _PendingCheckTool | None:
+    payload = state.get(GROUNDING_PENDING_CHECK_KEY)
+    if payload is None:
+        return None
+    return _PendingCheckTool.from_json(payload)
+
+
+def _store_pending_check_tool(state: Any, record: _PendingCheckTool | None) -> None:
+    if record is None:
+        state.pop(GROUNDING_PENDING_CHECK_KEY, None)
+        return
+    if _pending_check_tool(state) is not None:
+        raise ValueError("a Check tool is already pending")
+    state[GROUNDING_PENDING_CHECK_KEY] = record.to_json()
+
+
+def _is_check_function_call(
+    state: Any,
+    *,
+    function_call_id: str,
+    tool_name: str,
+) -> bool:
+    record = _pending_check_tool(state)
+    return bool(
+        record is not None
+        and record.function_call_id == function_call_id
+        and record.tool_name == tool_name
+    )
+
+
+def _check_audits(state: Any) -> tuple[dict[str, Any], ...]:
+    payload = state.get(GROUNDING_CHECK_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) > _MAX_CHECK_AUDITS:
+        raise ValueError("invalid Check audit ledger")
+    records: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("invalid Check audit record")
+        _require_bounded_audit(item)
+        records.append(dict(item))
+    return tuple(records)
+
+
+def _append_check_audit(state: Any, audit: dict[str, Any]) -> None:
+    _require_bounded_audit(audit)
+    records = list(_check_audits(state))
+    if len(records) >= _MAX_CHECK_AUDITS:
+        raise ValueError("Check audit ledger is full")
+    records.append(dict(audit))
+    state[GROUNDING_CHECK_AUDITS_KEY] = records
+
+
 def _clarification_records(state: Any) -> tuple[UserClarificationRecord, ...]:
     raw = state.get(GROUNDING_CLARIFICATIONS_KEY, [])
     if not isinstance(raw, list) or len(raw) > _MAX_CLARIFICATION_RECORDS:
@@ -2523,7 +2947,6 @@ def _register_clarification_requests(
     requests: tuple[UserClarificationRequest, ...],
 ) -> None:
     records = _clarification_records(state)
-    phase_records = tuple(item for item in records if item.phase == phase)
     proposed = tuple(
         UserClarificationRecord(
             phase=phase,
@@ -2533,10 +2956,14 @@ def _register_clarification_requests(
         )
         for item in requests
     )
-    if phase_records:
-        if phase_records != proposed:
-            raise ValueError("clarification requests for a phase are immutable")
-        return
+    proposed_questions = [item.question for item in proposed]
+    if len(proposed_questions) != len(set(proposed_questions)):
+        raise ValueError("clarification questions must be unique within a phase")
+    existing_questions = {
+        item.question for item in records if item.phase == phase
+    }
+    if existing_questions.intersection(proposed_questions):
+        raise ValueError("clarification question already exists in this phase")
     _store_clarification_records(state, (*records, *proposed))
 
 
@@ -2691,6 +3118,15 @@ def _phase_grounding_failure(
     selected_phase = phase or _phase(state.get("current_phase", 1))
     record = _phase_grounding_outcomes(state).get(str(selected_phase))
     return record if record is not None and record.status == "failed" else None
+
+
+def _phase_grounding_succeeded(
+    state: Any,
+    phase: Literal[1, 2] | None = None,
+) -> bool:
+    selected_phase = phase or _phase(state.get("current_phase", 1))
+    record = _phase_grounding_outcomes(state).get(str(selected_phase))
+    return record is not None and record.status == "succeeded"
 
 
 def _failed_closed_response(
@@ -2968,7 +3404,7 @@ def _build_staged_grounding_request(
     if call_kind == "structure":
         schema = by_tool.get("get_schema")
         _parse_schema_projection(schema)
-        return {**base, "schema": schema}
+        return {**base, "schema": _ddl_only_schema(schema)}
     if call_kind == "mapping":
         meanings = by_tool.get("get_all_column_meanings")
         if runtime.grounding_state.tables is None:
@@ -2992,28 +3428,63 @@ def _build_staged_grounding_request(
                 runtime,
             ),
         }
-    if call_kind != "clarification_patch":
-        raise ValueError("unsupported staged Grounding call kind")
-    records = tuple(
-        item
-        for item in _clarification_records(state)
-        if item.phase == phase
+    raise ValueError("unsupported staged Grounding call kind")
+
+
+def _build_check_grounding_request(
+    state: Any,
+    *,
+    query: str,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    follow_up: str | None = None,
+    initial: bool = False,
+    latest_tool_name: str | None = None,
+    latest_tool_arguments: Any = None,
+    latest_tool_result: Any = None,
+    latest_user_answer: Any = None,
+) -> dict[str, Any]:
+    """Build one Check request with no accumulated raw Check history."""
+
+    base = _phase_request_common(
+        state,
+        query=query,
+        runtime=runtime,
+        phase=phase,
+        follow_up=follow_up,
     )
-    if not records or any(item.answer is None for item in records):
-        raise ValueError("Clarification Patch requires all phase answers")
+    modes = sum((initial, latest_tool_name is not None, latest_user_answer is not None))
+    if modes != 1:
+        raise ValueError("Check requires exactly one bounded latest-input mode")
+    if initial:
+        return {**base, "check_context": {"kind": "initial"}}
+    if latest_user_answer is not None:
+        pending = _pending_check_tool(state)
+        # after_tool clears pending only after this payload is built
+        if pending is None or pending.tool_name != "ask_user":
+            raise ValueError("latest user answer has no paired Check request")
+        return {
+            **base,
+            "latest_user_answer": {
+                "question": pending.arguments["question"],
+                "answer": latest_user_answer,
+            },
+        }
+    if latest_tool_name not in {
+        "ask_user",
+        "get_column_meaning",
+        "get_all_external_knowledge_names",
+        "get_knowledge_definition",
+        "execute_sql",
+    }:
+        raise ValueError("Check result uses an unapproved tool")
     return {
         **base,
-        "clarification_qa": [item.model_dump(mode="json") for item in records],
-        "relevant_column_meanings": _relevant_clarification_column_meanings(
-            by_tool.get("get_all_column_meanings"),
-            runtime,
-            records,
-        ),
-        "relevant_knowledge_definitions": _relevant_clarification_knowledge(
-            by_tool.get("get_all_knowledge_definitions"),
-            runtime,
-            records,
-        ),
+        "latest_tool": {
+            "name": latest_tool_name,
+            "arguments": to_jsonable(latest_tool_arguments),
+            "result": to_jsonable(latest_tool_result),
+        },
     }
 
 
@@ -3091,6 +3562,16 @@ def _project_official_evidence(
         supported_knowledge.update(
             ("business_rule", definition) for definition in definitions
         )
+        return
+    if tool_name == "execute_sql" and isinstance(content, str):
+        bounded = content.strip()
+        if bounded and len(bounded) <= 2_048:
+            kind = (
+                "database_capability"
+                if observation_type == "tool_error"
+                else "runtime_state"
+            )
+            supported_knowledge.add((kind, bounded))
 
 
 def _parse_schema_projection(content: Any) -> tuple[frozenset[str], frozenset[str]]:
@@ -3159,6 +3640,31 @@ def _parse_schema_projection(content: Any) -> tuple[frozenset[str], frozenset[st
                     raise ValueError("schema column has no identifier")
                 columns.add(f"{table}.{name}")
     return frozenset(tables), frozenset(columns)
+
+
+def _ddl_only_schema(content: Any) -> str:
+    """Return only complete CREATE TABLE DDL, never sample rows or values."""
+
+    if not isinstance(content, str) or not content:
+        raise ValueError("schema content must be text")
+    statements: list[str] = []
+    active: list[str] | None = None
+    for line in content.splitlines():
+        if active is None:
+            if re.match(r'^\s*(?:CREATE|"CREATE")\s+TABLE\b', line, re.IGNORECASE):
+                active = [line]
+            continue
+        active.append(line)
+        if re.match(r"^\s*\);\s*$", line):
+            statements.append("\n".join(active))
+            active = None
+    if active is not None or not statements:
+        raise ValueError("schema contains no complete CREATE TABLE DDL")
+    projected = "\n\n".join(statements)
+    _parse_schema_projection(projected)
+    if re.search(r"First\s+3\s+rows|sample", projected, re.IGNORECASE):
+        raise ValueError("DDL-only projection retained sample data")
+    return projected
 
 
 def _ddl_table_identifier(table: exp.Table) -> str:
@@ -4264,6 +4770,126 @@ def _restore_llm_request(llm_request: Any, original: Any) -> None:
         raise TypeError("LlmRequest must expose Pydantic model fields")
     for field in fields:
         setattr(llm_request, field, copy.deepcopy(getattr(original, field)))
+
+
+def _filter_writer_tools(llm_request: Any) -> None:
+    tools_dict = getattr(llm_request, "tools_dict", None)
+    if not isinstance(tools_dict, dict):
+        raise TypeError("LlmRequest.tools_dict is required")
+    missing = [name for name in _SQL_WRITER_TOOL_NAMES if name not in tools_dict]
+    if missing:
+        raise ValueError("SQL Writer tools are unavailable")
+    llm_request.tools_dict = {
+        name: tools_dict[name] for name in _SQL_WRITER_TOOL_NAMES
+    }
+    config = getattr(llm_request, "config", None)
+    declarations_groups = getattr(config, "tools", None)
+    if not isinstance(declarations_groups, list):
+        raise TypeError("LlmRequest.config.tools is required")
+    retained_groups: list[Any] = []
+    for group in declarations_groups:
+        declarations = getattr(group, "function_declarations", None)
+        if declarations is None:
+            continue
+        retained = [
+            item
+            for item in declarations
+            if getattr(item, "name", None) in _SQL_WRITER_TOOL_NAMES
+        ]
+        if retained:
+            cloned = copy.deepcopy(group)
+            cloned.function_declarations = retained
+            retained_groups.append(cloned)
+    names = [
+        getattr(item, "name", None)
+        for group in retained_groups
+        for item in (getattr(group, "function_declarations", None) or [])
+    ]
+    if names != list(_SQL_WRITER_TOOL_NAMES):
+        raise ValueError("SQL Writer declaration set must be exactly two tools")
+    config.tools = retained_groups
+
+
+def _filter_writer_contents(llm_request: Any) -> None:
+    """Hide Grounding/bootstrap transport while preserving SQL execution history."""
+
+    contents = getattr(llm_request, "contents", None)
+    if not isinstance(contents, list):
+        raise TypeError("LlmRequest.contents is required")
+    retained_contents: list[Any] = []
+    for content in contents:
+        parts = getattr(content, "parts", None)
+        if not isinstance(parts, list):
+            retained_contents.append(copy.deepcopy(content))
+            continue
+        retained_parts: list[Any] = []
+        for part in parts:
+            function_call = getattr(part, "function_call", None)
+            function_response = getattr(part, "function_response", None)
+            call_name = getattr(function_call, "name", None)
+            response_name = getattr(function_response, "name", None)
+            if call_name is not None and call_name not in _SQL_WRITER_TOOL_NAMES:
+                continue
+            if response_name is not None and response_name not in _SQL_WRITER_TOOL_NAMES:
+                continue
+            retained_parts.append(copy.deepcopy(part))
+        if retained_parts:
+            cloned = copy.deepcopy(content)
+            cloned.parts = retained_parts
+            retained_contents.append(cloned)
+    llm_request.contents = retained_contents
+
+
+def _inject_sql_writer_context(
+    llm_request: Any,
+    *,
+    phase: Literal[1, 2],
+    original_query: str,
+    follow_up: str | None,
+    view_text: str,
+    budget_remaining: Any,
+) -> dict[str, str]:
+    """Atomically replace exploratory instructions with the SQL Writer view."""
+
+    if not isinstance(original_query, str) or not original_query:
+        raise ValueError("SQL Writer requires Original Query")
+    budget = float(budget_remaining)
+    if not math.isfinite(budget):
+        raise ValueError("SQL Writer requires finite Bird-Coin")
+    if phase == 2 and (not isinstance(follow_up, str) or not follow_up):
+        raise ValueError("Phase 2 SQL Writer requires follow-up")
+    context = "\n".join(
+        [
+            SQL_WRITER_CONTEXT_BEGIN,
+            f"Phase: {phase}",
+            f"Original Query: {original_query}",
+            f"Follow-up: {follow_up if follow_up is not None else 'none'}",
+            "Final Grounding State and answered Clarifications:",
+            view_text,
+            f"Remaining Bird-Coin: {budget:g}",
+            SQL_WRITER_CONTEXT_END,
+        ]
+    )
+    original = copy.deepcopy(llm_request)
+    original_tools_dict = copy.deepcopy(getattr(llm_request, "tools_dict", None))
+    try:
+        config = getattr(llm_request, "config", None)
+        if config is None:
+            raise TypeError("LlmRequest.config is required")
+        config.system_instruction = f"{_SQL_WRITER_PROMPT}\n\n{context}"
+        _filter_writer_tools(llm_request)
+        _filter_writer_contents(llm_request)
+        final_names = tuple(getattr(llm_request, "tools_dict", {}).keys())
+        if final_names != _SQL_WRITER_TOOL_NAMES:
+            raise RuntimeError("SQL Writer exposed an unexpected tool")
+        return {
+            "grounding_view_block_sha256": _sha256_text(context),
+            "writer_prompt_sha256": _sha256_text(_SQL_WRITER_PROMPT),
+        }
+    except BaseException:
+        _restore_llm_request(llm_request, original)
+        llm_request.tools_dict = original_tools_dict
+        raise
 
 
 def _inject_active_grounding_context(

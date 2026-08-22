@@ -333,7 +333,11 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
             "schema",
             "current_state",
         })
-        self.assertEqual(updater.inputs[0]["schema"], SCHEMA)
+        self.assertEqual(
+            updater.inputs[0]["schema"],
+            grounding_callbacks._ddl_only_schema(SCHEMA),
+        )
+        self.assertNotIn("stage2-private-schema-sentinel", updater.inputs[0]["schema"])
         self.assertEqual(
             [set(item) for item in updater.inputs],
             [

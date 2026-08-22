@@ -74,6 +74,14 @@ UserClarificationKind: TypeAlias = Literal[
     "user_intent",
     "missing_knowledge",
 ]
+GroundingCheckStatus: TypeAlias = Literal["complete", "incomplete"]
+GroundingCheckToolName: TypeAlias = Literal[
+    "ask_user",
+    "get_column_meaning",
+    "get_all_external_knowledge_names",
+    "get_knowledge_definition",
+    "execute_sql",
+]
 
 GROUNDING_DIMENSIONS: tuple[GroundingDimension, ...] = (
     "tables",
@@ -428,7 +436,12 @@ class UserClarificationRecord(UserClarificationRequest):
 
 
 class GroundingLLMResponse(ContractModel):
-    """The entire state proposed by Grounding LLM plus its next focus."""
+    """Legacy whole-state proposal retained only for offline compatibility.
+
+    SQL Grounding 1.3 Provider calls use the four stage-specific forms below.
+    Keeping this type avoids rewriting archived fixtures; it is not exposed by
+    any executable 1.3 Prompt or Provider schema.
+    """
 
     sql_grounding_state: SQLGroundingState
     user_clarification_requests: Annotated[
@@ -449,6 +462,217 @@ class GroundingLLMResponse(ContractModel):
                 "user_clarification_requests.question must be unique within a phase"
             )
         return value
+
+
+class StructureGroundingResponse(ContractModel):
+    """Structure-stage form: only candidate tables and relations."""
+
+    tables: Annotated[tuple[str, ...], Field(max_length=MAX_TABLES)]
+    join_keys: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=MAX_EXPRESSION_CHARS)], ...],
+        Field(max_length=MAX_JOIN_KEYS),
+    ]
+
+    @field_validator("tables")
+    @classmethod
+    def validate_tables(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for table in value:
+            _require_table_identifier(table)
+        return _sorted_unique(value, label="tables")
+
+    @field_validator("join_keys")
+    @classmethod
+    def validate_join_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for relation in value:
+            canonicalize_relation_expression(relation)
+        return _sorted_unique(value, label="join_keys")
+
+
+class MappingGroundingResponse(ContractModel):
+    """Mapping-stage form with narrowly authorized structure correction."""
+
+    tables: Annotated[tuple[str, ...], Field(max_length=MAX_TABLES)]
+    join_keys: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=MAX_EXPRESSION_CHARS)], ...],
+        Field(max_length=MAX_JOIN_KEYS),
+    ]
+    column_mapping: Annotated[
+        tuple[ColumnMapping, ...],
+        Field(max_length=MAX_COLUMN_MAPPINGS),
+    ]
+
+    @field_validator("tables")
+    @classmethod
+    def validate_tables(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for table in value:
+            _require_table_identifier(table)
+        return _sorted_unique(value, label="tables")
+
+    @field_validator("join_keys")
+    @classmethod
+    def validate_join_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for relation in value:
+            canonicalize_relation_expression(relation)
+        return _sorted_unique(value, label="join_keys")
+
+    @field_validator("column_mapping")
+    @classmethod
+    def validate_column_mapping(
+        cls, value: tuple[ColumnMapping, ...]
+    ) -> tuple[ColumnMapping, ...]:
+        phrases = [item.phrase for item in value]
+        if len(phrases) != len(set(phrases)):
+            raise ValueError("column_mapping must not contain duplicate phrases")
+        return tuple(sorted(value, key=lambda item: item.phrase))
+
+
+class KnowledgeGroundingResponse(ContractModel):
+    """Knowledge-stage form with a bounded Mapping correction seam."""
+
+    column_mapping: Annotated[
+        tuple[ColumnMapping, ...],
+        Field(max_length=MAX_COLUMN_MAPPINGS),
+    ]
+    domain_knowledge: Annotated[
+        tuple[DomainKnowledge, ...],
+        Field(max_length=MAX_DOMAIN_KNOWLEDGE),
+    ]
+
+    @field_validator("column_mapping")
+    @classmethod
+    def validate_column_mapping(
+        cls, value: tuple[ColumnMapping, ...]
+    ) -> tuple[ColumnMapping, ...]:
+        phrases = [item.phrase for item in value]
+        if len(phrases) != len(set(phrases)):
+            raise ValueError("column_mapping must not contain duplicate phrases")
+        return tuple(sorted(value, key=lambda item: item.phrase))
+
+    @field_validator("domain_knowledge")
+    @classmethod
+    def validate_domain_knowledge(
+        cls, value: tuple[DomainKnowledge, ...]
+    ) -> tuple[DomainKnowledge, ...]:
+        keys = [(item.kind, item.content) for item in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("domain_knowledge must not contain duplicates")
+        return tuple(sorted(value, key=lambda item: (item.kind, item.content)))
+
+
+class GroundingCheckToolRequest(ContractModel):
+    """One precise Official tool requested by an incomplete Check."""
+
+    tool_name: GroundingCheckToolName
+    arguments: dict[str, str]
+    user_clarification_request: UserClarificationRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_tool_arguments(self) -> "GroundingCheckToolRequest":
+        required: dict[str, frozenset[str]] = {
+            "ask_user": frozenset({"question"}),
+            "get_column_meaning": frozenset({"table_name", "column_name"}),
+            "get_all_external_knowledge_names": frozenset(),
+            "get_knowledge_definition": frozenset({"knowledge_name"}),
+            "execute_sql": frozenset({"sql"}),
+        }
+        if set(self.arguments) != set(required[self.tool_name]):
+            raise ValueError("Check tool arguments do not match the Official signature")
+        for name, value in self.arguments.items():
+            _require_bounded_text(
+                value,
+                label=f"Check tool argument {name}",
+                maximum=MAX_KNOWLEDGE_CHARS,
+            )
+        clarification = self.user_clarification_request
+        if self.tool_name == "ask_user":
+            if clarification is None:
+                raise ValueError("ask_user requires a typed clarification request")
+            if self.arguments["question"] != clarification.question:
+                raise ValueError("ask_user question differs from clarification request")
+        elif clarification is not None:
+            raise ValueError("only ask_user may carry a clarification request")
+        if self.tool_name == "execute_sql":
+            sql = self.arguments["sql"]
+            if _CONTROL_TOKEN_RE.search(sql):
+                raise ValueError("Check execute_sql cannot contain comments or semicolons")
+            try:
+                statements = sqlglot.parse(sql, read="postgres")
+            except ParseError as exc:
+                raise ValueError("Check execute_sql must be valid PostgreSQL") from exc
+            if len(statements) != 1 or not isinstance(statements[0], exp.Select):
+                raise ValueError("Check execute_sql must be one read-only SELECT")
+            if any(statements[0].find_all(exp.Star)):
+                raise ValueError("Check execute_sql cannot use SELECT *")
+        return self
+
+
+class GroundingCheckResponse(ContractModel):
+    """Unified post-grounding completeness decision and bounded State correction."""
+
+    status: GroundingCheckStatus
+    missing_information: Annotated[
+        str,
+        Field(min_length=1, max_length=MAX_CLARIFICATION_QUESTION_CHARS),
+    ] | None = None
+    next_tool: GroundingCheckToolRequest | None = None
+    column_mapping: Annotated[
+        tuple[ColumnMapping, ...],
+        Field(max_length=MAX_COLUMN_MAPPINGS),
+    ]
+    domain_knowledge: Annotated[
+        tuple[DomainKnowledge, ...],
+        Field(max_length=MAX_DOMAIN_KNOWLEDGE),
+    ]
+
+    @field_validator("missing_information")
+    @classmethod
+    def validate_missing_information(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_bounded_text(
+            value,
+            label="missing_information",
+            maximum=MAX_CLARIFICATION_QUESTION_CHARS,
+        )
+
+    @field_validator("column_mapping")
+    @classmethod
+    def validate_column_mapping(
+        cls, value: tuple[ColumnMapping, ...]
+    ) -> tuple[ColumnMapping, ...]:
+        phrases = [item.phrase for item in value]
+        if len(phrases) != len(set(phrases)):
+            raise ValueError("column_mapping must not contain duplicate phrases")
+        return tuple(sorted(value, key=lambda item: item.phrase))
+
+    @field_validator("domain_knowledge")
+    @classmethod
+    def validate_domain_knowledge(
+        cls, value: tuple[DomainKnowledge, ...]
+    ) -> tuple[DomainKnowledge, ...]:
+        keys = [(item.kind, item.content) for item in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("domain_knowledge must not contain duplicates")
+        return tuple(sorted(value, key=lambda item: (item.kind, item.content)))
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "GroundingCheckResponse":
+        if self.status == "complete":
+            if self.missing_information is not None or self.next_tool is not None:
+                raise ValueError("complete Check cannot request more information")
+        elif self.missing_information is None or self.next_tool is None:
+            raise ValueError(
+                "incomplete Check requires one concrete gap and exactly one tool"
+            )
+        return self
+
+
+StageGroundingResponse: TypeAlias = (
+    StructureGroundingResponse
+    | MappingGroundingResponse
+    | KnowledgeGroundingResponse
+    | GroundingCheckResponse
+)
 
 
 class StateDiffAuthorization(ContractModel):

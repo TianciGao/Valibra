@@ -35,6 +35,11 @@ from valibra_agent.sql_grounding import (
     tool_directions_for_focus,
     transition_grounding_stage,
 )
+from valibra_agent.sql_grounding.updater import (
+    SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256,
+    SQL_GROUNDING_STAGE_PROMPTS,
+    SQL_GROUNDING_STAGE_PROMPT_SHA256,
+)
 
 QUERY = "Show maintenance event, cost, and revenue impact ratio."
 FOLLOW_OPERATION = "Now show the top 5."
@@ -42,9 +47,9 @@ FOLLOW_POWER = "also include current power"
 RATIO_RULE = "revenue impact ratio = maintenance cost / total revenue"
 UPDATED_RATIO_RULE = "revenue impact ratio uses adjusted maintenance cost"
 
-PROMPT_SHA = "812a189320a2f77efed13c99f5f4ba56538570542e341e46167d36f3b2a6f9d6"
-FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "a507a6f3513e53d4c8c784589d15679569070b14251500e74ae77d4597dcf143"
+PROMPT_SHA = "3dd763e99e05cb6842799f97407679b0e4e77b34c2c480673acbfe2bdc5f689e"
+FORM_SHA = "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642"
+CONFIG_SHA = "5e39d275e62927353d6a82776189bed5a1d96cb1a15c4f2b4ea229d607401932"
 
 KNOWN_TABLES = frozenset(
     {
@@ -260,29 +265,20 @@ class UpdaterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)
-        self.assertEqual(
-            set(SQL_GROUNDING_FORM_SCHEMA["properties"]),
-            {
-                "sql_grounding_state",
-                "user_clarification_requests",
-                "next_focus_dimension",
-            },
+        self.assertEqual(set(SQL_GROUNDING_FORM_SCHEMA), {"structure", "mapping", "knowledge", "check"})
+        self.assertTrue(
+            all(not schema["additionalProperties"] for schema in SQL_GROUNDING_FORM_SCHEMA.values())
         )
-        self.assertFalse(SQL_GROUNDING_FORM_SCHEMA["additionalProperties"])
         for phrase in (
-            "完全限定的数据库标识符",
-            "逐字连续的子串",
+            "Official evidence",
+            "逐字来自 query",
             "business_rule",
             "runtime_state",
             "database_capability",
-            "不要输出 score",
-            "不生成 final SQL",
+            "不能包含 SQL 语句",
+            "只返回裸 JSON",
         ):
-            # final SQL 边界写成“不要输出……final SQL”。
-            if phrase == "不生成 final SQL":
-                self.assertIn("final SQL", SQL_GROUNDING_PROMPT)
-            else:
-                self.assertIn(phrase, SQL_GROUNDING_PROMPT)
+            self.assertIn(phrase, SQL_GROUNDING_PROMPT)
 
     async def test_request_contains_only_allowed_input_not_validation_context(self) -> None:
         obs = observation("user_query", sequence=1, content=QUERY)
@@ -313,8 +309,14 @@ class UpdaterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.telemetry.status, "succeeded")
         self.assertEqual(len(result.telemetry.request_sha256), 64)
         self.assertEqual(len(result.telemetry.response_sha256), 64)
-        self.assertEqual(result.telemetry.prompt_sha256, PROMPT_SHA)
-        self.assertEqual(result.telemetry.form_schema_sha256, FORM_SHA)
+        self.assertEqual(
+            result.telemetry.prompt_sha256,
+            SQL_GROUNDING_STAGE_PROMPT_SHA256["structure"],
+        )
+        self.assertEqual(
+            result.telemetry.form_schema_sha256,
+            SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256["structure"],
+        )
         self.assertEqual(result.telemetry.configuration_sha256, CONFIG_SHA)
 
     async def test_bare_and_single_fence_variants_pass(self) -> None:

@@ -34,15 +34,16 @@ from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_FORM_SCHEMA,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT_SHA256,
+    SQL_GROUNDING_STAGE_FORM_SCHEMAS,
     GroundingUpdaterResult,
 )
 from tests.valibra.test_stage3_submit_driven_repair import bootstrap_trajectory
 
 
 QUERY = "Show active artists and their revenue."
-PROMPT_SHA = "812a189320a2f77efed13c99f5f4ba56538570542e341e46167d36f3b2a6f9d6"
-FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "a507a6f3513e53d4c8c784589d15679569070b14251500e74ae77d4597dcf143"
+PROMPT_SHA = "3dd763e99e05cb6842799f97407679b0e4e77b34c2c480673acbfe2bdc5f689e"
+FORM_SHA = "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642"
+CONFIG_SHA = "5e39d275e62927353d6a82776189bed5a1d96cb1a15c4f2b4ea229d607401932"
 
 
 def complete_state() -> SQLGroundingState:
@@ -103,20 +104,18 @@ def request() -> LlmRequest:
 class ClarificationFormContractTests(unittest.TestCase):
     def test_outer_form_and_frozen_hashes_are_exact(self) -> None:
         self.assertEqual(
-            set(SQL_GROUNDING_FORM_SCHEMA["properties"]),
-            {
-                "sql_grounding_state",
-                "user_clarification_requests",
-                "next_focus_dimension",
-            },
+            set(SQL_GROUNDING_FORM_SCHEMA),
+            {"structure", "mapping", "knowledge", "check"},
         )
         self.assertEqual(
-            set(SQL_GROUNDING_FORM_SCHEMA["required"]),
-            {
-                "sql_grounding_state",
-                "user_clarification_requests",
-                "next_focus_dimension",
-            },
+            SQL_GROUNDING_FORM_SCHEMA,
+            SQL_GROUNDING_STAGE_FORM_SCHEMAS,
+        )
+        self.assertTrue(
+            all(
+                schema.get("additionalProperties") is False
+                for schema in SQL_GROUNDING_FORM_SCHEMA.values()
+            )
         )
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
@@ -339,6 +338,7 @@ class ReplacingClarificationPatchUpdater(ClarificationPatchUpdater):
 
 
 class ClarificationCallbackLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skip("retired 1.2 Clarification Patch; v1.3 Check A→B is covered separately")
     async def test_clarification_replaces_a_with_candidate_table_field_b_once(
         self,
     ) -> None:
@@ -620,6 +620,7 @@ CREATE TABLE unrelated (
             original,
         )
 
+    @unittest.skip("retired 1.2 Clarification Patch; v1.3 resumes unified Check")
     async def test_forced_ask_answer_overlay_does_not_reground_or_change_state(self) -> None:
         current = task_state("clarification-answer")
         pending_runtime = GroundingRuntime(
@@ -775,6 +776,7 @@ CREATE TABLE unrelated (
                 current.get(grounding_callbacks.GROUNDING_PENDING_KEY)
             )
 
+    @unittest.skip("retired batched clarification flow; v1.3 Check asks one question at a time")
     async def test_multiple_answers_trigger_one_patch_only_after_all_are_complete(self) -> None:
         current = task_state("clarification-multiple")
         pending_runtime = GroundingRuntime(
@@ -874,23 +876,21 @@ CREATE TABLE unrelated (
         self.assertEqual(runtime_after.stage, "SQL_ATTEMPT")
         self.assertEqual(runtime_after.grounding_revision, 3)
 
-    def test_provider_ledger_is_four_per_phase_eight_per_task(self) -> None:
+    def test_provider_ledger_uses_the_v13_task_safety_bound(self) -> None:
         current = {"task_id": "clarification-ledger"}
-        for _ in range(4):
+        for _ in range(16):
             grounding_callbacks._record_provider_call(current, 1)
-        with self.assertRaises(ValueError):
-            grounding_callbacks._record_provider_call(current, 1)
-        for _ in range(4):
+        for _ in range(16):
             grounding_callbacks._record_provider_call(current, 2)
         with self.assertRaises(ValueError):
             grounding_callbacks._record_provider_call(current, 2)
         self.assertEqual(
             current[grounding_callbacks.GROUNDING_PROVIDER_CALL_COUNT_KEY],
-            8,
+            32,
         )
         self.assertEqual(
             current[grounding_callbacks.GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY],
-            {"1": 4, "2": 4},
+            {"1": 16, "2": 16},
         )
 
 

@@ -37,9 +37,9 @@ from tests.valibra.test_stage3_submit_driven_repair import (
 
 
 FOLLOW_UP = "Now include the current power reading."
-PROMPT_SHA = "812a189320a2f77efed13c99f5f4ba56538570542e341e46167d36f3b2a6f9d6"
-FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
-CONFIG_SHA = "a507a6f3513e53d4c8c784589d15679569070b14251500e74ae77d4597dcf143"
+PROMPT_SHA = "3dd763e99e05cb6842799f97407679b0e4e77b34c2c480673acbfe2bdc5f689e"
+FORM_SHA = "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642"
+CONFIG_SHA = "5e39d275e62927353d6a82776189bed5a1d96cb1a15c4f2b4ea229d607401932"
 P2_SUBMIT_RESPONSE = (
     f"passed\nFollow-up question: {FOLLOW_UP}\nBudget remaining: 4"
 )
@@ -352,6 +352,7 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             audit["service_status"], "skipped_submit_failure_no_repair"
         )
 
+    @unittest.skip("retired 1.2 Clarification Patch; v1.3 resumes unified Check")
     async def test_p2_clarification_answer_triggers_one_targeted_patch(self):
         state = task_state("stage4a-p2-clarification")
         self.bind(state)
@@ -559,7 +560,7 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assert_bootstrap_once(state)
 
     def test_stage4a_contract_and_hashes_are_frozen(self):
-        self.assertEqual(DEFAULT_GROUNDING_MAX_CALLS_PER_TASK, 8)
+        self.assertEqual(DEFAULT_GROUNDING_MAX_CALLS_PER_TASK, 32)
         self.assertEqual(SQL_GROUNDING_PROMPT_SHA256, PROMPT_SHA)
         self.assertEqual(SQL_GROUNDING_FORM_SCHEMA_SHA256, FORM_SHA)
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)

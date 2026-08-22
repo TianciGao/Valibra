@@ -1,0 +1,112 @@
+{
+  "schema_version": "sql-grounding-v13-evidence-1.0",
+  "status": "HOLD",
+  "start_head": "1fe095798c628d16e9e323a4778b1de2ad604062",
+  "branch": "research/sql-grounding-v1",
+  "contracts": {
+    "combined_prompt_sha256": "3dd763e99e05cb6842799f97407679b0e4e77b34c2c480673acbfe2bdc5f689e",
+    "combined_form_sha256": "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642",
+    "configuration_sha256": "5e39d275e62927353d6a82776189bed5a1d96cb1a15c4f2b4ea229d607401932",
+    "stages": {
+      "structure": {
+        "prompt_sha256": "ad6b0fce71aee88e394fe51cf734eaea3894f5b09fb8f44178178348a0059e53",
+        "form_sha256": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5"
+      },
+      "mapping": {
+        "prompt_sha256": "1fd863c27c20ea9cc83ff4ed34322bcf49aed1e10a3ccbff65c71638ccce7869",
+        "form_sha256": "7a1e8cb588d1c0b89546bfd02b8be0d254ca015cdee753e5e2d23e0da5ea3b44"
+      },
+      "knowledge": {
+        "prompt_sha256": "8a34b636420f1b77f5cecaf6455869488888143a88cfaff65cffa98c1d021234",
+        "form_sha256": "c8993b52ba5a6ae599cf8fc20559a637427205ec4ebb6c80d914032897331b61"
+      },
+      "check": {
+        "prompt_sha256": "b492e1fd0634a136dd00e8205918734890644d631663afa2209890ff28c6dd8e",
+        "form_sha256": "e8d6b0715866c505630b1d973368d3b9f89ec73504af72030199fe4249acce93"
+      }
+    }
+  },
+  "offline": {
+    "focused_tests": 58,
+    "full_tests": 503,
+    "skipped_retired_v12_tests": 4,
+    "pip_check": "PASS",
+    "compileall": "PASS",
+    "diff_check": "PASS",
+    "external_calls": 0
+  },
+  "smoke": {
+    "private_ref": "research-runtime/sqlg_v13_five_task_smoke_20260822T110200Z/",
+    "task_count": 5,
+    "completed": 5,
+    "rerun_count": 0,
+    "lifecycle_invariants": "PASS",
+    "phase_one_grounding_completed": 0,
+    "main_sql_writer_reached": 0,
+    "grounding_calls": 6,
+    "grounding_calls_at_32768_reasoning_tokens": 5,
+    "grounding_total_tokens": 179001,
+    "grounding_latency_ms": 1645190.8614849672,
+    "a_to_b_corrections": 0,
+    "check_calls": 0,
+    "tasks": [
+      {
+        "task_id": "solar_panel_1",
+        "reward": 0.0,
+        "p1": false,
+        "p2": false,
+        "provider_calls": 2,
+        "grounding_revision": 1,
+        "failure": "mapping/json_invalid_after_reasoning_limit",
+        "wall_seconds": 346.82424759864807
+      },
+      {
+        "task_id": "solar_panel_5",
+        "reward": 0.0,
+        "p1": false,
+        "p2": false,
+        "provider_calls": 1,
+        "grounding_revision": 0,
+        "failure": "structure/json_invalid_after_reasoning_limit",
+        "wall_seconds": 323.3179349899292
+      },
+      {
+        "task_id": "solar_panel_7",
+        "reward": 0.0,
+        "p1": false,
+        "p2": false,
+        "provider_calls": 1,
+        "grounding_revision": 0,
+        "failure": "structure/json_invalid_after_reasoning_limit",
+        "wall_seconds": 300.296373128891
+      },
+      {
+        "task_id": "solar_panel_12",
+        "reward": 0.0,
+        "p1": false,
+        "p2": false,
+        "provider_calls": 1,
+        "grounding_revision": 0,
+        "failure": "structure/json_invalid_after_reasoning_limit",
+        "wall_seconds": 307.81439185142517
+      },
+      {
+        "task_id": "solar_panel_20",
+        "reward": 0.0,
+        "p1": false,
+        "p2": false,
+        "provider_calls": 1,
+        "grounding_revision": 0,
+        "failure": "structure/json_invalid_after_reasoning_limit",
+        "wall_seconds": 372.7894389629364
+      }
+    ]
+  },
+  "conclusion": {
+    "runaway_improved": false,
+    "a_to_b_observed": false,
+    "check_real_path": "not_reached",
+    "main_sql_writer_real_path": "not_reached",
+    "blocker": "GLM-5.2 high reasoning exhausted the 32768-token output budget in 5/6 staged Grounding calls, leaving empty content rejected as json_invalid"
+  }
+}

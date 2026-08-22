@@ -37,6 +37,8 @@ from valibra_agent.sql_grounding.updater import (
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT,
     SQL_GROUNDING_PROMPT_SHA256,
+    SQL_GROUNDING_STAGE_FORM_SCHEMAS,
+    SQL_GROUNDING_STAGE_PROMPTS,
     GroundingClientResponse,
     GroundingLLMRequest,
     SQLGroundingProviderError,
@@ -56,10 +58,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "812a189320a2f77efed13c99f5f4ba56538570542e341e46167d36f3b2a6f9d6"
-FORM_SHA = "1f7e3c1f1ae86876f63de951bcade30fc1ba338e046416fe033331d447775d15"
+PROMPT_SHA = "3dd763e99e05cb6842799f97407679b0e4e77b34c2c480673acbfe2bdc5f689e"
+FORM_SHA = "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "a507a6f3513e53d4c8c784589d15679569070b14251500e74ae77d4597dcf143"
+CONFIG_SHA = "5e39d275e62927353d6a82776189bed5a1d96cb1a15c4f2b4ea229d607401932"
 QUERY = "What is the maintenance cost?"
 
 
@@ -294,9 +296,10 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
     async def test_litellm_transformation_preserves_json_object_in_http_body(self):
         llm, provider = self.configs()
         request = GroundingLLMRequest(
-            prompt=SQL_GROUNDING_PROMPT,
+            prompt=SQL_GROUNDING_STAGE_PROMPTS["structure"],
             input_json="{}",
-            response_schema=SQL_GROUNDING_FORM_SCHEMA,
+            response_schema=SQL_GROUNDING_STAGE_FORM_SCHEMAS["structure"],
+            call_kind="structure",
         )
         _, provider_kwargs = _build_provider_request(
             request,
@@ -556,14 +559,11 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(SQL_GROUNDING_PROMPT_SHA256, OLD_PROMPT_SHA)
         self.assertNotEqual(SQL_GROUNDING_CONFIGURATION_SHA256, OLD_CONFIG_SHA)
         self.assertEqual(
-            hashlib.sha256(
-                canonical_json(GroundingLLMResponse.model_json_schema()).encode("utf-8")
-            ).hexdigest(),
+            hashlib.sha256(canonical_json(SQL_GROUNDING_FORM_SCHEMA).encode("utf-8")).hexdigest(),
             FORM_SHA,
         )
-        self.assertIn('"targets"', SQL_GROUNDING_PROMPT)
-        self.assertIn('不存在名为 "target" 的字段。', SQL_GROUNDING_PROMPT)
-        self.assertIn('"targets" 也必须是 JSON 数组', SQL_GROUNDING_PROMPT)
+        self.assertIn("targets", SQL_GROUNDING_PROMPT)
+        self.assertIn("不是候选字段集合", SQL_GROUNDING_PROMPT)
         self.assertNotIn("maintenance cost", SQL_GROUNDING_PROMPT.lower())
         self.assertNotIn("operational_metrics", SQL_GROUNDING_PROMPT.lower())
         report = sql_grounding_provider_health_report(PROJECT_ROOT, self.env)
