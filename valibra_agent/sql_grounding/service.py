@@ -9,12 +9,14 @@ from pydantic import Field
 
 from valibra_agent.sql_grounding.models import (
     ContractModel,
+    DomainKnowledge,
     GroundingCheckResponse,
     GroundingDimension,
     GroundingLLMResponse,
     GroundingRuntime,
     KnowledgeGroundingResponse,
     MappingGroundingResponse,
+    SQLGroundingState,
     SQLGroundingValidationError,
     StageGroundingResponse,
     StateDiffAuthorization,
@@ -106,12 +108,13 @@ async def process_sql_grounding_observation(
         )
 
     response = updater_result.response
-    materialized = _materialize_stage_response(
-        runtime,
-        response,
-        call_kind=call_kind,
-    )
     try:
+        materialized = _materialize_stage_response(
+            runtime,
+            response,
+            call_kind=call_kind,
+            grounding_input=grounding_input,
+        )
         validate_sql_grounding_state(materialized.sql_grounding_state, context)
         if isinstance(response, GroundingCheckResponse):
             tool = response.next_tool
@@ -200,6 +203,7 @@ def _materialize_stage_response(
     response: GroundingLLMResponse | StageGroundingResponse,
     *,
     call_kind: GroundingCallKind | None,
+    grounding_input: Mapping[str, Any] | None,
 ) -> GroundingLLMResponse:
     """Merge one small 1.3 form into a complete candidate State.
 
@@ -228,10 +232,15 @@ def _materialize_stage_response(
     elif call_kind == "knowledge" and isinstance(
         response, KnowledgeGroundingResponse
     ):
-        state = old.model_copy(
-            update={
+        domain_knowledge = _materialize_official_business_rules(
+            response.selected_knowledge_ids,
+            grounding_input=grounding_input,
+        )
+        state = SQLGroundingState.model_validate(
+            {
+                **old.model_dump(mode="json"),
                 "column_mapping": response.column_mapping,
-                "domain_knowledge": response.domain_knowledge,
+                "domain_knowledge": domain_knowledge,
             }
         )
         focus = "none"
@@ -250,6 +259,65 @@ def _materialize_stage_response(
         user_clarification_requests=(),
         next_focus_dimension=focus,
     )
+
+
+_OFFICIAL_BULK_KNOWLEDGE_FIELDS = frozenset(
+    {"id", "knowledge", "description", "definition"}
+)
+
+
+def _materialize_official_business_rules(
+    selected_ids: tuple[int, ...],
+    *,
+    grounding_input: Mapping[str, Any] | None,
+) -> tuple[DomainKnowledge, ...]:
+    """Resolve exact Official definitions without LLM copying or classification."""
+
+    if grounding_input is None:
+        raise SQLGroundingValidationError(
+            "Knowledge selection requires current Official knowledge definitions"
+        )
+    entries = grounding_input.get("knowledge_definitions")
+    if not isinstance(entries, list):
+        raise SQLGroundingValidationError(
+            "Official knowledge definitions must be a JSON array"
+        )
+    by_id: dict[int, DomainKnowledge] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SQLGroundingValidationError(
+                "Official knowledge entry must be an object"
+            )
+        if not set(entry).issubset(_OFFICIAL_BULK_KNOWLEDGE_FIELDS):
+            raise SQLGroundingValidationError(
+                "Official knowledge entry contains a hidden or unsupported field"
+            )
+        knowledge_id = entry.get("id")
+        if isinstance(knowledge_id, bool) or not isinstance(knowledge_id, int):
+            raise SQLGroundingValidationError(
+                "Official knowledge id must be an integer"
+            )
+        if knowledge_id in by_id:
+            raise SQLGroundingValidationError(
+                "Official knowledge ids must be unique"
+            )
+        definition = entry.get("definition")
+        try:
+            knowledge = DomainKnowledge(
+                kind="business_rule",
+                content=definition,
+            )
+        except Exception as exc:
+            raise SQLGroundingValidationError(
+                "Official knowledge definition is invalid"
+            ) from exc
+        by_id[knowledge_id] = knowledge
+    try:
+        return tuple(by_id[knowledge_id] for knowledge_id in selected_ids)
+    except KeyError as exc:
+        raise SQLGroundingValidationError(
+            "selected knowledge id is absent from Official evidence"
+        ) from exc
 
 
 def _validate_service_inputs(

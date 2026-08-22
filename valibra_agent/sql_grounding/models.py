@@ -16,7 +16,14 @@ from importlib.metadata import version
 from typing import Annotated, Any, Literal, TypeAlias
 
 import sqlglot
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
@@ -527,14 +534,14 @@ class MappingGroundingResponse(ContractModel):
 
 
 class KnowledgeGroundingResponse(ContractModel):
-    """Knowledge-stage form with a bounded Mapping correction seam."""
+    """Knowledge selection form with a bounded Mapping correction seam."""
 
     column_mapping: Annotated[
         tuple[ColumnMapping, ...],
         Field(max_length=MAX_COLUMN_MAPPINGS),
     ]
-    domain_knowledge: Annotated[
-        tuple[DomainKnowledge, ...],
+    selected_knowledge_ids: Annotated[
+        tuple[StrictInt, ...],
         Field(max_length=MAX_DOMAIN_KNOWLEDGE),
     ]
 
@@ -548,15 +555,14 @@ class KnowledgeGroundingResponse(ContractModel):
             raise ValueError("column_mapping must not contain duplicate phrases")
         return tuple(sorted(value, key=lambda item: item.phrase))
 
-    @field_validator("domain_knowledge")
+    @field_validator("selected_knowledge_ids")
     @classmethod
-    def validate_domain_knowledge(
-        cls, value: tuple[DomainKnowledge, ...]
-    ) -> tuple[DomainKnowledge, ...]:
-        keys = [(item.kind, item.content) for item in value]
-        if len(keys) != len(set(keys)):
-            raise ValueError("domain_knowledge must not contain duplicates")
-        return tuple(sorted(value, key=lambda item: (item.kind, item.content)))
+    def validate_selected_knowledge_ids(
+        cls, value: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("selected_knowledge_ids must not contain duplicates")
+        return tuple(sorted(value))
 
 
 class GroundingCheckToolRequest(ContractModel):

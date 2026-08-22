@@ -114,12 +114,35 @@ MAPPING_GROUNDING_PROMPT = (
     + _COMMON_EXPRESSION_RULES
 )
 KNOWLEDGE_GROUNDING_PROMPT = (
-    """你负责 Knowledge Grounding。读取 query、current_state、Official knowledge_definitions
-和候选表内完整 column meanings。填写固定表单 {column_mapping, domain_knowledge}。
-domain_knowledge.content 必须逐字复制精确匹配的 Official definition；相近知识不能替代。
-domain_knowledge.kind 只能是 business_rule、runtime_state 或 database_capability。
-若精确规则证明字段 A 错而字段 B 正确，必须在候选表 metadata 内把 mapping 从 A 改为 B。
-不要提问、选择工具或修改 tables/join_keys。
+    """你负责 Knowledge Grounding。
+
+输入包括 query / follow_up、current_state、Official knowledge_definitions 和 candidate tables
+的 column meanings。
+
+你的任务是：
+1. 从 Official knowledge_definitions 中选择当前 Query 真正需要的精确 knowledge；
+2. 再用选中的 knowledge 检查并修正 current column_mapping。
+
+重要：
+- current column_mapping 只是上一轮的暂定结果，可能是错的，不是选择 knowledge 的依据。
+- 先根据 Query 的原意以及 knowledge 的 name / description / definition，判断用户实际要求的
+  业务概念；选定精确 knowledge 后，再检查 current column_mapping 是否与它一致。
+- 如果 current mapping 与精确 knowledge 冲突，应修正 mapping；不要为了保留 current mapping，
+  改选一条能解释它的相似 knowledge。
+- 相反、相邻、上游、下游或派生概念都不能代替 Query 真正要求的精确概念。
+- 如果没有精确匹配的 knowledge，不要猜或选择最接近项，selected_knowledge_ids 返回 []。
+- 多个 knowledge id 只能表示完成 Query 确实同时需要多条规则，不能表示候选项。
+- 如果精确 knowledge 证明字段 A 错、字段 B 对，可以把 column_mapping 从 A 修正为 B；B 必须
+  有当前 candidate-table column meanings 支持。
+
+只返回：
+{"column_mapping": [{"phrase": "...", "targets": ["..."]}],
+ "selected_knowledge_ids": [1, 2]}
+
+规则：column_mapping 返回修正后的完整当前 mapping；selected_knowledge_ids 必须是 JSON array，
+ID 必须来自当前 Official knowledge_definitions，没有需要时返回 []；不要复制 definition，不要
+生成 knowledge kind，不返回 tables、join_keys 或其他字段，不生成 SQL，不输出解释、reasoning、
+Markdown 或额外文字。
 """.strip()
     + "\n\n"
     + _COMMON_EXPRESSION_RULES

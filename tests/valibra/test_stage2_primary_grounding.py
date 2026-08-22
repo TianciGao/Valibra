@@ -74,7 +74,7 @@ COLUMN_MEANINGS = json.dumps(
     sort_keys=True,
 )
 KNOWLEDGE_DEFINITIONS = json.dumps(
-    [{"id": "rule-1", "definition": RULE}],
+    [{"id": 1, "definition": RULE}],
     sort_keys=True,
 )
 
@@ -741,7 +741,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
             sort_keys=True,
         )
         definitions = json.dumps(
-            [{"id": "rule-reported", "definition": rule}],
+            [{"id": 2, "definition": rule}],
             sort_keys=True,
         )
         mapping_a = (

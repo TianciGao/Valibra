@@ -57,13 +57,13 @@ COLUMN_MEANINGS = json.dumps(
 )
 KNOWLEDGE_ITEMS = [
     {
-        "id": "k1",
+        "id": 1,
         "knowledge": "ratio_rule",
         "description": "Ratio definition",
         "definition": f"Use maintcost as reported; {KNOWLEDGE_SENTINEL}",
     },
     {
-        "id": "k2",
+        "id": 2,
         "knowledge": "currency_rule",
         "description": "Currency definition",
         "definition": "All maintenance costs are denominated in USD.",
@@ -421,6 +421,9 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
         invalid_bulk_values = (
             "not-json",
             "{}",
+            '[{"definition":"missing-id"}]',
+            '[{"id":"string-id","definition":"wrong id type"}]',
+            '[{"id":1,"definition":"first"},{"id":1,"definition":"second"}]',
             '[{"definition":"ok","extra":"forbidden"}]',
             '[{"id":"missing-definition"}]',
             '["not-an-object"]',

@@ -3690,8 +3690,10 @@ def _exact_all_column_meanings(content: Any) -> dict[str, Any]:
     return normalized
 
 
-def _exact_knowledge_definitions(content: Any) -> tuple[str, ...]:
-    """Recognize every definition in the Official bulk knowledge response."""
+def _exact_knowledge_definition_items(
+    content: Any,
+) -> tuple[tuple[int, str], ...]:
+    """Recognize unique integer IDs and exact definitions in Official bulk KB."""
 
     value = content
     if isinstance(value, str):
@@ -3709,17 +3711,33 @@ def _exact_knowledge_definitions(content: Any) -> tuple[str, ...]:
         canonical_json(value)
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("bulk knowledge definitions must be finite JSON") from exc
-    definitions: list[str] = []
+    definitions: list[tuple[int, str]] = []
+    seen_ids: set[int] = set()
     for item in value:
         if not isinstance(item, dict):
             raise ValueError("each bulk knowledge entry must be an object")
         if not set(item).issubset(_BULK_KNOWLEDGE_VISIBLE_FIELDS):
             raise ValueError("bulk knowledge entry contains an unsupported field")
+        knowledge_id = item.get("id")
+        if isinstance(knowledge_id, bool) or not isinstance(knowledge_id, int):
+            raise ValueError("bulk knowledge entry has no integer id")
+        if knowledge_id in seen_ids:
+            raise ValueError("bulk knowledge ids must be unique")
         definition = _exact_knowledge_definition(item)
         if definition is None:
             raise ValueError("bulk knowledge entry has no canonical definition")
-        definitions.append(definition)
+        seen_ids.add(knowledge_id)
+        definitions.append((knowledge_id, definition))
     return tuple(definitions)
+
+
+def _exact_knowledge_definitions(content: Any) -> tuple[str, ...]:
+    """Recognize every exact definition in the Official bulk response."""
+
+    return tuple(
+        definition
+        for _, definition in _exact_knowledge_definition_items(content)
+    )
 
 
 def _normalized_knowledge_definitions(content: Any) -> list[dict[str, Any]]:
@@ -3735,7 +3753,7 @@ def _normalized_knowledge_definitions(content: Any) -> list[dict[str, Any]]:
             )
         except (json.JSONDecodeError, ValueError) as exc:
             raise ValueError("bulk knowledge definitions must be strict JSON") from exc
-    _exact_knowledge_definitions(value)
+    _exact_knowledge_definition_items(value)
     normalized = json.loads(canonical_json(value))
     if not isinstance(normalized, list):
         raise ValueError("bulk knowledge definitions must be a JSON list")

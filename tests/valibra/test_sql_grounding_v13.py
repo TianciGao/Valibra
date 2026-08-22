@@ -41,19 +41,19 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "8d4e53fd2f53ea2635d4ddfb8bcca5c32da271546e0c181614e5cb5690b1635c"
-FORM_SHA = "9d3cef810801de43bf9d6537a9811641252652cb910f4beb0248d6b129b52642"
-CONFIG_SHA = "24b00b82a2ee3a8219fadba8728a31fe7d29c9b97e51d8892e0c87a3093f7557"
+PROMPT_SHA = "c18b3e366e8bf14de1f5cf1fa5144977e352cb96fabae9de6da579a46d03f6ed"
+FORM_SHA = "58f44fbc8ea1ed1d38603b06fe13ec4a8a60d6d3512597de7ee6554b7e73df48"
+CONFIG_SHA = "20503be3af181db8cc3df1d9680d5e62e5fc50e4436f22e658303023546e24cb"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "1fd863c27c20ea9cc83ff4ed34322bcf49aed1e10a3ccbff65c71638ccce7869",
-    "knowledge": "8a34b636420f1b77f5cecaf6455869488888143a88cfaff65cffa98c1d021234",
+    "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
     "check": "b492e1fd0634a136dd00e8205918734890644d631663afa2209890ff28c6dd8e",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
     "mapping": "7a1e8cb588d1c0b89546bfd02b8be0d254ca015cdee753e5e2d23e0da5ea3b44",
-    "knowledge": "c8993b52ba5a6ae599cf8fc20559a637427205ec4ebb6c80d914032897331b61",
+    "knowledge": "c80f6dc31b8bc4aad425fb73fe62e361dd06362551827473ee8e9302052ed246",
     "check": "e8d6b0715866c505630b1d973368d3b9f89ec73504af72030199fe4249acce93",
 }
 SCHEMA_WITH_ROWS = """CREATE TABLE operational_metrics (
@@ -143,6 +143,17 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         self.assertEqual(SQL_GROUNDING_CONFIGURATION_SHA256, CONFIG_SHA)
         for schema in SQL_GROUNDING_STAGE_FORM_SCHEMAS.values():
             self.assertFalse(schema.get("additionalProperties", True))
+        knowledge_prompt = SQL_GROUNDING_STAGE_PROMPTS["knowledge"]
+        self.assertLess(
+            knowledge_prompt.index("选择当前 Query 真正需要的精确 knowledge"),
+            knowledge_prompt.index("再用选中的 knowledge 检查并修正"),
+        )
+        self.assertIn(
+            "current column_mapping 只是上一轮的暂定结果",
+            knowledge_prompt,
+        )
+        self.assertIn("不是选择 knowledge 的依据", knowledge_prompt)
+        self.assertIn("不生成 SQL", knowledge_prompt)
 
     def test_stage_forms_have_only_authorized_fields(self) -> None:
         self.assertEqual(
@@ -155,8 +166,37 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         )
         self.assertEqual(
             set(SQL_GROUNDING_STAGE_FORM_SCHEMAS["knowledge"]["properties"]),
-            {"column_mapping", "domain_knowledge"},
+            {"column_mapping", "selected_knowledge_ids"},
         )
+
+    def test_knowledge_selection_form_is_strict_and_ids_are_unique(self) -> None:
+        empty = KnowledgeGroundingResponse(
+            column_mapping=(),
+            selected_knowledge_ids=(),
+        )
+        self.assertEqual(empty.selected_knowledge_ids, ())
+        with self.assertRaises(ValidationError):
+            KnowledgeGroundingResponse(
+                column_mapping=(),
+                selected_knowledge_ids=(32, 32),
+            )
+        with self.assertRaises(ValidationError):
+            KnowledgeGroundingResponse.model_validate(
+                {
+                    "column_mapping": [],
+                    "selected_knowledge_ids": [],
+                    "domain_knowledge": [],
+                }
+            )
+        with self.assertRaises(ValidationError):
+            KnowledgeGroundingResponse.model_validate(
+                {
+                    "column_mapping": [],
+                    "selected_knowledge_ids": [],
+                    "tables": [],
+                    "join_keys": [],
+                }
+            )
 
     def test_check_requires_complete_or_one_concrete_gap_and_tool(self) -> None:
         complete = GroundingCheckResponse(
@@ -241,14 +281,14 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                     targets=("operational_metrics.reported_cost",),
                 ),
             ),
-            domain_knowledge=(DomainKnowledge(kind="business_rule", content=rule),),
+            selected_knowledge_ids=(32,),
         )
         observation = build_sql_grounding_observation(
             task_id="v13-a-b",
             phase=1,
             sequence=3,
             observation_type="knowledge",
-            content=[{"definition": rule}],
+            content=[{"id": 32, "definition": rule}],
             summary="knowledge",
             tool_name="get_all_knowledge_definitions",
             function_call_id="v13-a-b-call",
@@ -256,7 +296,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         bundle = {
             "query": QUERY,
             "current_state": old.model_dump(mode="json"),
-            "knowledge_definitions": [{"definition": rule}],
+            "knowledge_definitions": [{"id": 32, "definition": rule}],
             "relevant_column_meanings": {
                 "operational_metrics": {
                     "maintcost": "legacy value",
@@ -275,6 +315,100 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state_update.changed_dimensions, ("column_mapping", "domain_knowledge"))
         self.assertEqual(result.runtime.grounding_state.tables, old.tables)
         self.assertEqual(result.runtime.grounding_state.join_keys, old.join_keys)
+        self.assertEqual(
+            result.runtime.grounding_state.domain_knowledge,
+            (DomainKnowledge(kind="business_rule", content=rule),),
+        )
+        self.assertEqual(
+            result.runtime.grounding_state.domain_knowledge[0].content,
+            rule,
+        )
+
+    async def test_knowledge_selection_rejects_unknown_id_atomically(self) -> None:
+        rule = "Use reported_cost when the user asks for maintenance cost."
+        old = complete_state().model_copy(update={"domain_knowledge": None})
+        runtime = GroundingRuntime(
+            grounding_revision=2,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="domain_knowledge",
+            grounding_state=old,
+        )
+        observation = build_sql_grounding_observation(
+            task_id="v13-missing-knowledge-id",
+            phase=1,
+            sequence=3,
+            observation_type="knowledge",
+            content=[{"id": 32, "definition": rule}],
+            summary="knowledge",
+            tool_name="get_all_knowledge_definitions",
+            function_call_id="v13-missing-knowledge-id-call",
+        )
+        result = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context(observation.observation_id, rule=rule),
+            FakeUpdater(
+                KnowledgeGroundingResponse(
+                    column_mapping=old.column_mapping or (),
+                    selected_knowledge_ids=(33,),
+                ),
+                "knowledge",
+            ),
+            grounding_input={
+                "query": QUERY,
+                "current_state": old.model_dump(mode="json"),
+                "knowledge_definitions": [{"id": 32, "definition": rule}],
+                "relevant_column_meanings": {},
+            },
+        )
+        self.assertEqual(result.state_update.status, "rejected")
+        self.assertEqual(result.runtime, runtime)
+
+    async def test_knowledge_selection_rejects_duplicate_official_ids(self) -> None:
+        rule = "Use reported_cost when the user asks for maintenance cost."
+        old = complete_state().model_copy(update={"domain_knowledge": None})
+        runtime = GroundingRuntime(
+            grounding_revision=2,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="domain_knowledge",
+            grounding_state=old,
+        )
+        observation = build_sql_grounding_observation(
+            task_id="v13-duplicate-official-id",
+            phase=1,
+            sequence=3,
+            observation_type="knowledge",
+            content=[
+                {"id": 32, "definition": rule},
+                {"id": 32, "definition": "Another exact definition."},
+            ],
+            summary="knowledge",
+            tool_name="get_all_knowledge_definitions",
+            function_call_id="v13-duplicate-official-id-call",
+        )
+        result = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context(observation.observation_id, rule=rule),
+            FakeUpdater(
+                KnowledgeGroundingResponse(
+                    column_mapping=old.column_mapping or (),
+                    selected_knowledge_ids=(32,),
+                ),
+                "knowledge",
+            ),
+            grounding_input={
+                "query": QUERY,
+                "current_state": old.model_dump(mode="json"),
+                "knowledge_definitions": [
+                    {"id": 32, "definition": rule},
+                    {"id": 32, "definition": "Another exact definition."},
+                ],
+                "relevant_column_meanings": {},
+            },
+        )
+        self.assertEqual(result.state_update.status, "rejected")
+        self.assertEqual(result.runtime, runtime)
 
     async def test_check_updates_only_mapping_and_knowledge(self) -> None:
         old = complete_state()
