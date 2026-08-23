@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
+from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from shared.audit import to_jsonable
 from shared.config import PROJECT_ROOT
@@ -155,6 +156,15 @@ _BLOCKED_SUBMIT_STATUS = "VALIBRA_FIRST_SUBMIT_BLOCKED"
 _BLOCKED_SUBMIT_GUIDANCE = (
     "Complete the pending Valibra user clarification before retrying submit_sql."
 )
+_BLOCKED_MAIN_EXECUTE_STATUS = "VALIBRA_MAIN_EXECUTE_REJECTED"
+_BLOCKED_MAIN_EXECUTE_GUIDANCE = (
+    "Rewrite the SQL using only the frozen Grounding State, or submit the "
+    "best State-consistent SQL when implementation is already verified."
+)
+_DUPLICATE_MAIN_EXECUTE_GUIDANCE = (
+    "This SQL has already been executed in the current phase. Use the existing "
+    "result to change the implementation or submit; do not execute it again."
+)
 _GROUNDING_FAILED_CLOSED_STATUS = "VALIBRA_SQL_GROUNDING_FAILED_CLOSED"
 _GROUNDING_FAILED_CLOSED_GUIDANCE = (
     "A valid SQL Grounding State was not established for this phase. "
@@ -199,6 +209,17 @@ _MAX_PROVIDER_CALLS_PER_TASK = 32
 _MIN_BUDGET_AFTER_CHECK_TOOL = 6.0
 _MAX_CHECK_AUDITS = 32
 _SQL_WRITER_TOOL_NAMES = ("execute_sql", "submit_sql")
+_SQL_WRITER_EXECUTE_TOOL_DESCRIPTION = """Execute a candidate PostgreSQL task-answer query against the database and return the results.
+
+In Main SQL Writer mode, use this only to validate an already-formed candidate answer SQL derived from the frozen Grounding State. It is not for schema discovery, data sampling, business-semantic exploration, or discovering new filters/thresholds.
+
+Cost: 1 bird-coin.
+
+Args:
+    sql: The candidate PostgreSQL task-answer query to execute.
+
+Returns:
+    The query results formatted as a table, or an error message."""
 _SQL_WRITER_PROMPT = """Grounding 已完成，数据库语义结果视为本 phase 的最终结果。
 你的任务是根据 Original Query、可选 Follow-up、Final Grounding State 和已回答澄清写 PostgreSQL SQL。
 
@@ -379,6 +400,15 @@ class _GateExecutionPolicy:
     focus_directions: tuple[str, ...] = ()
     affordable_directions: tuple[str, ...] = ()
     liveness_bypass_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MainExecuteGateDecision:
+    """Transient deterministic decision; never part of Grounding Runtime."""
+
+    allowed: bool
+    reason: str
+    canonical_sql: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -642,7 +672,7 @@ class _PendingCheckTool:
 
 @dataclass(frozen=True, slots=True)
 class _FailedClosedToolCall:
-    """Exact ADK pairing for one tool denied by a failed phase terminal."""
+    """Exact ADK pairing for one deterministic tool denial without execution."""
 
     function_call_id: str
     tool_name: str
@@ -1075,6 +1105,82 @@ async def before_tool_callback(
                 ),
             )
             return _duplicate_bootstrap_response(tool_name)
+    if (
+        state is not None
+        and tool_name == "execute_sql"
+        and _phase_grounding_succeeded(state)
+        and not _is_exact_pending_check_dispatch(
+            state,
+            tool_context=tool_context,
+            tool_name=tool_name,
+        )
+    ):
+        try:
+            decision = _evaluate_main_execute_gate(state, args)
+        except Exception as exc:
+            decision = _MainExecuteGateDecision(
+                allowed=False,
+                reason="sql_validation_failed",
+            )
+            _append_error_audit(
+                state,
+                _bounded_error_audit(
+                    "before_tool_main_execute_gate",
+                    exc,
+                    function_call_id=_valid_context_identifier(tool_context),
+                ),
+            )
+        if not decision.allowed:
+            response = _blocked_main_execute_response(decision.reason)
+            try:
+                function_call_id = _require_function_call_id(tool_context)
+                record = _FailedClosedToolCall(
+                    function_call_id=function_call_id,
+                    tool_name=tool_name,
+                    phase=_phase(state.get("current_phase", 1)),
+                    response_sha256=_sha256_text(canonical_json(response)),
+                )
+                _add_failed_closed_call(state, record)
+                _upsert_tool_callback_audit(
+                    state,
+                    function_call_id,
+                    shadow_audit={
+                        "service_status": "blocked_main_execute_no_charge",
+                        "function_call_id": function_call_id,
+                        "tool_name": tool_name,
+                        "phase_before": record.phase,
+                        "reason": decision.reason,
+                        "provider_attempted": False,
+                        "official_tool_executed": False,
+                        "bird_coin_charged": False,
+                    },
+                    control_audit=None,
+                )
+            except Exception as exc:
+                function_call_id = _valid_context_identifier(tool_context)
+                if function_call_id is not None:
+                    # The synthetic denial already prevents DB execution.  Keep
+                    # exact after-tool suppression fail-closed even if a
+                    # pre-existing bounded bookkeeping store was malformed.
+                    state[GROUNDING_FAILED_CLOSED_CALLS_KEY] = {
+                        function_call_id: _FailedClosedToolCall(
+                            function_call_id=function_call_id,
+                            tool_name=tool_name,
+                            phase=_phase(state.get("current_phase", 1)),
+                            response_sha256=_sha256_text(
+                                canonical_json(response)
+                            ),
+                        ).to_json()
+                    }
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit(
+                        "before_tool_main_execute_block",
+                        exc,
+                        function_call_id=function_call_id,
+                    ),
+                )
+            return response
     if state is not None and tool_name == "submit_sql":
         try:
             runtime, degraded = _ensure_runtime(state)
@@ -2704,14 +2810,6 @@ def _build_validation_context(
             supported_json_paths=supported_json_paths,
             supported_knowledge=supported_knowledge,
         )
-    for clarification in _clarification_records(state):
-        if (
-            clarification.kind == "missing_knowledge"
-            and clarification.answer is not None
-            and clarification.answer == clarification.answer.strip()
-            and len(clarification.answer) <= 2_048
-        ):
-            supported_knowledge.add(("business_rule", clarification.answer))
     _project_official_evidence(
         tool_name=observation.tool_name,
         observation_type=observation.observation_type,
@@ -4313,6 +4411,208 @@ def _active_gate_audit(
     return audit
 
 
+def _is_exact_pending_check_dispatch(
+    state: Any,
+    *,
+    tool_context: Any,
+    tool_name: str,
+) -> bool:
+    """Exclude the exact one-shot Check action from the Main-only gate."""
+
+    function_call_id = _valid_context_identifier(tool_context)
+    pending = _pending_check_tool(state)
+    return (
+        pending is not None
+        and function_call_id is not None
+        and pending.function_call_id == function_call_id
+        and pending.tool_name == tool_name
+    )
+
+
+def _evaluate_main_execute_gate(
+    state: Any,
+    args: Any,
+) -> _MainExecuteGateDecision:
+    """Validate one Main execute_sql before Baseline cost and DB execution."""
+
+    if not isinstance(args, dict) or set(args) != {"sql"}:
+        return _MainExecuteGateDecision(False, "sql_validation_failed")
+    sql = args.get("sql")
+    if not isinstance(sql, str) or not sql or sql != sql.strip():
+        return _MainExecuteGateDecision(False, "sql_validation_failed")
+    try:
+        statements = sqlglot.parse(sql, read="postgres")
+    except ParseError:
+        return _MainExecuteGateDecision(False, "sql_validation_failed")
+    if len(statements) != 1 or statements[0] is None:
+        return _MainExecuteGateDecision(False, "sql_validation_failed")
+    statement = statements[0]
+
+    if _has_star_projection(statement):
+        return _MainExecuteGateDecision(False, "star_projection_forbidden")
+
+    try:
+        base_tables = _main_sql_base_tables(statement)
+    except Exception:
+        return _MainExecuteGateDecision(False, "sql_validation_failed")
+    table_identifiers = tuple(
+        _canonical_table_identifier(table) for table in base_tables
+    )
+    if any(
+        _is_system_catalog_identifier(identifier)
+        for identifier in table_identifiers
+    ):
+        return _MainExecuteGateDecision(False, "system_catalog_forbidden")
+
+    runtime, degraded = _ensure_runtime(state)
+    phase = _phase(state.get("current_phase", 1))
+    outcome = _phase_grounding_outcomes(state).get(str(phase))
+    if (
+        degraded
+        or outcome is None
+        or outcome.status != "succeeded"
+        or outcome.grounding_revision != runtime.grounding_revision
+        or outcome.state_sha256
+        != sql_grounding_state_sha256(runtime.grounding_state)
+        or runtime.grounding_state.tables is None
+    ):
+        return _MainExecuteGateDecision(False, "frozen_state_unavailable")
+    frozen_tables = {
+        _canonical_frozen_table_identifier(table)
+        for table in runtime.grounding_state.tables
+    }
+    if any(identifier not in frozen_tables for identifier in table_identifiers):
+        return _MainExecuteGateDecision(False, "table_outside_frozen_state")
+
+    canonical_sql = _canonical_main_sql(statement)
+    for event in _completed_sql_grounding_trajectory(state):
+        if event["phase"] != phase or event["tool_name"] != "execute_sql":
+            continue
+        previous_args = event.get("args")
+        if not isinstance(previous_args, dict):
+            raise ValueError("Official execute_sql arguments are unavailable")
+        previous_sql = previous_args.get("sql")
+        if not isinstance(previous_sql, str):
+            raise ValueError("Official execute_sql SQL is unavailable")
+        try:
+            previous_statements = sqlglot.parse(previous_sql, read="postgres")
+        except ParseError as exc:
+            raise ValueError("Official execute_sql SQL cannot be canonicalized") from exc
+        if len(previous_statements) != 1 or previous_statements[0] is None:
+            raise ValueError("Official execute_sql SQL is not one statement")
+        if _canonical_main_sql(previous_statements[0]) == canonical_sql:
+            return _MainExecuteGateDecision(
+                False,
+                "duplicate_sql",
+                canonical_sql,
+            )
+    return _MainExecuteGateDecision(True, "allowed", canonical_sql)
+
+
+def _has_star_projection(statement: exp.Expression) -> bool:
+    """Reject projected stars while preserving non-projection COUNT(*)."""
+
+    for select in statement.find_all(exp.Select):
+        for projection in select.expressions:
+            for node in projection.walk():
+                if isinstance(node, exp.Star) and not isinstance(
+                    node.parent,
+                    exp.Count,
+                ):
+                    return True
+    returning_type = getattr(exp, "Returning", None)
+    if returning_type is not None:
+        for returning in statement.find_all(returning_type):
+            for projection in returning.expressions:
+                if any(isinstance(node, exp.Star) for node in projection.walk()):
+                    return True
+    return False
+
+
+def _main_sql_base_tables(statement: exp.Expression) -> tuple[exp.Table, ...]:
+    """Resolve real tables and exclude CTE/subquery names deterministically."""
+
+    all_tables = tuple(statement.find_all(exp.Table))
+    if not all_tables:
+        return ()
+    if not isinstance(statement, exp.Query):
+        return all_tables
+
+    accounted: set[int] = set()
+    base_tables: list[exp.Table] = []
+    scopes = traverse_scope(statement)
+    if not scopes:
+        raise ValueError("SQL table scope cannot be resolved")
+    for scope in scopes:
+        for node, source in scope.selected_sources.values():
+            if isinstance(source, exp.Table):
+                accounted.add(id(source))
+                base_tables.append(source)
+            elif isinstance(source, Scope):
+                if isinstance(node, exp.Table):
+                    accounted.add(id(node))
+            else:
+                raise ValueError("SQL source cannot be classified")
+    if any(id(table) not in accounted for table in all_tables):
+        raise ValueError("SQL contains an unclassified table reference")
+    return tuple(base_tables)
+
+
+def _canonical_table_identifier(table: exp.Table) -> str:
+    parts: list[str] = []
+    for key in ("catalog", "db", "this"):
+        value = table.args.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, exp.Identifier):
+            raise ValueError("table identifier is not canonical")
+        name = value.name
+        if not name:
+            raise ValueError("table identifier is empty")
+        parts.append(f'"{name}"' if value.args.get("quoted") else name.lower())
+    if not 1 <= len(parts) <= 3:
+        raise ValueError("table identifier has an invalid number of parts")
+    return ".".join(parts)
+
+
+def _canonical_frozen_table_identifier(table: str) -> str:
+    if not isinstance(table, str) or not table:
+        raise ValueError("frozen table identifier is invalid")
+    parts = table.split(".")
+    if not 1 <= len(parts) <= 2 or any(not part for part in parts):
+        raise ValueError("frozen table identifier is invalid")
+    return ".".join(part.lower() for part in parts)
+
+
+def _is_system_catalog_identifier(identifier: str) -> bool:
+    unquoted = identifier.replace('"', "").lower()
+    first = unquoted.split(".", 1)[0]
+    return first in {"information_schema", "pg_catalog"}
+
+
+def _canonical_main_sql(statement: exp.Expression) -> str:
+    normalized = statement.copy()
+    for node in normalized.walk():
+        if node.comments:
+            node.comments = None
+    return normalized.sql(dialect="postgres", pretty=False, normalize=True)
+
+
+def _blocked_main_execute_response(reason: str) -> dict[str, str]:
+    if not isinstance(reason, str) or not _IDENTIFIER_RE.fullmatch(reason):
+        raise ValueError("invalid blocked Main execute reason")
+    guidance = (
+        _DUPLICATE_MAIN_EXECUTE_GUIDANCE
+        if reason == "duplicate_sql"
+        else _BLOCKED_MAIN_EXECUTE_GUIDANCE
+    )
+    return {
+        "status": _BLOCKED_MAIN_EXECUTE_STATUS,
+        "reason": reason,
+        "guidance": guidance,
+    }
+
+
 def _blocked_submit_denial(gate_reason: str) -> dict[str, str]:
     if not isinstance(gate_reason, str) or not _IDENTIFIER_RE.fullmatch(gate_reason):
         raise ValueError("invalid Gate reason for blocked response")
@@ -4906,12 +5206,15 @@ def _filter_writer_tools(llm_request: Any) -> None:
         if declarations is None:
             continue
         retained = [
-            item
+            copy.deepcopy(item)
             for item in declarations
             if getattr(item, "name", None) in _SQL_WRITER_TOOL_NAMES
         ]
         if retained:
             cloned = copy.deepcopy(group)
+            for declaration in retained:
+                if getattr(declaration, "name", None) == "execute_sql":
+                    declaration.description = _SQL_WRITER_EXECUTE_TOOL_DESCRIPTION
             cloned.function_declarations = retained
             retained_groups.append(cloned)
     names = [

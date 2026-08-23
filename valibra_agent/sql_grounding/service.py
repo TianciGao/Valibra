@@ -537,6 +537,15 @@ def _validate_observation_specific_diff(
             grounding_input=grounding_input,
         )
     if (
+        call_kind == "check"
+        and grounding_input is not None
+        and "latest_user_answer" in grounding_input
+        and changed
+    ):
+        raise SQLGroundingValidationError(
+            "Check latest_user_answer cannot directly change Grounding State"
+        )
+    if (
         observation.observation_type in {"schema", "metadata"}
         and "domain_knowledge" in changed
     ):

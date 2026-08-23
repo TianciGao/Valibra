@@ -166,7 +166,7 @@ CHECK_GROUNDING_PROMPT = (
 
 你的任务是检查：当前 State 是否已经有足够证据完成 Query。
 
-返回 complete 前必须逐项通过以下四项检查：
+返回 complete 前必须逐项通过以下五项检查：
 
 1. 业务规则完整性
 - 如果 Query 需要派生指标、计算公式、阈值或业务判断规则，当前 State 必须包含完成 SQL 所需的
@@ -182,19 +182,43 @@ CHECK_GROUNDING_PROMPT = (
   complete；missing_information 必须明确指出冲突，并按现有工具规则选择一个最相关的补证据动作。
 - 不得为了保留 current mapping 而放行错误语义。
 
-3. 关键 literal 的证据
-- SQL 实现依赖的阈值、类别值或判断条件等 literal，必须在 current_state 或本轮合法 Official
-  evidence / 用户回答中有明确依据。
-- 缺少依据时不得猜测、不得 complete；missing_information 必须写明缺少哪个 literal，并只选择
-  一个最相关的补证据动作。
+3. 关键 literal 的权威性与相关性
+- 只有 Query 所要求的概念或判断确实依赖某个阈值、类别值或条件时，该 literal 才是 complete
+  的必要条件；它必须在 current_state 或本轮合法 Official evidence / 用户回答中有明确、直接、
+  非示例性的依据。
+- “for example / e.g. / such as / 例如”等措辞中的 literal 只是示例，不能升级为 frozen mandatory
+  predicate，不能要求 Main 把它写进 SQL，也不能据此猜测新的阈值。
+- 如果 Query 明确要求某个固定阈值分类，而 State 只有示例性 literal，必须 incomplete，并指出缺少
+  authoritative literal；不得采用示例值。
+- 如果 Query 只要求排序、最值或返回观测值，并不要求该阈值分类，则示例性 literal 与任务无关：
+  不得因为它不具权威性而制造 missing threshold，也不得强制加入对应谓词。Query 已明确给出的
+  MAX / MIN / ORDER BY 等操作不要求在 State 中重复成业务规则。
+- 没有示例限定词的明确固定 predicate 可以作为 authoritative rule，但仍须先确认 Query 的目标概念
+  确实需要该 predicate。
 
-4. latest_user_answer 是否直接解决上一轮缺口
+4. entity grain 与 output identity
+- 如果 Query 要求返回、比较或排序某个 entity / group，而 measure 来自更细粒度的 event、snapshot
+  或 record，只有 State 明确包含该 entity 的 identity / output target，以及 measure 到该 entity 的
+  grouping target / 关系时，才能 complete。仅有细粒度 measure 和一条可达 join path 不够。
+- 缺少 entity identity 或 grouping grain 时必须 incomplete，missing_information 应明确写出哪个
+  entity identity / grouping target 尚未确定。
+- Check 不得自动猜 SUM / AVG / MAX 等聚合函数，也不得自动补 mapping。若 entity identity / grouping
+  已明确，且 Query 自身已经给出排序、最值或比较语义，则不得仅因 State 没有重复写一个聚合函数
+  而制造缺口；其他 completeness 条件满足时可以 complete。
+
+5. latest_user_answer 是否直接解决上一轮缺口
 - latest_user_answer 只是候选证据，不等于上一轮 missing_information 已解决。只有回答
   明确、直接提供上一轮缺少的具体 threshold、formula、literal 或 business rule，才能作为
   新证据继续 Check。例如缺少 threshold 时，用户明确回答“1000 hours”才可以解决该缺口。
+- latest_user_answer 是 State 外的 phase-local clarification evidence，不是 Official schema、metadata
+  或 business knowledge evidence。即使回答已经解决缺口，也不得把回答复制、改写或概括进
+  tables、join_keys、column_mapping 或 domain_knowledge。
+- 回答已经直接解决缺口，且 Query + current_state + clarification 已足够时，必须返回 complete、
+  next_tool = null，并把 column_mapping 和 domain_knowledge 与 current_state 原样保持一致；
+  clarification 会由独立 overlay 传给 Main，不需要也不允许写入四维 State。
 - “out of scope”、不知道、不确定、拒绝回答、模糊回答或与缺口无关的回答，都不是有效证据。
   对这些回答不得 complete，不得凭空生成或猜测 threshold、formula、literal 或 business rule，
-  也不得修改 column_mapping 或 domain_knowledge 来猜测缺失语义。
+  也不得修改任何四维 State 字段来猜测缺失语义。
 - 如果用户没有解决上一轮缺口，Check 仍必须为 incomplete。如果没有新的合法补证据方向，
   next_tool 必须为 null，作为 terminal incomplete 直接 fail-closed；不得为了满足 Form 重复
   ask_user，也不得伪造新的 gap 或 tool。
@@ -255,6 +279,8 @@ ask_user：
 - 不允许调用 get_schema、get_all_column_meanings、get_all_knowledge_definitions 或 submit_sql。
 - column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有新证据需要修改时，必须原样保留，不能随意清空。
 - 只能根据当前 State 和最新证据修正 column_mapping / domain_knowledge，不能修改 tables / join_keys。
+- 当输入包含 latest_user_answer 时，column_mapping 和 domain_knowledge 必须与 current_state
+  完全一致；用户回答只用于 complete / incomplete 判断，绝不能用于修改四维 State。
 - 没有足够证据时不要猜。
 - Check 只判断并补齐一个最具体的缺口，不重新执行完整 Grounding，也不使用 execute_sql 探索
   业务语义。

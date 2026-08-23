@@ -37,9 +37,9 @@ from tests.valibra.test_stage3_submit_driven_repair import (
 
 
 FOLLOW_UP = "Now include the current power reading."
-PROMPT_SHA = "9025b7d9ef865e5c0c08b8a0455617547bcb61f370d97cdaeb5e92be785fe6bb"
+PROMPT_SHA = "34bfc4a5682510e4f9963cbc3f5fa55505f3715fffe50b6dd3a98890f25be425"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "b540e67521ca028f47aef09cf46fa8ab79b50cbf1d3b158e844ff3a523264fe8"
+CONFIG_SHA = "b1881e01b13314bf244591b406b86558ad3d30d07ed1a9197630ba40ccdf264a"
 P2_SUBMIT_RESPONSE = (
     f"passed\nFollow-up question: {FOLLOW_UP}\nBudget remaining: 4"
 )

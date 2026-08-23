@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import unittest
@@ -24,11 +25,13 @@ from valibra_agent.sql_grounding.models import (
     MappingGroundingResponse,
     SQLGroundingState,
     StructureGroundingResponse,
+    UserClarificationRecord,
     UserClarificationRequest,
     ValidationContext,
     sql_grounding_state_sha256,
 )
 from valibra_agent.sql_grounding.observations import build_sql_grounding_observation
+from valibra_agent.sql_grounding.prompt_view import render_grounding_view
 from valibra_agent.sql_grounding.service import process_sql_grounding_observation
 from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
 from valibra_agent.sql_grounding.updater import (
@@ -45,15 +48,15 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "9025b7d9ef865e5c0c08b8a0455617547bcb61f370d97cdaeb5e92be785fe6bb"
+PROMPT_SHA = "34bfc4a5682510e4f9963cbc3f5fa55505f3715fffe50b6dd3a98890f25be425"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "b540e67521ca028f47aef09cf46fa8ab79b50cbf1d3b158e844ff3a523264fe8"
+CONFIG_SHA = "b1881e01b13314bf244591b406b86558ad3d30d07ed1a9197630ba40ccdf264a"
 WRITER_PROMPT_SHA = "8e307e8a538d86b5e9420424ea7b56201428648b420787aa0082462fac9e643a"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "dc13871f1b6253a94b17d3032c57377d95d45433779cb75e7dbdc1882d572d0b",
+    "check": "4eb5c8b3a8a9dd4bbbc6bcc1aa4208a6b72791bf1bfedcbca2dbd90c4d471801",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -194,9 +197,10 @@ class SQLGroundingV13FormTests(unittest.TestCase):
                 "不得为了保留 current mapping 而放行错误语义",
             ),
             "literal": (
-                "阈值、类别值或判断条件等 literal",
+                "阈值、类别值或条件时",
                 "必须在 current_state 或本轮合法 Official",
-                "缺少依据时不得猜测、不得 complete",
+                "非示例性的依据",
+                "不得采用示例值",
             ),
             "complete": (
                 "字段、关系、精确业务规则/公式和关键 literal 都已齐全",
@@ -211,12 +215,56 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         self.assertIn("只判断并补齐一个最具体的缺口", check_prompt)
         self.assertIn("不使用 execute_sql 探索", check_prompt)
 
+    def test_check_prompt_distinguishes_entity_grain_and_literal_authority(self) -> None:
+        check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
+        cases = {
+            "finer_grain_without_identity_is_incomplete": (
+                "measure 来自更细粒度的 event、snapshot",
+                "identity / output target",
+                "grouping target / 关系",
+                "仅有细粒度 measure 和一条可达 join path 不够",
+                "缺少 entity identity 或 grouping grain 时必须 incomplete",
+            ),
+            "explicit_entity_grain_does_not_require_guessed_aggregate": (
+                "不得自动猜 SUM / AVG / MAX",
+                "不得自动补 mapping",
+                "entity identity / grouping",
+                "已明确，且 Query",
+                "其他 completeness 条件满足时可以 complete",
+            ),
+            "illustrative_literal_is_not_authoritative": (
+                "for example / e.g. / such as / 例如",
+                "只是示例",
+                "不能升级为 frozen mandatory",
+                "不得采用示例值",
+            ),
+            "direct_predicate_can_be_authoritative": (
+                "没有示例限定词的明确固定 predicate",
+                "authoritative rule",
+                "确实需要该 predicate",
+            ),
+            "irrelevant_example_does_not_create_threshold_gap": (
+                "只要求排序、最值或返回观测值",
+                "不得因为它不具权威性而制造 missing threshold",
+                "不得强制加入对应谓词",
+                "MAX / MIN / ORDER BY 等操作不要求在 State 中重复",
+            ),
+        }
+        for case, fragments in cases.items():
+            with self.subTest(case=case):
+                for fragment in fragments:
+                    self.assertIn(fragment, check_prompt)
+
     def test_check_prompt_requires_clarification_to_resolve_the_exact_gap(self) -> None:
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         required_fragments = (
             "latest_user_answer 只是候选证据",
             "不等于上一轮 missing_information 已解决",
             "明确、直接提供上一轮缺少的具体",
+            "State 外的 phase-local clarification evidence",
+            "不是 Official schema、metadata",
+            "不得把回答复制、改写或概括进",
+            "clarification 会由独立 overlay 传给 Main",
             "out of scope",
             "不知道",
             "不确定",
@@ -224,7 +272,7 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             "模糊回答",
             "与缺口无关的回答",
             "不得凭空生成或猜测 threshold、formula、literal 或 business rule",
-            "也不得修改 column_mapping 或 domain_knowledge",
+            "也不得修改任何四维 State 字段",
             "Check 仍必须为 incomplete",
             "next_tool 必须为 null",
             "terminal incomplete 直接 fail-closed",
@@ -235,6 +283,10 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, check_prompt)
         self.assertIn("用户明确回答“1000 hours”", check_prompt)
+        self.assertIn(
+            "column_mapping 和 domain_knowledge 必须与 current_state",
+            check_prompt,
+        )
 
     def test_check_completeness_examples_keep_the_strict_existing_form(self) -> None:
         incomplete_cases = (
@@ -727,10 +779,10 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             task_id="v13-check-a-b",
             phase=1,
             sequence=5,
-            observation_type="user_answer",
-            content="Use the reported maintenance cost.",
-            summary="answered bounded Check clarification",
-            tool_name="ask_user",
+            observation_type="metadata",
+            content="Official meaning: reported maintenance cost.",
+            summary="Official column meaning observed",
+            tool_name="get_column_meaning",
             function_call_id="v13-check-a-b-call",
         )
         result = await process_sql_grounding_observation(
@@ -741,9 +793,13 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             grounding_input={
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
-                "latest_user_answer": {
-                    "question": "Which maintenance cost meaning do you intend?",
-                    "answer": "Use the reported maintenance cost.",
+                "latest_tool": {
+                    "name": "get_column_meaning",
+                    "arguments": {
+                        "table_name": "operational_metrics",
+                        "column_name": "reported_cost",
+                    },
+                    "result": "Official meaning: reported maintenance cost.",
                 },
             },
         )
@@ -754,6 +810,60 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result.runtime.grounding_state.column_mapping[0].targets,
             ("operational_metrics.reported_cost",),
+        )
+
+    async def test_latest_user_answer_cannot_change_mapping_or_knowledge(self) -> None:
+        exact_rule = "The Official maintenance threshold is 1000 hours."
+        old = complete_state()
+        runtime = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=old,
+        )
+        response = GroundingCheckResponse(
+            status="complete",
+            column_mapping=(
+                ColumnMapping(
+                    phrase="maintenance cost",
+                    targets=("operational_metrics.reported_cost",),
+                ),
+            ),
+            domain_knowledge=(
+                DomainKnowledge(kind="business_rule", content=exact_rule),
+            ),
+        )
+        observation = build_sql_grounding_observation(
+            task_id="v13-answer-cannot-change-state",
+            phase=1,
+            sequence=6,
+            observation_type="user_answer",
+            content="Use 1000 hours and reported cost.",
+            summary="answered bounded Check clarification",
+            tool_name="ask_user",
+            function_call_id="v13-answer-cannot-change-state-call",
+        )
+        result = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context(observation.observation_id, rule=exact_rule),
+            FakeUpdater(response, "check"),
+            grounding_input={
+                "query": QUERY,
+                "current_state": old.model_dump(mode="json"),
+                "latest_user_answer": {
+                    "question": "Which threshold and cost meaning apply?",
+                    "answer": "Use 1000 hours and reported cost.",
+                },
+            },
+        )
+        self.assertEqual(result.state_update.status, "rejected")
+        self.assertEqual(result.state_update.error_type, "authorization_rejected")
+        self.assertEqual(result.runtime, runtime)
+        self.assertEqual(result.runtime.grounding_revision, 3)
+        self.assertEqual(
+            sql_grounding_state_sha256(result.runtime.grounding_state),
+            sql_grounding_state_sha256(old),
         )
 
     async def test_unresolved_clarification_answers_keep_gap_and_state(self) -> None:
@@ -820,7 +930,6 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_clarification_can_supply_the_missing_threshold(self) -> None:
         answer = "1000 hours"
-        exact_rule = "The user specified an operating-hours threshold of 1000 hours."
         old = complete_state()
         runtime = GroundingRuntime(
             grounding_revision=3,
@@ -833,9 +942,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             missing_information=None,
             next_tool=None,
             column_mapping=old.column_mapping or (),
-            domain_knowledge=(
-                DomainKnowledge(kind="business_rule", content=exact_rule),
-            ),
+            domain_knowledge=old.domain_knowledge or (),
         )
         observation = build_sql_grounding_observation(
             task_id="v13-explicit-threshold-answer",
@@ -850,7 +957,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await process_sql_grounding_observation(
             runtime,
             observation,
-            context(observation.observation_id, rule=exact_rule),
+            context(observation.observation_id),
             FakeUpdater(response, "check"),
             grounding_input={
                 "query": QUERY,
@@ -862,12 +969,11 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(result.response.status, "complete")
-        self.assertEqual(result.state_update.status, "accepted")
-        self.assertEqual(result.runtime.grounding_revision, 4)
-        self.assertEqual(
-            result.runtime.grounding_state.domain_knowledge,
-            (DomainKnowledge(kind="business_rule", content=exact_rule),),
-        )
+        self.assertIsNone(result.response.next_tool)
+        self.assertEqual(result.state_update.status, "noop")
+        self.assertEqual(result.runtime, runtime)
+        self.assertEqual(result.runtime.grounding_revision, 3)
+        self.assertEqual(result.runtime.grounding_state.domain_knowledge, ())
 
 
 class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
@@ -1096,10 +1202,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             ),
             next_tool=None,
             column_mapping=(
-                ColumnMapping(
-                    phrase="maintenance cost",
-                    targets=("operational_metrics.reported_cost",),
-                ),
+                before_runtime.grounding_state.column_mapping or ()
             ),
             domain_knowledge=(
                 before_runtime.grounding_state.domain_knowledge or ()
@@ -1165,7 +1268,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             "CheckTerminalIncomplete",
         )
         self.assertEqual(updater.calls, 1)
-        self.assertEqual(result.service_result.state_update.status, "accepted")
+        self.assertEqual(result.service_result.state_update.status, "noop")
         self.assertEqual(stored_runtime, before_runtime)
         self.assertEqual(stored_runtime.grounding_revision, 3)
         self.assertEqual(
@@ -1414,16 +1517,25 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_sql_writer_replaces_prompt_and_exposes_exactly_two_tools(self) -> None:
         names = ["execute_sql", "get_schema", "ask_user", "submit_sql"]
+        original_descriptions = {
+            "execute_sql": "BASELINE execute description",
+            "get_schema": "BASELINE schema description",
+            "ask_user": "BASELINE ask description",
+            "submit_sql": "BASELINE submit description",
+        }
+        original_group = types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name=name,
+                    description=original_descriptions[name],
+                )
+                for name in names
+            ]
+        )
         request = LlmRequest(
             config=types.GenerateContentConfig(
                 system_instruction="OLD EXPLORATION CONTROL HINT",
-                tools=[
-                    types.Tool(
-                        function_declarations=[
-                            types.FunctionDeclaration(name=name) for name in names
-                        ]
-                    )
-                ],
+                tools=[copy.deepcopy(original_group)],
             )
         )
         request.tools_dict = {name: SimpleNamespace() for name in names}
@@ -1440,8 +1552,69 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             [item.name for item in request.config.tools[0].function_declarations],
             ["execute_sql", "submit_sql"],
         )
+        writer_declarations = {
+            item.name: item.description
+            for item in request.config.tools[0].function_declarations
+        }
+        self.assertEqual(
+            writer_declarations["execute_sql"],
+            grounding_callbacks._SQL_WRITER_EXECUTE_TOOL_DESCRIPTION,
+        )
+        self.assertEqual(
+            writer_declarations["submit_sql"],
+            original_descriptions["submit_sql"],
+        )
+        self.assertIn("candidate PostgreSQL task-answer query", writer_declarations["execute_sql"])
+        self.assertIn("not for schema discovery", writer_declarations["execute_sql"])
+        self.assertIn("data sampling", writer_declarations["execute_sql"])
+        self.assertEqual(
+            {
+                item.name: item.description
+                for item in original_group.function_declarations
+            },
+            original_descriptions,
+        )
         self.assertNotIn("OLD EXPLORATION", request.config.system_instruction)
         self.assertNotIn("VALIBRA CONTROL", request.config.system_instruction)
+
+    def test_sql_writer_receives_answered_clarification_outside_state(self) -> None:
+        state = complete_state()
+        clarification = UserClarificationRecord(
+            phase=1,
+            phrase="maintenance cost",
+            kind="missing_knowledge",
+            question="What threshold applies?",
+            answer="Use 1000 hours.",
+        )
+        view = render_grounding_view(state, clarifications=(clarification,))
+        request = LlmRequest(
+            config=types.GenerateContentConfig(
+                tools=[
+                    types.Tool(
+                        function_declarations=[
+                            types.FunctionDeclaration(name="execute_sql"),
+                            types.FunctionDeclaration(name="submit_sql"),
+                        ]
+                    )
+                ]
+            )
+        )
+        request.tools_dict = {
+            "execute_sql": SimpleNamespace(),
+            "submit_sql": SimpleNamespace(),
+        }
+        grounding_callbacks._inject_sql_writer_context(
+            request,
+            phase=1,
+            original_query=QUERY,
+            follow_up=None,
+            view_text=view.text,
+            budget_remaining=7,
+        )
+        instruction = request.config.system_instruction
+        self.assertIn("[USER CLARIFICATIONS]", instruction)
+        self.assertIn("Use 1000 hours.", instruction)
+        self.assertNotIn("clarification", state.model_dump())
 
     def test_sql_writer_prompt_freezes_semantics_and_requires_convergence(self) -> None:
         prompt = grounding_callbacks._SQL_WRITER_PROMPT
