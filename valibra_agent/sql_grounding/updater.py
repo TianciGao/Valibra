@@ -196,7 +196,8 @@ CHECK_GROUNDING_PROMPT = (
   对这些回答不得 complete，不得凭空生成或猜测 threshold、formula、literal 或 business rule，
   也不得修改 column_mapping 或 domain_knowledge 来猜测缺失语义。
 - 如果用户没有解决上一轮缺口，Check 仍必须为 incomplete。如果没有新的合法补证据方向，
-  交由现有 duplicate guard / fail-closed 机制结束；不新增 retry、fallback 或特殊状态。
+  next_tool 必须为 null，作为 terminal incomplete 直接 fail-closed；不得为了满足 Form 重复
+  ask_user，也不得伪造新的 gap 或 tool。
 
 只有 Query 所需的字段、关系、精确业务规则/公式和关键 literal 都已齐全且彼此语义一致时，
 才能 complete。Query 本身不需要规则、公式或 literal 时，不得把其缺席凭空当成缺口。
@@ -209,7 +210,9 @@ CHECK_GROUNDING_PROMPT = (
 如果还不够：
 - status = "incomplete"
 - missing_information 必须明确写出当前还缺哪一条具体信息。
-- 只选择一个最相关的 Official tool。
+- 有新的合法补证据方向时，只选择一个最相关的 Official tool，并把 next_tool 填为对应对象。
+- 已无新的合法 Official tool 可调用时，next_tool = null。这表示 terminal incomplete：不调用工具、
+  不扣 Bird-Coin、不 retry 或 fallback、不修改 State，并且当前 phase fail-closed、不得进入 Main。
 - 不要为了“再确认一下”调用工具。
 
 允许的 next_tool 形状只有：
@@ -242,6 +245,8 @@ ask_user：
 
 重要：
 - next_tool 必须是上述对象之一或 null，不能是字符串。
+- status = "incomplete" 且 next_tool = null 只用于缺口仍存在、但已无新的合法 Official tool
+  可调用的 terminal incomplete；不得用它掩盖可补齐的缺口。
 - user_clarification_request 只能位于 next_tool 内部，不能放在顶层。
 - ask_user 的 kind 只能精确为 user_intent 或 missing_knowledge。
 - ask_user 的 question 只写一次，只能位于 arguments.question；user_clarification_request

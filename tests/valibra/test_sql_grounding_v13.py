@@ -45,14 +45,14 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "dd33fc3b777432ad1910cabef1081312afeb4e8ade0927d1ec7a6ec0038d3da4"
+PROMPT_SHA = "9025b7d9ef865e5c0c08b8a0455617547bcb61f370d97cdaeb5e92be785fe6bb"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "4ea0d6c2e76abdfedbff6a1b39740ee02fcc75df37f74841c7f395e02e5b088d"
+CONFIG_SHA = "b540e67521ca028f47aef09cf46fa8ab79b50cbf1d3b158e844ff3a523264fe8"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "e7d74682bc60f1e1b66f53f773ed228fcc97bb2fef6f9a15f4c77abac3d135f8",
+    "check": "dc13871f1b6253a94b17d3032c57377d95d45433779cb75e7dbdc1882d572d0b",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -225,8 +225,10 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             "不得凭空生成或猜测 threshold、formula、literal 或 business rule",
             "也不得修改 column_mapping 或 domain_knowledge",
             "Check 仍必须为 incomplete",
-            "duplicate guard / fail-closed",
-            "不新增 retry、fallback 或特殊状态",
+            "next_tool 必须为 null",
+            "terminal incomplete 直接 fail-closed",
+            "不得为了满足 Form 重复",
+            "不得伪造新的 gap 或 tool",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
@@ -362,13 +364,21 @@ class SQLGroundingV13FormTests(unittest.TestCase):
                 }
             )
 
-    def test_check_requires_complete_or_one_concrete_gap_and_tool(self) -> None:
+    def test_check_requires_complete_or_one_concrete_gap(self) -> None:
         complete = GroundingCheckResponse(
             status="complete",
             column_mapping=complete_state().column_mapping or (),
             domain_knowledge=(),
         )
         self.assertIsNone(complete.next_tool)
+        terminal = GroundingCheckResponse(
+            status="incomplete",
+            missing_information="The exact maintenance threshold is unresolved.",
+            next_tool=None,
+            column_mapping=(),
+            domain_knowledge=(),
+        )
+        self.assertIsNone(terminal.next_tool)
         with self.assertRaises(ValidationError):
             GroundingCheckResponse(
                 status="incomplete",
@@ -1065,6 +1075,151 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             [pending.tool_name],
         )
         self.assertTrue(grounding_callbacks._phase_grounding_succeeded(state, 1))
+
+    async def test_terminal_incomplete_fails_closed_without_tool_or_state_change(
+        self,
+    ) -> None:
+        state = self.adk_check_state()
+        before_runtime = GroundingRuntime.model_validate(
+            state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        before_sha = sql_grounding_state_sha256(
+            before_runtime.grounding_state
+        )
+        before_budget = state["budget_remaining"]
+        before_trajectory = list(state["tool_trajectory"])
+        terminal = GroundingCheckResponse(
+            status="incomplete",
+            missing_information=(
+                "The exact operating-hours threshold is still missing."
+            ),
+            next_tool=None,
+            column_mapping=(
+                ColumnMapping(
+                    phrase="maintenance cost",
+                    targets=("operational_metrics.reported_cost",),
+                ),
+            ),
+            domain_knowledge=(
+                before_runtime.grounding_state.domain_knowledge or ()
+            ),
+        )
+        updater = FakeUpdater(terminal, "check")
+        answer = "out of scope"
+        observation = build_sql_grounding_observation(
+            task_id=state["task_id"],
+            phase=1,
+            sequence=5,
+            observation_type="user_answer",
+            content=answer,
+            summary="answered bounded Check clarification",
+            tool_name="ask_user",
+            function_call_id="v13-terminal-incomplete-answer",
+        )
+        token = grounding_callbacks._bind_turn_message(
+            state["task_id"],
+            "a-interact",
+            QUERY,
+        )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(
+                    grounding_callbacks,
+                    "_SQL_GROUNDING_UPDATER",
+                    updater,
+                ),
+                patch.object(
+                    grounding_callbacks,
+                    "load_sql_grounding_llm_config",
+                    return_value=SimpleNamespace(max_calls_per_task=8),
+                ),
+            ):
+                result = await grounding_callbacks._handle_observation(
+                    state,
+                    observation,
+                    grounding_input={
+                        "query": QUERY,
+                        "current_state": before_runtime.grounding_state.model_dump(
+                            mode="json"
+                        ),
+                        "latest_user_answer": {
+                            "question": (
+                                "What exact operating-hours threshold applies?"
+                            ),
+                            "answer": answer,
+                        },
+                    },
+                )
+        finally:
+            grounding_callbacks._reset_turn_message(token)
+
+        stored_runtime = GroundingRuntime.model_validate(
+            state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
+        )
+        self.assertEqual(result.service_status, "terminal_incomplete")
+        self.assertEqual(result.control_status, "failed_closed")
+        self.assertEqual(
+            result.control_error_type,
+            "CheckTerminalIncomplete",
+        )
+        self.assertEqual(updater.calls, 1)
+        self.assertEqual(result.service_result.state_update.status, "accepted")
+        self.assertEqual(stored_runtime, before_runtime)
+        self.assertEqual(stored_runtime.grounding_revision, 3)
+        self.assertEqual(
+            sql_grounding_state_sha256(stored_runtime.grounding_state),
+            before_sha,
+        )
+        self.assertEqual(state["budget_remaining"], before_budget)
+        self.assertEqual(state["tool_trajectory"], before_trajectory)
+        self.assertIsNone(grounding_callbacks._pending_check_tool(state))
+        audit = grounding_callbacks._check_audits(state)[-1]
+        self.assertEqual(audit["blocked_reason"], "terminal_incomplete")
+        self.assertIsNone(audit["tool_name"])
+        self.assertEqual(audit["tool_cost"], 0.0)
+        self.assertEqual(audit["budget_before"], audit["budget_after"])
+        failure = grounding_callbacks._phase_grounding_failure(state, 1)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.error_type, "CheckTerminalIncomplete")
+
+        baseline_before = AsyncMock(return_value=None)
+        token = grounding_callbacks._bind_turn_message(
+            state["task_id"],
+            "a-interact",
+            QUERY,
+        )
+        try:
+            with (
+                patch.dict(os.environ, {"GROUNDING_UPDATER_MODE": "llm"}),
+                patch.object(
+                    baseline_callbacks,
+                    "before_model_callback",
+                    baseline_before,
+                ),
+            ):
+                response = await grounding_callbacks.before_model_callback(
+                    SimpleNamespace(state=state),
+                    LlmRequest(
+                        contents=[
+                            types.Content(
+                                role="user",
+                                parts=[types.Part.from_text(text=QUERY)],
+                            )
+                        ],
+                        config=types.GenerateContentConfig(),
+                    ),
+                )
+        finally:
+            grounding_callbacks._reset_turn_message(token)
+
+        self.assertIsNotNone(response)
+        self.assertIn(
+            "VALIBRA_SQL_GROUNDING_FAILED_CLOSED",
+            response.content.parts[0].text,
+        )
+        self.assertIsNone(response.content.parts[0].function_call)
+        self.assertEqual(baseline_before.await_count, 1)
 
     async def test_check_after_tool_error_consumes_once_and_fails_closed(
         self,

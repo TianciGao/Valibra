@@ -2347,6 +2347,35 @@ async def _handle_observation_serialized(
                             provider_attempted=service_result.llm_telemetry.attempted,
                         )
                 else:
+                    if service_result.response.next_tool is None:
+                        budget = _finite_budget(state)
+                        _append_check_audit(
+                            state,
+                            {
+                                "phase": observation.phase,
+                                "status": "incomplete",
+                                "missing_information": (
+                                    service_result.response.missing_information
+                                ),
+                                "tool_name": None,
+                                "request_digest": None,
+                                "budget_before": budget,
+                                "tool_cost": 0.0,
+                                "budget_after": budget,
+                                "blocked_reason": "terminal_incomplete",
+                            },
+                        )
+                        return _failed_phase_grounding_result(
+                            state,
+                            runtime=active_runtime,
+                            observation=observation,
+                            service_status="terminal_incomplete",
+                            error_type="CheckTerminalIncomplete",
+                            provider_attempted=(
+                                service_result.llm_telemetry.attempted
+                            ),
+                            service_result=service_result,
+                        )
                     _schedule_check_tool(
                         state,
                         phase=observation.phase,

@@ -695,10 +695,8 @@ class GroundingCheckResponse(ContractModel):
         if self.status == "complete":
             if self.missing_information is not None or self.next_tool is not None:
                 raise ValueError("complete Check cannot request more information")
-        elif self.missing_information is None or self.next_tool is None:
-            raise ValueError(
-                "incomplete Check requires one concrete gap and exactly one tool"
-            )
+        elif self.missing_information is None:
+            raise ValueError("incomplete Check requires one concrete gap")
         return self
 
 
