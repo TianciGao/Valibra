@@ -166,6 +166,41 @@ CHECK_GROUNDING_PROMPT = (
 
 你的任务是检查：当前 State 是否已经有足够证据完成 Query。
 
+返回 complete 前必须逐项通过以下四项检查：
+
+1. 业务规则完整性
+- 如果 Query 需要派生指标、计算公式、阈值或业务判断规则，当前 State 必须包含完成 SQL 所需的
+  精确规则及其组合方式。只有相关字段不够；知道涉及 A、B 两个字段，不等于已经知道 A、B
+  应如何组合计算。
+- 缺少精确规则时必须 incomplete，missing_information 要写明缺少的公式、阈值或判断规则，
+  并只选择一个最相关的补证据动作。不得自行补公式或猜规则。
+
+2. Query 与 State 的语义一致性
+- 逐项检查 Query / follow_up 的关键概念是否由 column_mapping 和 domain_knowledge 中同一语义的
+  字段与规则支持。
+- 如果 Query 要求的概念与 State 中已有概念明显不同、相反，或只是相邻/派生概念，不得
+  complete；missing_information 必须明确指出冲突，并按现有工具规则选择一个最相关的补证据动作。
+- 不得为了保留 current mapping 而放行错误语义。
+
+3. 关键 literal 的证据
+- SQL 实现依赖的阈值、类别值或判断条件等 literal，必须在 current_state 或本轮合法 Official
+  evidence / 用户回答中有明确依据。
+- 缺少依据时不得猜测、不得 complete；missing_information 必须写明缺少哪个 literal，并只选择
+  一个最相关的补证据动作。
+
+4. latest_user_answer 是否直接解决上一轮缺口
+- latest_user_answer 只是候选证据，不等于上一轮 missing_information 已解决。只有回答
+  明确、直接提供上一轮缺少的具体 threshold、formula、literal 或 business rule，才能作为
+  新证据继续 Check。例如缺少 threshold 时，用户明确回答“1000 hours”才可以解决该缺口。
+- “out of scope”、不知道、不确定、拒绝回答、模糊回答或与缺口无关的回答，都不是有效证据。
+  对这些回答不得 complete，不得凭空生成或猜测 threshold、formula、literal 或 business rule，
+  也不得修改 column_mapping 或 domain_knowledge 来猜测缺失语义。
+- 如果用户没有解决上一轮缺口，Check 仍必须为 incomplete。如果没有新的合法补证据方向，
+  交由现有 duplicate guard / fail-closed 机制结束；不新增 retry、fallback 或特殊状态。
+
+只有 Query 所需的字段、关系、精确业务规则/公式和关键 literal 都已齐全且彼此语义一致时，
+才能 complete。Query 本身不需要规则、公式或 literal 时，不得把其缺席凭空当成缺口。
+
 如果已经足够：
 - status = "complete"
 - missing_information = null
@@ -216,6 +251,8 @@ ask_user：
 - column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有新证据需要修改时，必须原样保留，不能随意清空。
 - 只能根据当前 State 和最新证据修正 column_mapping / domain_knowledge，不能修改 tables / join_keys。
 - 没有足够证据时不要猜。
+- Check 只判断并补齐一个最具体的缺口，不重新执行完整 Grounding，也不使用 execute_sql 探索
+  业务语义。
 
 只返回下面五个顶层字段：
 {"status": "complete 或 incomplete",

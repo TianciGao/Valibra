@@ -45,14 +45,14 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "9d6ebec81d63a7741b6aa031c481d4382d781192c055e18c80fdb4e56ab6f7ed"
+PROMPT_SHA = "dd33fc3b777432ad1910cabef1081312afeb4e8ade0927d1ec7a6ec0038d3da4"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "d2475dac834970e16f232d694a567831991a8e4f116618122b279962006c469c"
+CONFIG_SHA = "4ea0d6c2e76abdfedbff6a1b39740ee02fcc75df37f74841c7f395e02e5b088d"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "4487a54437fd229ad8f3bf1ebb77f5b48b4db9cd5a1b9505b8e5f3407880c796",
+    "check": "e7d74682bc60f1e1b66f53f773ed228fcc97bb2fef6f9a15f4c77abac3d135f8",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -176,6 +176,115 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         self.assertIn("question 只写一次", check_prompt)
         self.assertIn("只填 phrase 和 kind", check_prompt)
         self.assertIn("必须原样保留，不能随意清空", check_prompt)
+
+    def test_check_prompt_requires_semantic_completeness_before_complete(self) -> None:
+        check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
+        requirements = {
+            "formula": (
+                "派生指标、计算公式、阈值或业务判断规则",
+                "只有相关字段不够",
+                "应如何组合计算",
+                "缺少精确规则时必须 incomplete",
+            ),
+            "semantic_conflict": (
+                "Query 与 State 的语义一致性",
+                "明显不同、相反",
+                "相邻/派生概念",
+                "不得为了保留 current mapping 而放行错误语义",
+            ),
+            "literal": (
+                "阈值、类别值或判断条件等 literal",
+                "必须在 current_state 或本轮合法 Official",
+                "缺少依据时不得猜测、不得 complete",
+            ),
+            "complete": (
+                "字段、关系、精确业务规则/公式和关键 literal 都已齐全",
+                "彼此语义一致时",
+                "才能 complete",
+            ),
+        }
+        for case, fragments in requirements.items():
+            with self.subTest(case=case):
+                for fragment in fragments:
+                    self.assertIn(fragment, check_prompt)
+        self.assertIn("只判断并补齐一个最具体的缺口", check_prompt)
+        self.assertIn("不使用 execute_sql 探索", check_prompt)
+
+    def test_check_prompt_requires_clarification_to_resolve_the_exact_gap(self) -> None:
+        check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
+        required_fragments = (
+            "latest_user_answer 只是候选证据",
+            "不等于上一轮 missing_information 已解决",
+            "明确、直接提供上一轮缺少的具体",
+            "out of scope",
+            "不知道",
+            "不确定",
+            "拒绝回答",
+            "模糊回答",
+            "与缺口无关的回答",
+            "不得凭空生成或猜测 threshold、formula、literal 或 business rule",
+            "也不得修改 column_mapping 或 domain_knowledge",
+            "Check 仍必须为 incomplete",
+            "duplicate guard / fail-closed",
+            "不新增 retry、fallback 或特殊状态",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, check_prompt)
+        self.assertIn("用户明确回答“1000 hours”", check_prompt)
+
+    def test_check_completeness_examples_keep_the_strict_existing_form(self) -> None:
+        incomplete_cases = (
+            (
+                "The exact formula for combining cost and impact is missing.",
+                GroundingCheckToolRequest(
+                    tool_name="get_all_external_knowledge_names",
+                    arguments={},
+                ),
+            ),
+            (
+                "The requested availability concept conflicts with the mapped downtime field.",
+                GroundingCheckToolRequest(
+                    tool_name="get_column_meaning",
+                    arguments={
+                        "table_name": "operational_metrics",
+                        "column_name": "status",
+                    },
+                ),
+            ),
+            (
+                "The exact approved threshold literal is missing.",
+                GroundingCheckToolRequest(
+                    tool_name="get_knowledge_definition",
+                    arguments={"knowledge_name": "Approved threshold rule"},
+                ),
+            ),
+        )
+        for gap, tool in incomplete_cases:
+            with self.subTest(gap=gap):
+                response = GroundingCheckResponse(
+                    status="incomplete",
+                    missing_information=gap,
+                    next_tool=tool,
+                    column_mapping=complete_state().column_mapping or (),
+                    domain_knowledge=(),
+                )
+                self.assertEqual(response.status, "incomplete")
+                self.assertIsNotNone(response.next_tool)
+
+        rule = "Use the approved threshold 0.75 in the documented ratio formula."
+        complete = GroundingCheckResponse(
+            status="complete",
+            missing_information=None,
+            next_tool=None,
+            column_mapping=complete_state().column_mapping or (),
+            domain_knowledge=(
+                DomainKnowledge(kind="business_rule", content=rule),
+            ),
+        )
+        self.assertEqual(complete.status, "complete")
+        self.assertIsNone(complete.missing_information)
+        self.assertIsNone(complete.next_tool)
 
     def test_stage_forms_have_only_authorized_fields(self) -> None:
         self.assertEqual(
@@ -634,6 +743,119 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result.runtime.grounding_state.column_mapping[0].targets,
             ("operational_metrics.reported_cost",),
+        )
+
+    async def test_unresolved_clarification_answers_keep_gap_and_state(self) -> None:
+        gap = "The exact operating-hours threshold is missing."
+        old = complete_state()
+        unchanged_response = GroundingCheckResponse(
+            status="incomplete",
+            missing_information=gap,
+            next_tool=GroundingCheckToolRequest(
+                tool_name="get_all_external_knowledge_names",
+                arguments={},
+            ),
+            column_mapping=old.column_mapping or (),
+            domain_knowledge=old.domain_knowledge or (),
+        )
+        invalid_answers = (
+            "out of scope",
+            "I don't know",
+            "Maybe it is a large value.",
+            "Use the reported maintenance cost instead.",
+        )
+        for sequence, answer in enumerate(invalid_answers, start=10):
+            with self.subTest(answer=answer):
+                runtime = GroundingRuntime(
+                    grounding_revision=3,
+                    stage="INITIAL_GROUNDING",
+                    focus_dimension="none",
+                    grounding_state=old,
+                )
+                observation = build_sql_grounding_observation(
+                    task_id=f"v13-unresolved-answer-{sequence}",
+                    phase=1,
+                    sequence=sequence,
+                    observation_type="user_answer",
+                    content=answer,
+                    summary="answered bounded Check clarification",
+                    tool_name="ask_user",
+                    function_call_id=f"v13-unresolved-answer-call-{sequence}",
+                )
+                result = await process_sql_grounding_observation(
+                    runtime,
+                    observation,
+                    context(observation.observation_id),
+                    FakeUpdater(unchanged_response, "check"),
+                    grounding_input={
+                        "query": QUERY,
+                        "current_state": old.model_dump(mode="json"),
+                        "latest_user_answer": {
+                            "question": "What exact operating-hours threshold applies?",
+                            "answer": answer,
+                        },
+                    },
+                )
+                self.assertEqual(result.response.status, "incomplete")
+                self.assertEqual(result.response.missing_information, gap)
+                self.assertEqual(result.state_update.status, "noop")
+                self.assertEqual(result.runtime, runtime)
+                self.assertNotIn(
+                    "threshold",
+                    json.dumps(
+                        result.runtime.grounding_state.model_dump(mode="json")
+                    ).lower(),
+                )
+
+    async def test_explicit_clarification_can_supply_the_missing_threshold(self) -> None:
+        answer = "1000 hours"
+        exact_rule = "The user specified an operating-hours threshold of 1000 hours."
+        old = complete_state()
+        runtime = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=old,
+        )
+        response = GroundingCheckResponse(
+            status="complete",
+            missing_information=None,
+            next_tool=None,
+            column_mapping=old.column_mapping or (),
+            domain_knowledge=(
+                DomainKnowledge(kind="business_rule", content=exact_rule),
+            ),
+        )
+        observation = build_sql_grounding_observation(
+            task_id="v13-explicit-threshold-answer",
+            phase=1,
+            sequence=14,
+            observation_type="user_answer",
+            content=answer,
+            summary="answered bounded Check clarification",
+            tool_name="ask_user",
+            function_call_id="v13-explicit-threshold-answer-call",
+        )
+        result = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context(observation.observation_id, rule=exact_rule),
+            FakeUpdater(response, "check"),
+            grounding_input={
+                "query": QUERY,
+                "current_state": old.model_dump(mode="json"),
+                "latest_user_answer": {
+                    "question": "What exact operating-hours threshold applies?",
+                    "answer": answer,
+                },
+            },
+        )
+        self.assertEqual(result.response.status, "complete")
+        self.assertEqual(result.state_update.status, "accepted")
+        self.assertEqual(result.runtime.grounding_revision, 4)
+        self.assertEqual(
+            result.runtime.grounding_state.domain_knowledge,
+            (DomainKnowledge(kind="business_rule", content=exact_rule),),
         )
 
 
