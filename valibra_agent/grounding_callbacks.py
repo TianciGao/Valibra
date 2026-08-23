@@ -201,11 +201,20 @@ _MAX_CHECK_AUDITS = 32
 _SQL_WRITER_TOOL_NAMES = ("execute_sql", "submit_sql")
 _SQL_WRITER_PROMPT = """Grounding 已完成，数据库语义结果视为本 phase 的最终结果。
 你的任务是根据 Original Query、可选 Follow-up、Final Grounding State 和已回答澄清写 PostgreSQL SQL。
-你可以处理 JOIN、JSON、CAST、NULL、聚合、排序、DISTINCT、latest record 等 SQL 实现问题；
-必要时只用 execute_sql 做小范围验证和修正，最终用 submit_sql 提交。
-不要重新探索 schema、column meaning 或 knowledge；不要查询 information_schema / pg_catalog；
-不要 SELECT *；不要提出新问题；不要修改或重新解释 Grounding State。
-State.tables 是允许使用的候选表范围，不代表每张表都必须出现在最终 SQL。"""
+
+Final Grounding State 和已回答澄清是语义权威。不要重新研究 schema、column meaning 或 business semantics；
+不要自行替换、删除或重新解释其中的字段、阈值、公式、过滤条件或业务概念，也不要根据 execute_sql 结果发明新的语义条件。
+State.tables 是允许使用的候选表范围，不代表每张表都必须出现在最终 SQL。
+
+必须在 SQL 中完整落实 column_mapping 和 domain_knowledge 已给出的公式、阈值、过滤条件、多字段共同计算及聚合语义。
+当一个 mapping 的多个 targets 共同参与同一计算或判断时，必须共同使用；需要按实体或分组键聚合时，先正确聚合，再排序或比较。
+
+execute_sql 只用于验证和修正 JOIN、JSON path、CAST、NULL、aggregation、GROUP BY、ORDER BY、latest-row 等 SQL 实现问题，
+不能用于新的语义探索。不要重复执行相同 SQL 或语义等价的无效查询；返回 0 rows 不能成为更换冻结阈值或业务规则的理由。
+当 SQL 已与冻结 State 一致、成功 execute 且没有新的实现问题时，应立即 submit_sql，不要为了再次确认而继续 execute_sql。
+剩余预算有限时，应提交当前最佳且与 State 一致的 SQL，而不是继续探索。
+
+不要查询 information_schema / pg_catalog；不要 SELECT *；不要提出新问题；最终用 submit_sql 提交。"""
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
 )

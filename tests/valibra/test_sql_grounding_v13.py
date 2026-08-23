@@ -48,6 +48,7 @@ QUERY = "Show the maintenance cost for active assets."
 PROMPT_SHA = "9025b7d9ef865e5c0c08b8a0455617547bcb61f370d97cdaeb5e92be785fe6bb"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
 CONFIG_SHA = "b540e67521ca028f47aef09cf46fa8ab79b50cbf1d3b158e844ff3a523264fe8"
+WRITER_PROMPT_SHA = "8e307e8a538d86b5e9420424ea7b56201428648b420787aa0082462fac9e643a"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
@@ -1441,6 +1442,40 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("OLD EXPLORATION", request.config.system_instruction)
         self.assertNotIn("VALIBRA CONTROL", request.config.system_instruction)
+
+    def test_sql_writer_prompt_freezes_semantics_and_requires_convergence(self) -> None:
+        prompt = grounding_callbacks._SQL_WRITER_PROMPT
+        self.assertEqual(grounding_callbacks._sha256_text(prompt), WRITER_PROMPT_SHA)
+        requirements = {
+            "semantic_authority": (
+                "Final Grounding State 和已回答澄清是语义权威",
+                "不要自行替换、删除或重新解释其中的字段、阈值、公式、过滤条件或业务概念",
+                "不要根据 execute_sql 结果发明新的语义条件",
+            ),
+            "aggregation_before_comparison": (
+                "公式、阈值、过滤条件、多字段共同计算及聚合语义",
+                "多个 targets 共同参与同一计算或判断时，必须共同使用",
+                "先正确聚合，再排序或比较",
+            ),
+            "zero_rows_do_not_change_threshold": (
+                "返回 0 rows 不能成为更换冻结阈值或业务规则的理由",
+            ),
+            "no_duplicate_execution": (
+                "不要重复执行相同 SQL 或语义等价的无效查询",
+            ),
+            "successful_execution_converges_to_submit": (
+                "成功 execute 且没有新的实现问题时，应立即 submit_sql",
+                "剩余预算有限时，应提交当前最佳且与 State 一致的 SQL",
+            ),
+        }
+        for scenario, fragments in requirements.items():
+            with self.subTest(scenario=scenario):
+                for fragment in fragments:
+                    self.assertIn(fragment, prompt)
+
+        self.assertIn("execute_sql 只用于验证和修正", prompt)
+        self.assertIn("不能用于新的语义探索", prompt)
+        self.assertNotIn("solar_panel", prompt)
 
     def test_sql_writer_hides_raw_bootstrap_but_keeps_query_and_execution_history(self) -> None:
         request = LlmRequest(
