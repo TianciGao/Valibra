@@ -51,7 +51,7 @@ QUERY = "Show the maintenance cost for active assets."
 PROMPT_SHA = "34bfc4a5682510e4f9963cbc3f5fa55505f3715fffe50b6dd3a98890f25be425"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
 CONFIG_SHA = "b1881e01b13314bf244591b406b86558ad3d30d07ed1a9197630ba40ccdf264a"
-WRITER_PROMPT_SHA = "8e307e8a538d86b5e9420424ea7b56201428648b420787aa0082462fac9e643a"
+WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
@@ -1640,6 +1640,28 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                 "成功 execute 且没有新的实现问题时，应立即 submit_sql",
                 "剩余预算有限时，应提交当前最佳且与 State 一致的 SQL",
             ),
+            "undiagnostic_submit_failure_does_not_thaw_semantics": (
+                "该 FAIL 只表示本次提交未通过",
+                "它不是 Frozen State、已回答澄清、冻结阈值、业务规则或字段语义错误的证据",
+                "先前成功 execute 的结果仍是有效的 SQL 实现证据",
+            ),
+            "post_submit_review_uses_only_frozen_inputs_and_history": (
+                "只能根据 Query / Follow-up、Frozen State、已回答澄清和已有 execute / submit history",
+                "禁止重新查询 schema、DISTINCT values、枚举 JSON keys、row/data sampling、验证 frozen literals",
+                "寻找新的业务规则和字段含义",
+            ),
+            "materially_different_candidate_requires_implementation_hypothesis": (
+                "只有能够指出具体的 SQL implementation hypothesis 时",
+                "materially different 且与 State 一致的新 candidate",
+                "JOIN、aggregation grain、projection / result shape、CAST / NULL、GROUP BY / ORDER BY、latest-row handling",
+            ),
+            "post_submit_convergence_without_exploration": (
+                "不得执行只是为了“看看数据”的 SQL",
+                "不得重复执行相同或语义等价的 candidate",
+                "只做必要的 implementation validation，然后尽快 submit_sql",
+                "若找不到具体 implementation mismatch，不要返回数据库探索",
+                "保持冻结语义，不发明新字段、条件、阈值、公式或业务规则",
+            ),
         }
         for scenario, fragments in requirements.items():
             with self.subTest(scenario=scenario):
@@ -1651,6 +1673,8 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("solar_panel", prompt)
 
     def test_sql_writer_hides_raw_bootstrap_but_keeps_query_and_execution_history(self) -> None:
+        sql = "SELECT 1"
+        submit_result = "SQL failed Phase 1. Your SQL is not correct."
         request = LlmRequest(
             contents=[
                 types.Content(role="user", parts=[types.Part.from_text(text=QUERY)]),
@@ -1685,7 +1709,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                             function_call=types.FunctionCall(
                                 id="execute-one",
                                 name="execute_sql",
-                                args={"sql": "SELECT 1"},
+                                args={"sql": sql},
                             )
                         )
                     ],
@@ -1698,6 +1722,30 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                                 id="execute-one",
                                 name="execute_sql",
                                 response={"result": [[1]]},
+                            )
+                        )
+                    ],
+                ),
+                types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                id="submit-one",
+                                name="submit_sql",
+                                args={"sql": sql},
+                            )
+                        )
+                    ],
+                ),
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id="submit-one",
+                                name="submit_sql",
+                                response={"result": submit_result},
                             )
                         )
                     ],
@@ -1734,6 +1782,9 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(QUERY, serialized)
         self.assertIn("execute_sql", serialized)
+        self.assertIn("submit_sql", serialized)
+        self.assertEqual(serialized.count(sql), 2)
+        self.assertIn(submit_result, serialized)
         self.assertNotIn("get_schema", serialized)
         self.assertNotIn("First 3 rows", serialized)
         self.assertNotIn('{"quality": {"score": 0.98}}', serialized)

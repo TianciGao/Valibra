@@ -235,6 +235,17 @@ execute_sql 只用于验证和修正 JOIN、JSON path、CAST、NULL、aggregatio
 当 SQL 已与冻结 State 一致、成功 execute 且没有新的实现问题时，应立即 submit_sql，不要为了再次确认而继续 execute_sql。
 剩余预算有限时，应提交当前最佳且与 State 一致的 SQL，而不是继续探索。
 
+submit_sql 失败后的收口合同：
+如果已提交的 candidate SQL 曾成功 execute，而 Official submit 只返回没有具体诊断的 FAIL，该 FAIL 只表示本次提交未通过；
+它不是 Frozen State、已回答澄清、冻结阈值、业务规则或字段语义错误的证据，先前成功 execute 的结果仍是有效的 SQL 实现证据。
+此时只能根据 Query / Follow-up、Frozen State、已回答澄清和已有 execute / submit history 重新审查已提交 SQL。
+禁止重新查询 schema、DISTINCT values、枚举 JSON keys、row/data sampling、验证 frozen literals，或寻找新的业务规则和字段含义。
+只有能够指出具体的 SQL implementation hypothesis 时，才可形成 materially different 且与 State 一致的新 candidate；
+允许的假设仅限 JOIN、aggregation grain、projection / result shape、CAST / NULL、GROUP BY / ORDER BY、latest-row handling 等实现问题。
+不得执行只是为了“看看数据”的 SQL，也不得重复执行相同或语义等价的 candidate。
+若形成了有具体实现理由的新 candidate，只做必要的 implementation validation，然后尽快 submit_sql。
+若找不到具体 implementation mismatch，不要返回数据库探索；保持冻结语义，不发明新字段、条件、阈值、公式或业务规则。
+
 不要查询 information_schema / pg_catalog；不要 SELECT *；不要提出新问题；最终用 submit_sql 提交。"""
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
