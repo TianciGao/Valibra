@@ -48,15 +48,15 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "34bfc4a5682510e4f9963cbc3f5fa55505f3715fffe50b6dd3a98890f25be425"
+PROMPT_SHA = "db5a44e94a0e7fba92e78e6ca99e6b324affdee92aaed4dcd45010ff03876454"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "60aee9e3806d6ae4635d6e1d887769ab5a8d15e8a7f4dfafd5d946fff5d933d9"
+CONFIG_SHA = "7362f6266f62a5ab4b57a0a19072b5b972812647e0730b3c45b251c3954a9a08"
 WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "4eb5c8b3a8a9dd4bbbc6bcc1aa4208a6b72791bf1bfedcbca2dbd90c4d471801",
+    "check": "128312a48ab98224ee56fa84a9bc77ba83e87e865ff5c76bb45705e2a81c1ff9",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -76,6 +76,10 @@ asset_id | maintcost | reported_cost | status | payload
 1 | 4 | 5 | active | {"quality": {"score": 0.98}}
 ...
 """
+EMPTY_CHECK_PHASE_CONTEXT = {
+    "previous_official_calls": [],
+    "answered_clarifications": [],
+}
 
 
 def telemetry(kind: str) -> GroundingLLMTelemetry:
@@ -167,6 +171,10 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         self.assertIn("字段名必须是 targets，不能是 target", mapping_prompt)
         self.assertIn('必须写成 ["table.column"]', mapping_prompt)
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
+        self.assertIn("previous_official_calls", check_prompt)
+        self.assertIn("answered_clarifications", check_prompt)
+        self.assertIn("不得通过无意义改写参数", check_prompt)
+        self.assertIn("不包含 raw tool result", check_prompt)
         self.assertIn(
             "next_tool 必须是上述对象之一或 null，不能是字符串",
             check_prompt,
@@ -534,15 +542,32 @@ class SQLGroundingV13FormTests(unittest.TestCase):
     def test_classification_accepts_initial_tool_and_answer_check_only(self) -> None:
         base = {"query": QUERY, "current_state": complete_state().model_dump(mode="json")}
         self.assertEqual(
-            classify_grounding_input({**base, "check_context": {"kind": "initial"}}, phase=1),
+            classify_grounding_input(
+                {
+                    **base,
+                    **EMPTY_CHECK_PHASE_CONTEXT,
+                    "check_context": {"kind": "initial"},
+                },
+                phase=1,
+            ),
             "check",
         )
         self.assertEqual(
-            classify_grounding_input({**base, "latest_tool": {}}, phase=1),
+            classify_grounding_input(
+                {**base, **EMPTY_CHECK_PHASE_CONTEXT, "latest_tool": {}},
+                phase=1,
+            ),
             "check",
         )
         self.assertEqual(
-            classify_grounding_input({**base, "latest_user_answer": {}}, phase=1),
+            classify_grounding_input(
+                {
+                    **base,
+                    **EMPTY_CHECK_PHASE_CONTEXT,
+                    "latest_user_answer": {},
+                },
+                phase=1,
+            ),
             "check",
         )
 
@@ -745,6 +770,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         bundle = {
             "query": QUERY,
             "current_state": old.model_dump(mode="json"),
+            **EMPTY_CHECK_PHASE_CONTEXT,
             "check_context": {"kind": "initial"},
         }
         result = await process_sql_grounding_observation(
@@ -793,6 +819,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             grounding_input={
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
+                **EMPTY_CHECK_PHASE_CONTEXT,
                 "latest_tool": {
                     "name": "get_column_meaning",
                     "arguments": {
@@ -851,6 +878,13 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             grounding_input={
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
+                "previous_official_calls": [],
+                "answered_clarifications": [
+                    {
+                        "question": "Which threshold and cost meaning apply?",
+                        "answer": "Use 1000 hours and reported cost.",
+                    }
+                ],
                 "latest_user_answer": {
                     "question": "Which threshold and cost meaning apply?",
                     "answer": "Use 1000 hours and reported cost.",
@@ -911,6 +945,15 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                     grounding_input={
                         "query": QUERY,
                         "current_state": old.model_dump(mode="json"),
+                        "previous_official_calls": [],
+                        "answered_clarifications": [
+                            {
+                                "question": (
+                                    "What exact operating-hours threshold applies?"
+                                ),
+                                "answer": answer,
+                            }
+                        ],
                         "latest_user_answer": {
                             "question": "What exact operating-hours threshold applies?",
                             "answer": answer,
@@ -962,6 +1005,13 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             grounding_input={
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
+                "previous_official_calls": [],
+                "answered_clarifications": [
+                    {
+                        "question": "What exact operating-hours threshold applies?",
+                        "answer": answer,
+                    }
+                ],
                 "latest_user_answer": {
                     "question": "What exact operating-hours threshold applies?",
                     "answer": answer,
@@ -1247,6 +1297,15 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                         "current_state": before_runtime.grounding_state.model_dump(
                             mode="json"
                         ),
+                        "previous_official_calls": [],
+                        "answered_clarifications": [
+                            {
+                                "question": (
+                                    "What exact operating-hours threshold applies?"
+                                ),
+                                "answer": answer,
+                            }
+                        ],
                         "latest_user_answer": {
                             "question": (
                                 "What exact operating-hours threshold applies?"
@@ -1442,7 +1501,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 1)
         self.assertIsNone(records[0].answer)
 
-    def test_answer_resumes_check_with_only_latest_qa_and_allows_new_question(self) -> None:
+    def test_answer_resumes_check_with_phase_context_and_allows_new_question(self) -> None:
         state = self.state()
         first = self.incomplete_check(tool="ask_user")
         pending = grounding_callbacks._schedule_check_tool(
@@ -1470,9 +1529,24 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             set(payload),
-            {"query", "current_state", "latest_user_answer"},
+            {
+                "query",
+                "current_state",
+                "previous_official_calls",
+                "answered_clarifications",
+                "latest_user_answer",
+            },
         )
         self.assertEqual(payload["latest_user_answer"]["answer"], answer)
+        self.assertEqual(
+            payload["answered_clarifications"],
+            [
+                {
+                    "question": pending.arguments["question"],
+                    "answer": answer,
+                }
+            ],
+        )
         grounding_callbacks._store_pending_check_tool(state, None)
 
         second_question = "Which maintenance rule should be applied?"
@@ -1496,7 +1570,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             [first.next_tool.arguments["question"], second_question],
         )
 
-    def test_latest_check_request_does_not_accumulate_raw_history(self) -> None:
+    def test_latest_check_request_has_no_raw_history(self) -> None:
         state = self.state()
         state[grounding_callbacks.GROUNDING_CLARIFICATIONS_KEY] = []
         payload = grounding_callbacks._build_check_grounding_request(
@@ -1512,8 +1586,295 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             latest_tool_arguments={"table_name": "operational_metrics", "column_name": "reported_cost"},
             latest_tool_result="reported maintenance cost",
         )
-        self.assertEqual(set(payload), {"query", "current_state", "latest_tool"})
+        self.assertEqual(
+            set(payload),
+            {
+                "query",
+                "current_state",
+                "previous_official_calls",
+                "answered_clarifications",
+                "latest_tool",
+            },
+        )
+        self.assertEqual(payload["previous_official_calls"], [])
+        self.assertEqual(payload["answered_clarifications"], [])
         self.assertNotIn("trajectory", json.dumps(payload))
+
+    def test_executed_check_call_is_projected_without_raw_result(self) -> None:
+        state = self.state()
+        response = GroundingCheckResponse(
+            status="incomplete",
+            missing_information="The applicable knowledge name is unresolved.",
+            next_tool=GroundingCheckToolRequest(
+                tool_name="get_all_external_knowledge_names",
+                arguments={},
+            ),
+            column_mapping=complete_state().column_mapping or (),
+            domain_knowledge=(),
+        )
+        pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=1,
+            response=response,
+        )
+        raw_result = "RAW-KNOWLEDGE-NAMES-MUST-NOT-BE-COPIED"
+        state["tool_trajectory"] = [
+            {
+                "type": "tool",
+                "tool": pending.tool_name,
+                "phase": 1,
+                "args": pending.arguments,
+                "result": raw_result,
+            }
+        ]
+        grounding_callbacks._store_pending_check_tool(state, None)
+
+        payload = grounding_callbacks._build_check_grounding_request(
+            state,
+            query=QUERY,
+            runtime=GroundingRuntime(
+                grounding_revision=3,
+                focus_dimension="none",
+                grounding_state=complete_state(),
+            ),
+            phase=1,
+            latest_tool_name=pending.tool_name,
+            latest_tool_arguments=pending.arguments,
+            latest_tool_result=raw_result,
+        )
+
+        self.assertEqual(
+            payload["previous_official_calls"],
+            [
+                {
+                    "tool_name": "get_all_external_knowledge_names",
+                    "arguments": {},
+                    "request_digest": pending.request_digest,
+                }
+            ],
+        )
+        self.assertNotIn(raw_result, json.dumps(payload["previous_official_calls"]))
+        with self.assertRaisesRegex(ValueError, "identical arguments"):
+            grounding_callbacks._schedule_check_tool(
+                state,
+                phase=1,
+                response=response.model_copy(
+                    update={
+                        "missing_information": (
+                            "A different gap still requests the same evidence."
+                        )
+                    }
+                ),
+            )
+
+        next_response = GroundingCheckResponse(
+            status="incomplete",
+            missing_information="The exact business rule is unresolved.",
+            next_tool=GroundingCheckToolRequest(
+                tool_name="get_knowledge_definition",
+                arguments={"knowledge_name": "Maintenance Cost"},
+            ),
+            column_mapping=complete_state().column_mapping or (),
+            domain_knowledge=(),
+        )
+        next_pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=1,
+            response=next_response,
+        )
+        self.assertEqual(next_pending.tool_name, "get_knowledge_definition")
+
+    def test_answered_clarification_survives_a_later_check_tool_turn(self) -> None:
+        state = self.state()
+        question = "Which maintenance cost meaning do you intend?"
+        answer = "Use the reported maintenance cost."
+        clarification_response = self.incomplete_check(tool="ask_user")
+        clarification_pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=1,
+            response=clarification_response,
+        )
+        grounding_callbacks._record_clarification_answer(
+            state,
+            phase=1,
+            question=question,
+            answer=answer,
+        )
+        state["tool_trajectory"] = [
+            {
+                "type": "tool",
+                "tool": "ask_user",
+                "phase": 1,
+                "args": clarification_pending.arguments,
+                "result": answer,
+            }
+        ]
+        grounding_callbacks._store_pending_check_tool(state, None)
+
+        evidence_response = GroundingCheckResponse(
+            status="incomplete",
+            missing_information="The exact cost column meaning is unresolved.",
+            next_tool=GroundingCheckToolRequest(
+                tool_name="get_column_meaning",
+                arguments={
+                    "table_name": "operational_metrics",
+                    "column_name": "reported_cost",
+                },
+            ),
+            column_mapping=complete_state().column_mapping or (),
+            domain_knowledge=(),
+        )
+        evidence_pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=1,
+            response=evidence_response,
+        )
+        state["tool_trajectory"].append(
+            {
+                "type": "tool",
+                "tool": evidence_pending.tool_name,
+                "phase": 1,
+                "args": evidence_pending.arguments,
+                "result": "Official reported-cost meaning",
+            }
+        )
+        grounding_callbacks._store_pending_check_tool(state, None)
+        before_state = complete_state()
+        before_sha = sql_grounding_state_sha256(before_state)
+        runtime = GroundingRuntime(
+            grounding_revision=3,
+            focus_dimension="none",
+            grounding_state=before_state,
+        )
+
+        payload = grounding_callbacks._build_check_grounding_request(
+            state,
+            query=QUERY,
+            runtime=runtime,
+            phase=1,
+            latest_tool_name=evidence_pending.tool_name,
+            latest_tool_arguments=evidence_pending.arguments,
+            latest_tool_result="Official reported-cost meaning",
+        )
+
+        self.assertEqual(
+            payload["answered_clarifications"],
+            [{"question": question, "answer": answer}],
+        )
+        self.assertEqual(runtime.grounding_revision, 3)
+        self.assertEqual(
+            sql_grounding_state_sha256(runtime.grounding_state),
+            before_sha,
+        )
+        self.assertEqual(
+            set(runtime.grounding_state.model_dump(mode="json")),
+            {"tables", "join_keys", "column_mapping", "domain_knowledge"},
+        )
+
+    def test_phase_local_context_does_not_cross_p1_and_p2(self) -> None:
+        state = self.state()
+        grounding_callbacks._store_clarification_records(
+            state,
+            (
+                UserClarificationRecord(
+                    phase=1,
+                    phrase="maintenance cost",
+                    kind="user_intent",
+                    question="Which P1 cost meaning applies?",
+                    answer="Use P1 reported cost.",
+                ),
+                UserClarificationRecord(
+                    phase=2,
+                    phrase="maintenance cost",
+                    kind="user_intent",
+                    question="Which P2 cost meaning applies?",
+                    answer="Use P2 total cost.",
+                ),
+            ),
+        )
+        p1_response = self.incomplete_check()
+        p1_pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=1,
+            response=p1_response,
+        )
+        grounding_callbacks._store_pending_check_tool(state, None)
+        p2_response = p1_response.model_copy(
+            update={"missing_information": "The P2 cost field is unresolved."}
+        )
+        p2_pending = grounding_callbacks._schedule_check_tool(
+            state,
+            phase=2,
+            response=p2_response,
+        )
+        grounding_callbacks._store_pending_check_tool(state, None)
+        state["tool_trajectory"] = [
+            {
+                "type": "tool",
+                "tool": p1_pending.tool_name,
+                "phase": 1,
+                "args": p1_pending.arguments,
+                "result": "P1 meaning",
+            },
+            {
+                "type": "tool",
+                "tool": p2_pending.tool_name,
+                "phase": 2,
+                "args": p2_pending.arguments,
+                "result": "P2 meaning",
+            },
+        ]
+        p1_payload = grounding_callbacks._build_check_grounding_request(
+            state,
+            query=QUERY,
+            runtime=GroundingRuntime(
+                grounding_revision=3,
+                focus_dimension="none",
+                grounding_state=complete_state(),
+            ),
+            phase=1,
+            initial=True,
+        )
+        p2_payload = grounding_callbacks._build_check_grounding_request(
+            state,
+            query=QUERY,
+            follow_up="Compare that result with the previous period.",
+            runtime=GroundingRuntime(
+                grounding_revision=3,
+                stage="P2_INCREMENTAL",
+                focus_dimension="none",
+                grounding_state=complete_state(),
+            ),
+            phase=2,
+            initial=True,
+        )
+
+        self.assertEqual(
+            [item["request_digest"] for item in p1_payload["previous_official_calls"]],
+            [p1_pending.request_digest],
+        )
+        self.assertEqual(
+            [item["request_digest"] for item in p2_payload["previous_official_calls"]],
+            [p2_pending.request_digest],
+        )
+        self.assertEqual(
+            p1_payload["answered_clarifications"],
+            [
+                {
+                    "question": "Which P1 cost meaning applies?",
+                    "answer": "Use P1 reported cost.",
+                }
+            ],
+        )
+        self.assertEqual(
+            p2_payload["answered_clarifications"],
+            [
+                {
+                    "question": "Which P2 cost meaning applies?",
+                    "answer": "Use P2 total cost.",
+                }
+            ],
+        )
 
     def test_sql_writer_replaces_prompt_and_exposes_exactly_two_tools(self) -> None:
         names = ["execute_sql", "get_schema", "ask_user", "submit_sql"]

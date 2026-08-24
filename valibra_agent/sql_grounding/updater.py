@@ -48,6 +48,8 @@ MAX_GROUNDING_REQUEST_CHARS = 262_144
 MAX_GROUNDING_RESPONSE_CHARS = 65_536
 DEFAULT_GROUNDING_TIMEOUT_SECONDS = 600.0
 DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 32
+MAX_CHECK_PHASE_LOCAL_CALLS = 32
+MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS = 16
 GroundingCallKind: TypeAlias = Literal[
     "structure",
     "mapping",
@@ -174,6 +176,16 @@ CHECK_GROUNDING_PROMPT = (
 - query / follow_up
 - current_state
 - 最新一次补充证据或用户回答（如有）
+- previous_official_calls：当前 phase 已真实执行的 Check Official tool name、canonical arguments
+  和 request digest；不包含 raw tool result
+- answered_clarifications：当前 phase 已真实完成的 exact question / exact answer
+
+previous_official_calls 和 answered_clarifications 都是只读、State 外的 phase-local context：
+- previous_official_calls 中已经出现的 exact tool + arguments 不得再次选择；不得通过无意义改写参数
+  绕过 duplicate guard。若没有新的合法 evidence direction，返回 terminal incomplete。
+- answered_clarifications 可用于 complete / incomplete 判断；即使之后又执行了 Official Check tool，
+  其中的回答仍然有效。不得把它们复制、改写或概括进 tables、join_keys、column_mapping 或
+  domain_knowledge。
 
 你的任务是检查：当前 State 是否已经有足够证据完成 Query。
 
@@ -341,6 +353,11 @@ SQL_GROUNDING_FORM_SCHEMA_SHA256 = hashlib.sha256(
     canonical_json(SQL_GROUNDING_FORM_SCHEMA).encode("utf-8")
 ).hexdigest()
 SQL_GROUNDING_CONFIGURATION = {
+    "check_phase_local_context": {
+        "max_answered_clarifications": MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS,
+        "max_previous_official_calls": MAX_CHECK_PHASE_LOCAL_CALLS,
+        "raw_tool_results": False,
+    },
     "stage_form_schema_sha256": SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256,
     "stage_prompt_sha256": SQL_GROUNDING_STAGE_PROMPT_SHA256,
     "form_schema_sha256": SQL_GROUNDING_FORM_SCHEMA_SHA256,
@@ -1170,6 +1187,90 @@ def _validated_bundled_grounding_input(
             )
             raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     if call_kind == "check":
+        previous_calls = payload.get("previous_official_calls")
+        answered_clarifications = payload.get("answered_clarifications")
+        if (
+            not isinstance(previous_calls, list)
+            or len(previous_calls) > MAX_CHECK_PHASE_LOCAL_CALLS
+            or not isinstance(answered_clarifications, list)
+            or len(answered_clarifications)
+            > MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        previous_digests: list[str] = []
+        for item in previous_calls:
+            if not isinstance(item, dict) or set(item) != {
+                "arguments",
+                "request_digest",
+                "tool_name",
+            }:
+                telemetry = _telemetry(
+                    attempted=False,
+                    status="rejected",
+                    error_type="grounding_bundle_invalid",
+                )
+                raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+            tool_name = item["tool_name"]
+            arguments = item["arguments"]
+            request_digest = item["request_digest"]
+            if (
+                not isinstance(tool_name, str)
+                or not isinstance(arguments, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", request_digest or "")
+            ):
+                telemetry = _telemetry(
+                    attempted=False,
+                    status="rejected",
+                    error_type="grounding_bundle_invalid",
+                )
+                raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+            expected_digest = hashlib.sha256(
+                f"{tool_name}:{canonical_json(arguments)}".encode("utf-8")
+            ).hexdigest()
+            if request_digest != expected_digest:
+                telemetry = _telemetry(
+                    attempted=False,
+                    status="rejected",
+                    error_type="grounding_bundle_invalid",
+                )
+                raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+            previous_digests.append(request_digest)
+        if len(previous_digests) != len(set(previous_digests)):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        clarification_questions: list[str] = []
+        for item in answered_clarifications:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"answer", "question"}
+                or not isinstance(item["question"], str)
+                or not item["question"].strip()
+                or not isinstance(item["answer"], str)
+                or not item["answer"].strip()
+            ):
+                telemetry = _telemetry(
+                    attempted=False,
+                    status="rejected",
+                    error_type="grounding_bundle_invalid",
+                )
+                raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+            clarification_questions.append(item["question"])
+        if len(clarification_questions) != len(set(clarification_questions)):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
         check_fields = {
             name
             for name in ("check_context", "latest_tool", "latest_user_answer")
@@ -1200,8 +1301,18 @@ _CALL_KIND_EVIDENCE_FIELDS: Mapping[GroundingCallKind, frozenset[str]] = {
     "knowledge": frozenset(
         {"knowledge_definitions", "relevant_column_meanings"}
     ),
-    "check": frozenset({"check_context"}),
+    "check": frozenset(
+        {
+            "answered_clarifications",
+            "check_context",
+            "previous_official_calls",
+        }
+    ),
 }
+
+_CHECK_PHASE_LOCAL_CONTEXT_FIELDS = frozenset(
+    {"answered_clarifications", "previous_official_calls"}
+)
 
 
 def classify_grounding_input(
@@ -1224,7 +1335,10 @@ def classify_grounding_input(
         for call_kind, evidence_fields in _CALL_KIND_EVIDENCE_FIELDS.items()
         if fields == common | set(evidence_fields)
     ]
-    check_suffixes = ({"check_context"}, {"latest_tool"}, {"latest_user_answer"})
+    check_suffixes = tuple(
+        _CHECK_PHASE_LOCAL_CONTEXT_FIELDS | {latest_field}
+        for latest_field in ("check_context", "latest_tool", "latest_user_answer")
+    )
     if "check" not in matches and any(
         fields == common | suffix for suffix in check_suffixes
     ):

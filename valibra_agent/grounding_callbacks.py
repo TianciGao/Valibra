@@ -67,6 +67,8 @@ from valibra_agent.sql_grounding.service import (
 )
 from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
 from valibra_agent.sql_grounding.updater import (
+    MAX_CHECK_PHASE_LOCAL_CALLS,
+    MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS,
     SQL_GROUNDING_CONFIGURATION_SHA256,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT_SHA256,
@@ -145,7 +147,7 @@ _MAX_BLOCKED_SUBMITS = 64
 _MAX_GATE_AUDITS = 64
 _MAX_TOOL_AUDITS = 64
 _MAX_SUPPRESSED_BOOTSTRAP = 64
-_MAX_CLARIFICATION_RECORDS = 16
+_MAX_CLARIFICATION_RECORDS = MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS
 _MAX_PHASE_OUTCOMES = 2
 _MAX_FAILED_CLOSED_CALLS = 64
 _MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
@@ -208,7 +210,7 @@ _BOOTSTRAP_MODEL_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_STORED"
 _BOOTSTRAP_ALREADY_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_ALREADY_STORED"
 _MAX_PROVIDER_CALLS_PER_TASK = 32
 _MIN_BUDGET_AFTER_CHECK_TOOL = 6.0
-_MAX_CHECK_AUDITS = 32
+_MAX_CHECK_AUDITS = MAX_CHECK_PHASE_LOCAL_CALLS
 _SQL_WRITER_TOOL_NAMES = ("execute_sql", "submit_sql")
 _SQL_WRITER_EXECUTE_TOOL_DESCRIPTION = """Execute a candidate PostgreSQL task-answer query against the database and return the results.
 
@@ -3709,7 +3711,7 @@ def _build_check_grounding_request(
     latest_user_answer: Any = None,
     paired_check_tool: _PendingCheckTool | None = None,
 ) -> dict[str, Any]:
-    """Build one Check request with no accumulated raw Check history."""
+    """Build one Check request with bounded, result-free phase-local history."""
 
     base = _phase_request_common(
         state,
@@ -3718,17 +3720,29 @@ def _build_check_grounding_request(
         phase=phase,
         follow_up=follow_up,
     )
+    phase_context = {
+        "previous_official_calls": _previous_check_official_calls(
+            state,
+            phase=phase,
+        ),
+        "answered_clarifications": [
+            {"question": item.question, "answer": item.answer}
+            for item in _clarification_records(state)
+            if item.phase == phase and item.answer is not None
+        ],
+    }
     modes = sum((initial, latest_tool_name is not None, latest_user_answer is not None))
     if modes != 1:
         raise ValueError("Check requires exactly one bounded latest-input mode")
     if initial:
-        return {**base, "check_context": {"kind": "initial"}}
+        return {**base, **phase_context, "check_context": {"kind": "initial"}}
     if latest_user_answer is not None:
         pending = paired_check_tool or _pending_check_tool(state)
         if pending is None or pending.tool_name != "ask_user":
             raise ValueError("latest user answer has no paired Check request")
         return {
             **base,
+            **phase_context,
             "latest_user_answer": {
                 "question": pending.arguments["question"],
                 "answer": latest_user_answer,
@@ -3744,12 +3758,54 @@ def _build_check_grounding_request(
         raise ValueError("Check result uses an unapproved tool")
     return {
         **base,
+        **phase_context,
         "latest_tool": {
             "name": latest_tool_name,
             "arguments": to_jsonable(latest_tool_arguments),
             "result": to_jsonable(latest_tool_result),
         },
     }
+
+
+def _previous_check_official_calls(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+) -> list[dict[str, Any]]:
+    """Project executed Check calls without copying any Official result."""
+
+    scheduled_digests = {
+        item.get("request_digest")
+        for item in _check_audits(state)
+        if item.get("phase") == phase
+        and item.get("blocked_reason") is None
+        and isinstance(item.get("tool_name"), str)
+        and isinstance(item.get("request_digest"), str)
+    }
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in _completed_sql_grounding_trajectory(state):
+        if event.get("phase") != phase:
+            continue
+        tool_name = event.get("tool_name")
+        arguments = to_jsonable(event.get("args"))
+        if not isinstance(tool_name, str) or not isinstance(arguments, dict):
+            continue
+        arguments_json = canonical_json(arguments)
+        request_digest = _sha256_text(f"{tool_name}:{arguments_json}")
+        if request_digest not in scheduled_digests or request_digest in seen:
+            continue
+        result.append(
+            {
+                "tool_name": tool_name,
+                "arguments": json.loads(arguments_json),
+                "request_digest": request_digest,
+            }
+        )
+        seen.add(request_digest)
+    if len(result) > MAX_CHECK_PHASE_LOCAL_CALLS:
+        raise ValueError("Check phase-local call context exceeds its bound")
+    return result
 
 
 def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...]:
