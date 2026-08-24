@@ -186,6 +186,50 @@ class ClarificationFormContractTests(unittest.TestCase):
                 context=context,
             )
 
+    def test_question_validator_uses_database_implementation_context(self) -> None:
+        allowed_questions = (
+            (
+                "What specific condition or threshold on the warrclaims column "
+                "should be used to identify plants that are a 'headache for "
+                "warranty claims'?"
+            ),
+            (
+                "Which manufacturer would you like to analyze? Please provide "
+                "the manufacturer name or identifier."
+            ),
+            "Which product identifier do you mean?",
+            "Please provide the product identifier.",
+            "Which business report column/category are you referring to?",
+            "Which warranty claim category should be used?",
+        )
+        for question in allowed_questions:
+            with self.subTest(question=question):
+                clarification = UserClarificationRequest(
+                    phrase="requested business concept",
+                    kind="user_intent",
+                    question=question,
+                )
+                self.assertEqual(clarification.question, question)
+
+        forbidden_questions = (
+            "Which database column stores the manufacturer?",
+            "Which table should be joined?",
+            "What schema contains this field?",
+            "What SQL expression should I use?",
+            "Which JSON path contains the value?",
+            "Which database identifier/key should be used?",
+        )
+        for question in forbidden_questions:
+            with self.subTest(question=question), self.assertRaisesRegex(
+                ValidationError,
+                "database/schema/SQL implementation",
+            ):
+                UserClarificationRequest(
+                    phrase="requested business concept",
+                    kind="user_intent",
+                    question=question,
+                )
+
     def test_answered_overlay_is_bounded_and_not_a_fifth_dimension(self) -> None:
         record = UserClarificationRecord(
             phase=1,

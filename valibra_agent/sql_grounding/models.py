@@ -102,10 +102,32 @@ _TABLE_IDENTIFIER_RE = re.compile(
     rf"^{_IDENTIFIER_PART}(?:\.{_IDENTIFIER_PART})?$"
 )
 _CONTROL_TOKEN_RE = re.compile(r";|--|/\*|\*/")
-_FORBIDDEN_CLARIFICATION_SUBJECT_RE = re.compile(
-    r"(?i)(?:\b(?:schema|table|column|join|sql|identifier|relation|runtime\s+error)\b"
-    r"|数据库|表名|字段|列名|连接条件|联接条件|SQL\s*写法|运行时错误)"
+_EXPLICIT_DATABASE_IMPLEMENTATION_RE = re.compile(
+    r"(?i)(?:\b(?:database|schema|sql|information_schema|pg_catalog)\b"
+    r"|\bjsonb?\s+path\b|\bruntime\s+error\b"
+    r"|数据库|数据表|表名|列名|连接条件|联接条件"
+    r"|SQL\s*(?:写法|表达式|查询|语句)|JSONB?\s*路径|运行时错误)"
 )
+_DATABASE_IMPLEMENTATION_OBJECT_RE = re.compile(
+    r"(?i)(?:\b(?:table|column|field|key|identifier|relation|expression)\b"
+    r"|字段|列|键|标识符|关系|表达式)"
+)
+_DATABASE_IMPLEMENTATION_ACTION_RE = re.compile(
+    r"(?i)(?:\b(?:query|queries|queried|querying|join|joins|joined|joining)\b"
+    r"|查询|连接|联接)"
+)
+
+
+def _asks_for_database_implementation(question: str) -> bool:
+    """Reject explicit implementation requests, not isolated business nouns."""
+
+    if _EXPLICIT_DATABASE_IMPLEMENTATION_RE.search(question):
+        return True
+    return bool(
+        _DATABASE_IMPLEMENTATION_OBJECT_RE.search(question)
+        and _DATABASE_IMPLEMENTATION_ACTION_RE.search(question)
+    )
+
 
 # Frozen from already-completed Full-600 taxonomy findings.  The list is
 # deliberately narrow: plain columns, JSON/JSONB paths, PostgreSQL arrays,
@@ -416,7 +438,7 @@ class UserClarificationRequest(ContractModel):
             label="user_clarification_requests.question",
             maximum=MAX_CLARIFICATION_QUESTION_CHARS,
         )
-        if _FORBIDDEN_CLARIFICATION_SUBJECT_RE.search(value):
+        if _asks_for_database_implementation(value):
             raise ValueError(
                 "clarification question asks about database/schema/SQL implementation"
             )
