@@ -126,7 +126,7 @@ class RuntimeProfileContractTests(unittest.TestCase):
         )
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION_SHA256,
-            "b1881e01b13314bf244591b406b86558ad3d30d07ed1a9197630ba40ccdf264a",
+            "60aee9e3806d6ae4635d6e1d887769ab5a8d15e8a7f4dfafd5d946fff5d933d9",
         )
         self.assertEqual(
             SQL_GROUNDING_STAGE_PROMPT_SHA256,

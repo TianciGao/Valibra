@@ -30,6 +30,37 @@ class GroundingTokenUsage(ContractModel):
         return self
 
 
+class GroundingProviderAttemptTelemetry(ContractModel):
+    """One real Provider execution inside one logical Grounding call."""
+
+    attempt_number: int = Field(ge=1, le=2)
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
+    finish_reason: str | None = Field(default=None, max_length=128)
+    usage: GroundingTokenUsage = Field(default_factory=GroundingTokenUsage)
+    latency_ms: float = Field(default=0.0, ge=0.0)
+    content_empty: bool | None = None
+    status: Literal["response", "invalid_response", "failed", "timed_out"]
+    error_type: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> "GroundingProviderAttemptTelemetry":
+        if not math.isfinite(self.latency_ms):
+            raise ValueError("attempt latency must be finite")
+        if self.status == "response":
+            if self.content_empty is None or self.error_type is not None:
+                raise ValueError("a Provider response requires content visibility")
+        elif self.status == "invalid_response":
+            if self.content_empty is not None or not self.error_type:
+                raise ValueError("an invalid Provider response requires an error type")
+        else:
+            if self.content_empty is not None or self.finish_reason is not None:
+                raise ValueError("a failed Provider attempt cannot invent a response")
+            if not self.error_type:
+                raise ValueError("a failed Provider attempt requires an error type")
+        return self
+
+
 class GroundingLLMTelemetry(ContractModel):
     attempted: bool
     status: Literal["succeeded", "failed", "timed_out", "rejected"]
@@ -45,6 +76,13 @@ class GroundingLLMTelemetry(ContractModel):
     raw_private_audit_ref: str = Field(default="", max_length=1024)
     provider_may_continue_after_cancel: bool | None = None
     provider_may_bill_after_cancel: bool | None = None
+
+    configured_max_tokens: int = Field(default=0, ge=0, le=131_072)
+    attempt_count: int = Field(default=0, ge=0, le=2)
+    retry_triggered: bool = False
+    retry_trigger_reason: str | None = Field(default=None, max_length=128)
+    provider_attempts: tuple[GroundingProviderAttemptTelemetry, ...] = ()
+    final_selected_attempt: int | None = Field(default=None, ge=1, le=2)
 
     request_sha256: str = Field(pattern=r"^(?:|[0-9a-f]{64})$")
     response_sha256: str = Field(pattern=r"^(?:|[0-9a-f]{64})$")
@@ -64,6 +102,33 @@ class GroundingLLMTelemetry(ContractModel):
             raise ValueError("timed_out must match telemetry status")
         if self.status == "succeeded" and self.error_type is not None:
             raise ValueError("successful telemetry cannot carry an error")
+        if self.provider_attempts:
+            if self.attempt_count != len(self.provider_attempts):
+                raise ValueError("attempt_count must match Provider attempts")
+            expected_numbers = tuple(range(1, self.attempt_count + 1))
+            if (
+                tuple(item.attempt_number for item in self.provider_attempts)
+                != expected_numbers
+            ):
+                raise ValueError("Provider attempts must be contiguous and ordered")
+            request_shas = {item.request_sha256 for item in self.provider_attempts}
+            if len(request_shas) != 1 or self.request_sha256 not in request_shas:
+                raise ValueError("all Provider attempts must use the same request SHA")
+            if self.configured_max_tokens <= 0:
+                raise ValueError("Provider attempts require configured_max_tokens")
+        elif self.attempt_count:
+            raise ValueError("attempt_count requires Provider attempt telemetry")
+        if self.attempt_count == 2 and not self.retry_triggered:
+            raise ValueError("a second Provider attempt requires a retry trigger")
+        if self.retry_triggered and self.attempt_count < 1:
+            raise ValueError("a retry trigger requires a completed first attempt")
+        if self.retry_triggered != (self.retry_trigger_reason is not None):
+            raise ValueError("retry trigger reason must match retry_triggered")
+        if self.final_selected_attempt is not None and (
+            not self.provider_attempts
+            or self.final_selected_attempt > self.attempt_count
+        ):
+            raise ValueError("final selected attempt must reference a real attempt")
         if not self.attempted and any(
             (
                 self.usage.total_tokens,
@@ -74,6 +139,11 @@ class GroundingLLMTelemetry(ContractModel):
                 bool(self.provider),
                 bool(self.credential_source),
                 bool(self.raw_private_audit_ref),
+                self.attempt_count,
+                self.retry_triggered,
+                bool(self.retry_trigger_reason),
+                bool(self.provider_attempts),
+                self.final_selected_attempt is not None,
             )
         ):
             raise ValueError("a non-attempted call cannot report provider results")

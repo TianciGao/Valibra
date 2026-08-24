@@ -61,7 +61,7 @@ OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13
 PROMPT_SHA = "34bfc4a5682510e4f9963cbc3f5fa55505f3715fffe50b6dd3a98890f25be425"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "b1881e01b13314bf244591b406b86558ad3d30d07ed1a9197630ba40ccdf264a"
+CONFIG_SHA = "60aee9e3806d6ae4635d6e1d887769ab5a8d15e8a7f4dfafd5d946fff5d933d9"
 QUERY = "What is the maintenance cost?"
 
 
@@ -240,7 +240,7 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
         sent = calls[0]
         self.assertEqual(DEFAULT_GROUNDING_TIMEOUT_SECONDS, 600.0)
         self.assertEqual(sent["timeout"], 600.0)
-        self.assertEqual(sent["max_tokens"], 32_768)
+        self.assertEqual(sent["max_tokens"], 12_288)
         self.assertEqual(sent["num_retries"], 0)
         self.assertEqual(sent["max_retries"], 0)
         self.assertNotIn("tools", sent)

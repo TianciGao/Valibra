@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
@@ -39,6 +40,7 @@ from valibra_agent.sql_grounding.observations import (
 )
 from valibra_agent.sql_grounding.telemetry import (
     GroundingLLMTelemetry,
+    GroundingProviderAttemptTelemetry,
     GroundingTokenUsage,
 )
 
@@ -52,6 +54,15 @@ GroundingCallKind: TypeAlias = Literal[
     "knowledge",
     "check",
 ]
+SQL_GROUNDING_STAGE_MAX_TOKENS: dict[GroundingCallKind, int] = {
+    "structure": 12_288,
+    "mapping": 32_768,
+    "knowledge": 24_576,
+    "check": 12_288,
+}
+SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES = frozenset({"structure", "check"})
+SQL_GROUNDING_MAX_IDENTICAL_RETRIES = 1
+SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON = "exact_empty_max_token_failure"
 GROUNDING_LLM_ENV_NAMES = (
     "GROUNDING_UPDATER_MODE",
     "GROUNDING_MODEL_PRESET",
@@ -336,7 +347,14 @@ SQL_GROUNDING_CONFIGURATION = {
     "max_calls_per_task": DEFAULT_GROUNDING_MAX_CALLS_PER_TASK,
     "max_request_chars": MAX_GROUNDING_REQUEST_CHARS,
     "max_response_chars": MAX_GROUNDING_RESPONSE_CHARS,
+    "provider_execution_policy": {
+        "exact_empty_retry_stages": sorted(SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES),
+        "max_identical_retries": SQL_GROUNDING_MAX_IDENTICAL_RETRIES,
+        "retry_reason": SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON,
+        "sdk_retry_count": 0,
+    },
     "prompt_sha256": SQL_GROUNDING_PROMPT_SHA256,
+    "stage_max_tokens": SQL_GROUNDING_STAGE_MAX_TOKENS,
     "timeout_seconds": DEFAULT_GROUNDING_TIMEOUT_SECONDS,
     "transport": "bare_json_or_single_json_fence",
 }
@@ -428,11 +446,17 @@ class GroundingClientResponse(ContractModel):
     raw_private_audit_ref: str = Field(default="", max_length=1024)
     provider_may_continue_after_cancel: bool | None = None
     provider_may_bill_after_cancel: bool | None = None
+    configured_max_tokens: int = Field(default=0, ge=0, le=131_072)
+    attempt_count: int = Field(default=0, ge=0, le=2)
+    retry_triggered: bool = False
+    retry_trigger_reason: str | None = Field(default=None, max_length=128)
+    provider_attempts: tuple[GroundingProviderAttemptTelemetry, ...] = ()
+    final_selected_attempt: int | None = Field(default=None, ge=1, le=2)
 
 
 class AsyncGroundingClient(Protocol):
     async def complete(self, request: GroundingLLMRequest) -> GroundingClientResponse:
-        """Return one fixed response without tools or retry behavior."""
+        """Return one logical Grounding response without tools."""
 
 
 class SQLGroundingProviderError(RuntimeError):
@@ -453,7 +477,7 @@ class SQLGroundingProviderError(RuntimeError):
 
 
 class LiteLLMSQLGroundingClient:
-    """Native async LiteLLM adapter with one request and private raw audit."""
+    """LiteLLM adapter with one logical request and bounded execution retry."""
 
     provider_may_continue_after_cancel = True
     provider_may_bill_after_cancel = True
@@ -472,6 +496,11 @@ class LiteLLMSQLGroundingClient:
         self._completion = completion
         self._last_request_sha256 = ""
         self._last_private_audit_ref = ""
+        self._last_configured_max_tokens = 0
+        self._last_provider_attempts: tuple[GroundingProviderAttemptTelemetry, ...] = ()
+        self._last_retry_triggered = False
+        self._last_retry_trigger_reason: str | None = None
+        self._last_final_selected_attempt: int | None = None
         if self.llm_config.preset_config.get("model") != self.config.model_id:
             raise ValueError("Grounding model preset and Provider model differ")
 
@@ -503,13 +532,25 @@ class LiteLLMSQLGroundingClient:
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.perf_counter()
         observation_id, observation_type = _request_observation_identity(request)
+        configured_max_tokens = SQL_GROUNDING_STAGE_MAX_TOKENS[request.call_kind]
+        self._last_configured_max_tokens = configured_max_tokens
+        self._last_provider_attempts = ()
+        self._last_retry_triggered = False
+        self._last_retry_trigger_reason = None
+        self._last_final_selected_attempt = None
         initial_audit = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "status": "started",
             "started_at": started_at,
             "request": request_audit,
             "request_sha256": request_sha,
             "call_kind": request.call_kind,
+            "configured_max_tokens": configured_max_tokens,
+            "attempt_count": 0,
+            "retry_triggered": False,
+            "retry_trigger_reason": None,
+            "attempts": [],
+            "final_selected_attempt": None,
             "prompt_sha256": SQL_GROUNDING_STAGE_PROMPT_SHA256[request.call_kind],
             "form_schema_sha256": SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256[
                 request.call_kind
@@ -536,48 +577,231 @@ class LiteLLMSQLGroundingClient:
                 raw_private_audit_ref=audit_ref,
                 attempted=False,
             ) from None
-        try:
-            response = await completion(**provider_kwargs)
-        except asyncio.CancelledError:
-            _write_private_provider_audit(
-                audit_path,
-                {
-                    **initial_audit,
-                    "status": "timed_out",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "latency_ms": _elapsed_ms(started),
-                    "provider_may_continue_after_cancel": (
-                        self.provider_may_continue_after_cancel
-                    ),
-                    "provider_may_bill_after_cancel": (
-                        self.provider_may_bill_after_cancel
-                    ),
-                },
-                api_key=api_key,
+        attempts: list[GroundingProviderAttemptTelemetry] = []
+        raw_attempts: list[dict[str, Any]] = []
+        costs: list[float | None] = []
+        selected_response: Any = None
+        selected_raw_response: Any = None
+        selected_response_sha = ""
+        selected_content = ""
+        retry_triggered = False
+        retry_trigger_reason: str | None = None
+        provider_kwargs_sha = _stable_provider_kwargs_sha256(provider_kwargs)
+        max_attempts = 1 + int(
+            request.call_kind in SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES
+        )
+        for attempt_number in range(1, max_attempts + 1):
+            attempt_kwargs = copy.deepcopy(provider_kwargs)
+            if _stable_provider_kwargs_sha256(attempt_kwargs) != provider_kwargs_sha:
+                raise SQLGroundingProviderError(
+                    "SQL Grounding identical retry request changed",
+                    request_sha256=request_sha,
+                    raw_private_audit_ref=audit_ref,
+                    attempted=bool(attempts),
+                )
+            attempt_started = time.perf_counter()
+            try:
+                response = await completion(**attempt_kwargs)
+            except asyncio.CancelledError:
+                attempt = GroundingProviderAttemptTelemetry(
+                    attempt_number=attempt_number,
+                    request_sha256=request_sha,
+                    latency_ms=_elapsed_ms(attempt_started),
+                    status="timed_out",
+                    error_type="timeout",
+                )
+                attempts.append(attempt)
+                raw_attempts.append(attempt.model_dump(mode="json"))
+                self._set_last_provider_attempts(
+                    attempts,
+                    retry_triggered=retry_triggered,
+                    retry_trigger_reason=retry_trigger_reason,
+                )
+                _write_private_provider_audit(
+                    audit_path,
+                    {
+                        **initial_audit,
+                        "status": "timed_out",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "latency_ms": _elapsed_ms(started),
+                        "attempt_count": len(attempts),
+                        "retry_triggered": retry_triggered,
+                        "retry_trigger_reason": retry_trigger_reason,
+                        "attempts": raw_attempts,
+                        "provider_may_continue_after_cancel": (
+                            self.provider_may_continue_after_cancel
+                        ),
+                        "provider_may_bill_after_cancel": (
+                            self.provider_may_bill_after_cancel
+                        ),
+                    },
+                    api_key=api_key,
+                )
+                raise
+            except Exception as exc:
+                error_type = type(exc).__name__[:128]
+                attempt = GroundingProviderAttemptTelemetry(
+                    attempt_number=attempt_number,
+                    request_sha256=request_sha,
+                    latency_ms=_elapsed_ms(attempt_started),
+                    status="failed",
+                    error_type=error_type,
+                )
+                attempts.append(attempt)
+                raw_attempts.append(attempt.model_dump(mode="json"))
+                self._set_last_provider_attempts(
+                    attempts,
+                    retry_triggered=retry_triggered,
+                    retry_trigger_reason=retry_trigger_reason,
+                )
+                _write_private_provider_audit(
+                    audit_path,
+                    {
+                        **initial_audit,
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "latency_ms": _elapsed_ms(started),
+                        "attempt_count": len(attempts),
+                        "retry_triggered": retry_triggered,
+                        "retry_trigger_reason": retry_trigger_reason,
+                        "attempts": raw_attempts,
+                        "error_type": error_type,
+                    },
+                    api_key=api_key,
+                )
+                raise SQLGroundingProviderError(
+                    f"SQL Grounding Provider request failed ({error_type})",
+                    request_sha256=request_sha,
+                    raw_private_audit_ref=audit_ref,
+                    attempted=True,
+                ) from None
+
+            raw_response = _sanitize_audit_value(to_jsonable(response))
+            response_sha = _stable_json_sha256(raw_response)
+            usage, cost = _provider_usage(response)
+            costs.append(cost)
+            finish_reason = _provider_finish_reason(response)
+            try:
+                content = _provider_response_content(response)
+            except SQLGroundingProviderError as exc:
+                attempt = GroundingProviderAttemptTelemetry(
+                    attempt_number=attempt_number,
+                    request_sha256=request_sha,
+                    response_sha256=response_sha,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    latency_ms=_elapsed_ms(attempt_started),
+                    content_empty=None,
+                    status="invalid_response",
+                    error_type="response_content_invalid",
+                )
+                attempts.append(attempt)
+                raw_attempts.append(
+                    {
+                        **attempt.model_dump(mode="json"),
+                        "completion_tokens": usage.output_tokens,
+                        "response": raw_response,
+                        "provider_reported_cost": cost,
+                    }
+                )
+                self._set_last_provider_attempts(
+                    attempts,
+                    retry_triggered=retry_triggered,
+                    retry_trigger_reason=retry_trigger_reason,
+                )
+                _write_private_provider_audit(
+                    audit_path,
+                    {
+                        **initial_audit,
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "latency_ms": _elapsed_ms(started),
+                        "attempt_count": len(attempts),
+                        "retry_triggered": retry_triggered,
+                        "retry_trigger_reason": retry_trigger_reason,
+                        "attempts": raw_attempts,
+                        "error_type": "response_content_invalid",
+                    },
+                    api_key=api_key,
+                )
+                raise SQLGroundingProviderError(
+                    str(exc),
+                    request_sha256=request_sha,
+                    raw_private_audit_ref=audit_ref,
+                    attempted=True,
+                ) from None
+            attempt = GroundingProviderAttemptTelemetry(
+                attempt_number=attempt_number,
+                request_sha256=request_sha,
+                response_sha256=response_sha,
+                finish_reason=finish_reason,
+                usage=usage,
+                latency_ms=_elapsed_ms(attempt_started),
+                content_empty=not bool(content),
+                status="response",
             )
-            raise
-        except Exception as exc:
-            _write_private_provider_audit(
-                audit_path,
+            attempts.append(attempt)
+            raw_attempts.append(
                 {
-                    **initial_audit,
-                    "status": "failed",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "latency_ms": _elapsed_ms(started),
-                    "error_type": type(exc).__name__[:128],
-                },
-                api_key=api_key,
+                    **attempt.model_dump(mode="json"),
+                    "completion_tokens": usage.output_tokens,
+                    "response": raw_response,
+                    "provider_reported_cost": cost,
+                }
             )
+            should_retry = (
+                attempt_number == 1
+                and _is_exact_empty_fuse_hit(
+                    call_kind=request.call_kind,
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    configured_max_tokens=configured_max_tokens,
+                )
+            )
+            if should_retry:
+                retry_triggered = True
+                retry_trigger_reason = SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON
+                self._set_last_provider_attempts(
+                    attempts,
+                    retry_triggered=True,
+                    retry_trigger_reason=retry_trigger_reason,
+                )
+                _write_private_provider_audit(
+                    audit_path,
+                    {
+                        **initial_audit,
+                        "status": "retrying",
+                        "attempt_count": len(attempts),
+                        "retry_triggered": True,
+                        "retry_trigger_reason": retry_trigger_reason,
+                        "attempts": raw_attempts,
+                    },
+                    api_key=api_key,
+                )
+                continue
+            selected_response = response
+            selected_raw_response = raw_response
+            selected_response_sha = response_sha
+            selected_content = content
+            self._last_final_selected_attempt = attempt_number
+            break
+
+        if selected_response is None:
             raise SQLGroundingProviderError(
-                f"SQL Grounding Provider request failed ({type(exc).__name__[:128]})",
+                "SQL Grounding Provider did not produce a selected response",
                 request_sha256=request_sha,
                 raw_private_audit_ref=audit_ref,
-                attempted=True,
-            ) from None
-
-        raw_response = _sanitize_audit_value(to_jsonable(response))
-        response_sha = _stable_json_sha256(raw_response)
-        usage, cost = _provider_usage(response)
+                attempted=bool(attempts),
+            )
+        self._set_last_provider_attempts(
+            attempts,
+            retry_triggered=retry_triggered,
+            retry_trigger_reason=retry_trigger_reason,
+            final_selected_attempt=self._last_final_selected_attempt,
+        )
+        total_usage = _sum_provider_usage(attempts)
+        total_cost = _sum_provider_cost(costs)
         _write_private_provider_audit(
             audit_path,
             {
@@ -585,35 +809,50 @@ class LiteLLMSQLGroundingClient:
                 "status": "succeeded",
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "latency_ms": _elapsed_ms(started),
-                "response": raw_response,
-                "response_sha256": response_sha,
-                "usage": usage.model_dump(mode="json"),
-                "provider_reported_cost": cost,
+                "attempt_count": len(attempts),
+                "retry_triggered": retry_triggered,
+                "retry_trigger_reason": retry_trigger_reason,
+                "attempts": raw_attempts,
+                "final_selected_attempt": self._last_final_selected_attempt,
+                "response": selected_raw_response,
+                "response_sha256": selected_response_sha,
+                "usage": total_usage.model_dump(mode="json"),
+                "provider_reported_cost": total_cost,
             },
             api_key=api_key,
         )
-        try:
-            content = _provider_response_content(response)
-        except SQLGroundingProviderError as exc:
-            raise SQLGroundingProviderError(
-                str(exc),
-                request_sha256=request_sha,
-                raw_private_audit_ref=audit_ref,
-                attempted=True,
-            ) from None
         return GroundingClientResponse(
-            content=content,
-            usage=usage,
-            provider_reported_cost=cost,
+            content=selected_content,
+            usage=total_usage,
+            provider_reported_cost=total_cost,
             model=self.config.model_id,
-            provider=_provider_name(response),
+            provider=_provider_name(selected_response),
             credential_source=self.config.credential_source,
             request_sha256=request_sha,
-            response_sha256=response_sha,
+            response_sha256=selected_response_sha,
             raw_private_audit_ref=audit_ref,
             provider_may_continue_after_cancel=self.provider_may_continue_after_cancel,
             provider_may_bill_after_cancel=self.provider_may_bill_after_cancel,
+            configured_max_tokens=configured_max_tokens,
+            attempt_count=len(attempts),
+            retry_triggered=retry_triggered,
+            retry_trigger_reason=retry_trigger_reason,
+            provider_attempts=tuple(attempts),
+            final_selected_attempt=self._last_final_selected_attempt,
         )
+
+    def _set_last_provider_attempts(
+        self,
+        attempts: list[GroundingProviderAttemptTelemetry],
+        *,
+        retry_triggered: bool,
+        retry_trigger_reason: str | None,
+        final_selected_attempt: int | None = None,
+    ) -> None:
+        self._last_provider_attempts = tuple(attempts)
+        self._last_retry_triggered = retry_triggered
+        self._last_retry_trigger_reason = retry_trigger_reason
+        self._last_final_selected_attempt = final_selected_attempt
 
 
 class GroundingUpdaterResult(ContractModel):
@@ -1367,7 +1606,7 @@ def _build_provider_request(
     preset = llm_config.preset_config
     generation: dict[str, Any] = {
         "temperature": preset.get("temperature", 0.0),
-        "max_tokens": llm_config.max_tokens,
+        "max_tokens": SQL_GROUNDING_STAGE_MAX_TOKENS[request.call_kind],
     }
     if "top_p" in preset:
         generation["top_p"] = preset["top_p"]
@@ -1468,6 +1707,18 @@ def _provider_response_content(response: Any) -> str:
     return content.strip()
 
 
+def _provider_finish_reason(response: Any) -> str | None:
+    try:
+        choices = _value(response, "choices")
+        value = _value(choices[0], "finish_reason")
+    except Exception:
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:128] if text else None
+
+
 def _provider_usage(response: Any) -> tuple[GroundingTokenUsage, float | None]:
     raw = to_jsonable(_value(response, "usage", default={})) or {}
     if not isinstance(raw, dict):
@@ -1493,6 +1744,50 @@ def _provider_usage(response: Any) -> tuple[GroundingTokenUsage, float | None]:
         ),
         cost,
     )
+
+
+def _is_exact_empty_fuse_hit(
+    *,
+    call_kind: GroundingCallKind,
+    content: str,
+    finish_reason: str | None,
+    usage: GroundingTokenUsage,
+    configured_max_tokens: int,
+) -> bool:
+    """Return true only for the frozen, mechanically observable retry trigger."""
+
+    normalized_finish = (
+        (finish_reason or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+        .rsplit(".", 1)[-1]
+    )
+    return (
+        call_kind in SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES
+        and content == ""
+        and normalized_finish in {"length", "max_tokens"}
+        and usage.output_tokens
+        in {configured_max_tokens, configured_max_tokens + 1}
+    )
+
+
+def _sum_provider_usage(
+    attempts: list[GroundingProviderAttemptTelemetry],
+) -> GroundingTokenUsage:
+    return GroundingTokenUsage(
+        input_tokens=sum(item.usage.input_tokens for item in attempts),
+        output_tokens=sum(item.usage.output_tokens for item in attempts),
+        reasoning_tokens=sum(item.usage.reasoning_tokens for item in attempts),
+        total_tokens=sum(item.usage.total_tokens for item in attempts),
+    )
+
+
+def _sum_provider_cost(costs: list[float | None]) -> float | None:
+    if not costs or any(value is None for value in costs):
+        return None
+    return sum(value for value in costs if value is not None)
 
 
 def _usage_token(raw: Mapping[str, Any], *names: str) -> int:
@@ -1547,6 +1842,14 @@ def _sanitize_audit_value(value: Any) -> Any:
 
 def _stable_json_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _stable_provider_kwargs_sha256(provider_kwargs: Mapping[str, Any]) -> str:
+    """Hash real call kwargs without retaining the credential in audit/state."""
+
+    non_secret = copy.deepcopy(dict(provider_kwargs))
+    non_secret.pop("api_key", None)
+    return _stable_json_sha256(non_secret)
 
 
 def _new_private_audit_path(
@@ -1615,6 +1918,12 @@ def _telemetry(
     raw_private_audit_ref: str = "",
     provider_may_continue_after_cancel: bool | None = None,
     provider_may_bill_after_cancel: bool | None = None,
+    configured_max_tokens: int = 0,
+    attempt_count: int = 0,
+    retry_triggered: bool = False,
+    retry_trigger_reason: str | None = None,
+    provider_attempts: tuple[GroundingProviderAttemptTelemetry, ...] = (),
+    final_selected_attempt: int | None = None,
     call_kind: GroundingCallKind | None = None,
 ) -> GroundingLLMTelemetry:
     return GroundingLLMTelemetry(
@@ -1631,6 +1940,12 @@ def _telemetry(
         raw_private_audit_ref=raw_private_audit_ref,
         provider_may_continue_after_cancel=provider_may_continue_after_cancel,
         provider_may_bill_after_cancel=provider_may_bill_after_cancel,
+        configured_max_tokens=configured_max_tokens,
+        attempt_count=attempt_count,
+        retry_triggered=retry_triggered,
+        retry_trigger_reason=retry_trigger_reason,
+        provider_attempts=provider_attempts,
+        final_selected_attempt=final_selected_attempt,
         request_sha256=request_sha,
         response_sha256=response_sha,
         prompt_sha256=(
@@ -1658,6 +1973,12 @@ def _response_telemetry_metadata(response: GroundingClientResponse) -> dict[str,
             response.provider_may_continue_after_cancel
         ),
         "provider_may_bill_after_cancel": response.provider_may_bill_after_cancel,
+        "configured_max_tokens": response.configured_max_tokens,
+        "attempt_count": response.attempt_count,
+        "retry_triggered": response.retry_triggered,
+        "retry_trigger_reason": response.retry_trigger_reason,
+        "provider_attempts": response.provider_attempts,
+        "final_selected_attempt": response.final_selected_attempt,
     }
 
 
@@ -1674,5 +1995,23 @@ def _client_telemetry_metadata(client: Any) -> dict[str, Any]:
         ),
         "provider_may_bill_after_cancel": getattr(
             client, "provider_may_bill_after_cancel", None
+        ),
+        "configured_max_tokens": int(
+            getattr(client, "_last_configured_max_tokens", 0)
+        ),
+        "attempt_count": len(
+            tuple(getattr(client, "_last_provider_attempts", ()))
+        ),
+        "retry_triggered": bool(
+            getattr(client, "_last_retry_triggered", False)
+        ),
+        "retry_trigger_reason": getattr(
+            client, "_last_retry_trigger_reason", None
+        ),
+        "provider_attempts": tuple(
+            getattr(client, "_last_provider_attempts", ())
+        ),
+        "final_selected_attempt": getattr(
+            client, "_last_final_selected_attempt", None
         ),
     }
