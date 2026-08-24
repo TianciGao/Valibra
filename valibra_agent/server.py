@@ -16,6 +16,7 @@ from shared.config import (
     settings,
 )
 from valibra_agent.adk_runtime import AdkRuntime
+from valibra_agent.runtime_profile import valibra_execution_profile
 from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,10 @@ def _configuration_summary() -> Dict[str, Any]:
     preset_report = active_model_preset_report()
     normalized = normalized_system_agent_config()
     grounding_provider = sql_grounding_provider_health_report(PROJECT_ROOT)
+    execution_profile = valibra_execution_profile()
+    research_profile = execution_profile == "research"
     return {
+        "execution_profile": execution_profile,
         "dataset": settings.dataset,
         "prompt_version": settings.prompt_version,
         "patience": settings.patience,
@@ -88,18 +92,21 @@ def _configuration_summary() -> Dict[str, Any]:
         "prompt_view_injected": True,
         "control_mode": "active_hint",
         "control_hint_injection_enabled": True,
-        "attempt_gate_mode": "active_first_submit",
-        "attempt_gate_blocking_enabled": True,
-        "attempt_gate_budget_liveness_bypass": True,
+        "attempt_gate_mode": (
+            "active_first_submit" if research_profile else "official_passthrough"
+        ),
+        "attempt_gate_blocking_enabled": research_profile,
+        "attempt_gate_budget_liveness_bypass": research_profile,
         "control_enabled": True,
-        "attempt_gate_enabled": True,
+        "attempt_gate_enabled": research_profile,
     }
 
 
 def _variant(summary: Dict[str, Any]) -> str:
     """Return the SG6b Active Gate service identity."""
 
-    del summary
+    if summary.get("execution_profile", "research") == "leaderboard":
+        return "SQL-Grounding-V1-Leaderboard-PassThrough"
     return "SQL-Grounding-V1-SG6b-Active-Gate"
 
 

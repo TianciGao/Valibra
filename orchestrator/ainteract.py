@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.config import settings
 from valibra_agent.evaluation import export_valibra_result
+from valibra_agent.runtime_profile import valibra_execution_profile
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s") # 设置日志格式和级别
 logger = logging.getLogger(__name__)
@@ -205,18 +206,19 @@ async def run_single_task(task_data: dict) -> Dict[str, Any]: # 定义一个异�
             "user_simulator_audit": user_simulator_audit,
             "final_response": run_result.get("response", ""),
         } # 定义一个字典，包含任务 ID、数据库名称、阶段完成状态、是否有后续任务、总奖励、耗时、预算使用情况、剩余预算、对话历史、工具轨迹、ADK 事件和最终响应等信息
-        # 只在冻结结果已经完整生成后追加 Valibra 审计块；失败不能改变
-        # 原 SQL、reward、trajectory、HTTP 流程或旧 token_usage 语义。
-        try:
-            result["valibra"] = export_valibra_result(
-                state,
-                user_simulator_audit=user_simulator_audit,
-            )
-        except Exception as exc:
-            result["valibra"] = {
-                "export_status": "failed",
-                "error_type": type(exc).__name__[:128],
-            }
+        # Research keeps the additive private export.  Leaderboard preserves the
+        # frozen Official result schema and never appends result["valibra"].
+        if valibra_execution_profile() == "research":
+            try:
+                result["valibra"] = export_valibra_result(
+                    state,
+                    user_simulator_audit=user_simulator_audit,
+                )
+            except Exception as exc:
+                result["valibra"] = {
+                    "export_status": "failed",
+                    "error_type": type(exc).__name__[:128],
+                }
         logger.info( # 记录任务完成的日志，包含任务 ID、总奖励、预算使用情况和耗时等信息
             "Task %s done. Reward: %.2f, Budget used: %.1f, Time: %.1fs",
             instance_id,

@@ -723,6 +723,23 @@ class OrchestratorAdditiveExportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(events), 6)
 
+    async def test_leaderboard_profile_preserves_official_result_schema(self):
+        with patch.dict(
+            os.environ,
+            {"VALIBRA_EXECUTION_PROFILE": "leaderboard"},
+        ):
+            _, result, events = await self._run(
+                exporter=AssertionError("leaderboard must not call exporter")
+            )
+        self.assertNotIn("valibra", result)
+        self.assertEqual(result["total_reward"], 1.0)
+        self.assertEqual(result["subtask_1_predicted_sql"], ["SELECT 1"])
+        self.assertEqual(
+            result["tool_trajectory"],
+            self._run_state()["tool_trajectory"],
+        )
+        self.assertEqual(len(events), 6)
+
 
 if __name__ == "__main__":
     unittest.main()

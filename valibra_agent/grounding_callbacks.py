@@ -29,6 +29,7 @@ from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from shared.audit import to_jsonable
 from shared.config import PROJECT_ROOT
+from valibra_agent.runtime_profile import is_leaderboard_profile
 from valibra_agent.sql_grounding.models import (
     SQL_GROUNDING_RUNTIME_KEY,
     GroundingCheckResponse,
@@ -751,6 +752,7 @@ async def before_model_callback(
 ) -> LlmResponse | None:
     """Update Shadow State, atomically inject View + Hint, then call B0 once."""
 
+    leaderboard_profile = is_leaderboard_profile()
     state = getattr(callback_context, "state", None)
     model_call_count = _model_call_count(state)
     request_before: str | None = None
@@ -952,7 +954,7 @@ async def before_model_callback(
         )
         if state is not None:
             model_call_index = _new_model_call_index(state, model_call_count)
-            if model_call_index is not None:
+            if model_call_index is not None and not leaderboard_profile:
                 _attach_model_call_audit(
                     state,
                     model_call_index,
@@ -1032,10 +1034,11 @@ async def before_tool_callback(
 
     from system_agent import callbacks as baseline_callbacks
 
+    leaderboard_profile = is_leaderboard_profile()
     state = getattr(tool_context, "state", None)
     tool_name = _safe_tool_name(tool)
     control_gate_audit: dict[str, Any] | None = None
-    if state is not None:
+    if state is not None and not leaderboard_profile:
         failure = _phase_grounding_failure(state)
         if failure is not None:
             response = _failed_closed_response(failure)
@@ -1077,7 +1080,8 @@ async def before_tool_callback(
                 )
             return response
     if (
-        state is not None
+        not leaderboard_profile
+        and state is not None
         and tool_name in _BOOTSTRAP_TOOL_SEQUENCE
         and _bootstrap_tool_already_attempted(state, tool_name)
     ):
@@ -1117,7 +1121,8 @@ async def before_tool_callback(
             )
             return _duplicate_bootstrap_response(tool_name)
     if (
-        state is not None
+        not leaderboard_profile
+        and state is not None
         and tool_name == "execute_sql"
         and _phase_grounding_succeeded(state)
         and not _is_exact_pending_check_dispatch(
@@ -1192,7 +1197,11 @@ async def before_tool_callback(
                     ),
                 )
             return response
-    if state is not None and tool_name == "submit_sql":
+    if (
+        not leaderboard_profile
+        and state is not None
+        and tool_name == "submit_sql"
+    ):
         try:
             runtime, degraded = _ensure_runtime(state)
             first_submit = _is_first_official_submit(state)
@@ -1373,10 +1382,12 @@ async def after_tool_callback(
 
     from system_agent import callbacks as baseline_callbacks
 
+    leaderboard_profile = is_leaderboard_profile()
     state = getattr(tool_context, "state", None)
     function_call_id = _valid_context_identifier(tool_context)
     if (
-        state is not None
+        not leaderboard_profile
+        and state is not None
         and function_call_id is not None
         and _failed_closed_call_present(state, function_call_id)
     ):
@@ -1402,7 +1413,8 @@ async def after_tool_callback(
             )
             return tool_response
     if (
-        state is not None
+        not leaderboard_profile
+        and state is not None
         and function_call_id is not None
         and _suppressed_bootstrap_present(state, function_call_id)
     ):
@@ -1429,7 +1441,11 @@ async def after_tool_callback(
                 ),
             )
             return tool_response
-    if state is not None and _safe_tool_name(tool) in _BOOTSTRAP_TOOL_SEQUENCE:
+    if (
+        not leaderboard_profile
+        and state is not None
+        and _safe_tool_name(tool) in _BOOTSTRAP_TOOL_SEQUENCE
+    ):
         # A duplicate is already proven by the frozen Official trajectory.  If
         # exact-ID bookkeeping was itself degraded, the deterministic response
         # still proves ADK skipped execution; never manufacture an Official
@@ -1452,7 +1468,8 @@ async def after_tool_callback(
                 ),
             )
     if (
-        state is not None
+        not leaderboard_profile
+        and state is not None
         and function_call_id is not None
         and _blocked_submit_present(state, function_call_id)
     ):
@@ -1867,7 +1884,7 @@ async def after_tool_callback(
                         function_call_id=exact_id,
                     ),
                 )
-        if audit_index is not None:
+        if audit_index is not None and not leaderboard_profile:
             try:
                 _attach_tool_audit(state, audit_index, audit)
                 if control_audit is not None:
@@ -1889,7 +1906,7 @@ async def after_tool_callback(
                     ),
                 )
     if bootstrap_tool_result:
-        return _bootstrap_model_visible_result(
+        return _profiled_bootstrap_model_visible_result(
             _safe_tool_name(tool),
             baseline_override,
             succeeded=bootstrap_tool_succeeded,
@@ -3486,6 +3503,23 @@ def _bootstrap_model_visible_result(
         f"{_BOOTSTRAP_MODEL_VISIBLE_PREFIX}: {tool_name}; status={status}. "
         "Full content is retained only in the Official tool trajectory."
         f"{budget_note}"
+    )
+
+
+def _profiled_bootstrap_model_visible_result(
+    tool_name: str,
+    baseline_override: Any,
+    *,
+    succeeded: bool,
+) -> Any:
+    """Keep research acknowledgement or return the exact Official override."""
+
+    if is_leaderboard_profile():
+        return baseline_override
+    return _bootstrap_model_visible_result(
+        tool_name,
+        baseline_override,
+        succeeded=succeeded,
     )
 
 
