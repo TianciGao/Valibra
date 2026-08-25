@@ -62,7 +62,9 @@ SQL_GROUNDING_STAGE_MAX_TOKENS: dict[GroundingCallKind, int] = {
     "knowledge": 24_576,
     "check": 12_288,
 }
-SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES = frozenset({"structure", "check"})
+SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES = frozenset(
+    {"structure", "mapping", "check"}
+)
 SQL_GROUNDING_MAX_IDENTICAL_RETRIES = 1
 SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON = "exact_empty_max_token_failure"
 GROUNDING_LLM_ENV_NAMES = (

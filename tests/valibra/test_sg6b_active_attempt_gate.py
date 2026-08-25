@@ -43,7 +43,7 @@ from valibra_agent.sql_grounding.updater import (
 
 PROMPT_SHA = "db5a44e94a0e7fba92e78e6ca99e6b324affdee92aaed4dcd45010ff03876454"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "7362f6266f62a5ab4b57a0a19072b5b972812647e0730b3c45b251c3954a9a08"
+CONFIG_SHA = "31115d248a048c76a9ffd947aade7c4fa725915f82243809f06b8e14cbd98f0c"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC

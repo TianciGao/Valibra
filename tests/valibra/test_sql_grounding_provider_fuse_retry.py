@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 
 from shared.config import PROJECT_ROOT
-from valibra_agent.sql_grounding.models import GroundingRuntime, ValidationContext
+from valibra_agent.sql_grounding.models import (
+    GroundingRuntime,
+    SQLGroundingState,
+    ValidationContext,
+)
 from valibra_agent.sql_grounding.observations import build_sql_grounding_observation
 from valibra_agent.sql_grounding.service import process_sql_grounding_observation
 from valibra_agent.sql_grounding.updater import (
@@ -71,6 +75,39 @@ def _valid_content(call_kind: str) -> str:
     return json.dumps(payloads[call_kind], sort_keys=True)
 
 
+def _mapping_runtime() -> GroundingRuntime:
+    return GroundingRuntime(
+        grounding_revision=1,
+        stage="INITIAL_GROUNDING",
+        focus_dimension="column_mapping",
+        grounding_state=SQLGroundingState(
+            tables=("metrics",),
+            join_keys=(),
+        ),
+    )
+
+
+def _mapping_observation(task_id: str):
+    return build_sql_grounding_observation(
+        task_id=task_id,
+        phase=1,
+        sequence=2,
+        observation_type="metadata",
+        content={"metrics.value": "numeric metric value"},
+        summary="Official column meanings",
+        tool_name="get_all_column_meanings",
+        function_call_id=f"{task_id}-meanings",
+    )
+
+
+def _mapping_input(runtime: GroundingRuntime) -> dict[str, object]:
+    return {
+        "query": "show value",
+        "current_state": runtime.grounding_state.model_dump(mode="json"),
+        "column_meanings": {"metrics.value": "numeric metric value"},
+    }
+
+
 def _response(
     content: str,
     *,
@@ -131,7 +168,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION["provider_execution_policy"],
             {
-                "exact_empty_retry_stages": ["check", "structure"],
+                "exact_empty_retry_stages": ["check", "mapping", "structure"],
                 "max_identical_retries": 1,
                 "retry_reason": SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON,
                 "sdk_retry_count": 0,
@@ -152,8 +189,8 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls[0]["num_retries"], 0)
             self.assertEqual(calls[0]["max_retries"], 0)
 
-    async def test_structure_and_check_exact_empty_fuse_retry_once_identically(self):
-        for call_kind in ("structure", "check"):
+    async def test_structure_mapping_and_check_exact_empty_fuse_retry_once_identically(self):
+        for call_kind in ("structure", "mapping", "check"):
             with self.subTest(call_kind=call_kind):
                 calls = []
                 fuse = SQL_GROUNDING_STAGE_MAX_TOKENS[call_kind]
@@ -194,12 +231,12 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_pass_nonempty_length_and_insufficient_usage_do_not_retry(self):
         cases = (
-            _response(_valid_content("structure")),
+            _response(_valid_content("mapping")),
             _response(
                 '{"tables":',
                 finish_reason="length",
-                completion_tokens=12_289,
-                reasoning_tokens=12_288,
+                completion_tokens=32_769,
+                reasoning_tokens=32_768,
             ),
             _response(
                 "",
@@ -216,32 +253,45 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(copy.deepcopy(kwargs))
                     return provider_response
 
-                await self._client(completion).complete(_request("structure"))
+                await self._client(completion).complete(_request("mapping"))
                 self.assertEqual(len(calls), 1)
 
     async def test_nonempty_stop_invalid_json_is_not_retried(self):
-        calls = []
-
-        async def completion(**kwargs):
-            calls.append(copy.deepcopy(kwargs))
-            return _response("not-json", finish_reason="stop")
-
-        updater = SQLGroundingUpdater(self._client(completion))
-        observation = build_sql_grounding_observation(
-            task_id="fuse-invalid",
-            phase=1,
-            sequence=1,
-            observation_type="user_query",
-            content="query",
-            summary="query",
+        cases = (
+            ("not-json", "json_invalid"),
+            (
+                json.dumps(
+                    {
+                        "tables": ["metrics"],
+                        "join_keys": [],
+                        "column_mapping": [],
+                        "unexpected": True,
+                    }
+                ),
+                "form_validation_failed",
+            ),
         )
-        with self.assertRaises(GroundingUpdaterError) as raised:
-            await updater.propose(
-                GroundingRuntime(), observation, original_query="query"
-            )
-        self.assertEqual(raised.exception.reason, "json_invalid")
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(raised.exception.telemetry.retry_triggered)
+        for content, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                calls = []
+
+                async def completion(**kwargs):
+                    calls.append(copy.deepcopy(kwargs))
+                    return _response(content, finish_reason="stop")
+
+                updater = SQLGroundingUpdater(self._client(completion))
+                runtime = _mapping_runtime()
+                observation = _mapping_observation(f"fuse-{expected_reason}")
+                with self.assertRaises(GroundingUpdaterError) as raised:
+                    await updater.propose(
+                        runtime,
+                        observation,
+                        original_query="show value",
+                        grounding_input=_mapping_input(runtime),
+                    )
+                self.assertEqual(raised.exception.reason, expected_reason)
+                self.assertEqual(len(calls), 1)
+                self.assertFalse(raised.exception.telemetry.retry_triggered)
 
     async def test_check_incomplete_and_terminal_incomplete_do_not_retry(self):
         contents = (
@@ -280,7 +330,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_second_nonempty_invalid_response_stops_without_third_attempt(self):
         calls = []
-        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["structure"]
+        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["mapping"]
 
         async def completion(**kwargs):
             calls.append(copy.deepcopy(kwargs))
@@ -294,24 +344,21 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
             return _response("not-json", finish_reason="stop")
 
         updater = SQLGroundingUpdater(self._client(completion))
-        observation = build_sql_grounding_observation(
-            task_id="fuse-invalid-second",
-            phase=1,
-            sequence=1,
-            observation_type="user_query",
-            content="query",
-            summary="query",
-        )
+        runtime = _mapping_runtime()
+        observation = _mapping_observation("fuse-invalid-second")
         with self.assertRaises(GroundingUpdaterError) as raised:
             await updater.propose(
-                GroundingRuntime(), observation, original_query="query"
+                runtime,
+                observation,
+                original_query="show value",
+                grounding_input=_mapping_input(runtime),
             )
         self.assertEqual(raised.exception.reason, "json_invalid")
         self.assertEqual(len(calls), 2)
         self.assertEqual(raised.exception.telemetry.attempt_count, 2)
 
-    async def test_mapping_and_knowledge_exact_empty_fuse_never_retry(self):
-        for call_kind in ("mapping", "knowledge"):
+    async def test_knowledge_exact_empty_fuse_never_retries(self):
+        for call_kind in ("knowledge",):
             with self.subTest(call_kind=call_kind):
                 calls = []
                 fuse = SQL_GROUNDING_STAGE_MAX_TOKENS[call_kind]
@@ -334,7 +381,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_second_empty_fuse_hit_stops_at_two_and_fails_closed(self):
         calls = []
-        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["structure"]
+        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["mapping"]
 
         async def completion(**kwargs):
             calls.append(copy.deepcopy(kwargs))
@@ -346,20 +393,18 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
             )
 
         updater = SQLGroundingUpdater(self._client(completion))
-        observation = build_sql_grounding_observation(
-            task_id="fuse-twice",
-            phase=1,
-            sequence=1,
-            observation_type="user_query",
-            content="query",
-            summary="query",
-        )
-        runtime = GroundingRuntime()
+        observation = _mapping_observation("fuse-twice")
+        runtime = _mapping_runtime()
         with self.assertRaises(GroundingUpdaterError) as raised:
-            await updater.propose(runtime, observation, original_query="query")
+            await updater.propose(
+                runtime,
+                observation,
+                original_query="show value",
+                grounding_input=_mapping_input(runtime),
+            )
         self.assertEqual(raised.exception.reason, "json_invalid")
         self.assertEqual(len(calls), 2)
-        self.assertEqual(runtime.grounding_revision, 0)
+        self.assertEqual(runtime.grounding_revision, 1)
         telemetry = raised.exception.telemetry
         self.assertEqual(telemetry.attempt_count, 2)
         self.assertTrue(telemetry.retry_triggered)
@@ -367,41 +412,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_second_attempt_form_pass_is_selected_without_extra_revision(self):
         calls = []
-        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["structure"]
-
-        async def completion(**kwargs):
-            calls.append(copy.deepcopy(kwargs))
-            if len(calls) == 1:
-                return _response(
-                    "",
-                    finish_reason="length",
-                    completion_tokens=fuse + 1,
-                    reasoning_tokens=fuse,
-                )
-            return _response(_valid_content("structure"))
-
-        updater = SQLGroundingUpdater(self._client(completion))
-        observation = build_sql_grounding_observation(
-            task_id="fuse-salvaged",
-            phase=1,
-            sequence=1,
-            observation_type="user_query",
-            content="query",
-            summary="query",
-        )
-        runtime = GroundingRuntime()
-        result = await updater.propose(runtime, observation, original_query="query")
-        self.assertEqual(result.response.tables, ())
-        self.assertEqual(result.telemetry.attempt_count, 2)
-        self.assertEqual(result.telemetry.final_selected_attempt, 2)
-        self.assertEqual(runtime.grounding_revision, 0)
-        self.assertEqual(len(calls), 2)
-        self.assertNotIn("tools", calls[0])
-        self.assertNotIn("tool_choice", calls[0])
-
-    async def test_salvaged_response_reaches_service_with_one_state_revision(self):
-        calls = []
-        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["structure"]
+        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["mapping"]
 
         async def completion(**kwargs):
             calls.append(copy.deepcopy(kwargs))
@@ -413,41 +424,81 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     reasoning_tokens=fuse,
                 )
             return _response(
-                json.dumps({"tables": ["metrics"], "join_keys": []})
+                json.dumps(
+                    {
+                        "tables": ["metrics"],
+                        "join_keys": [],
+                        "column_mapping": [
+                            {"phrase": "value", "targets": ["metrics.value"]}
+                        ],
+                    }
+                )
             )
 
-        observation = build_sql_grounding_observation(
-            task_id="fuse-service",
-            phase=1,
-            sequence=1,
-            observation_type="schema",
-            content="CREATE TABLE metrics (value numeric);",
-            summary="Official schema",
-            tool_name="get_schema",
-            function_call_id="schema-call",
+        updater = SQLGroundingUpdater(self._client(completion))
+        observation = _mapping_observation("fuse-salvaged")
+        runtime = _mapping_runtime()
+        result = await updater.propose(
+            runtime,
+            observation,
+            original_query="show value",
+            grounding_input=_mapping_input(runtime),
         )
-        runtime = GroundingRuntime()
-        grounding_input = {
-            "query": "show metrics",
-            "current_state": runtime.grounding_state.model_dump(mode="json"),
-            "schema": "CREATE TABLE metrics (value numeric);",
-        }
+        self.assertEqual(result.response.tables, ("metrics",))
+        self.assertEqual(result.telemetry.attempt_count, 2)
+        self.assertEqual(result.telemetry.final_selected_attempt, 2)
+        self.assertEqual(runtime.grounding_revision, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("tools", calls[0])
+        self.assertNotIn("tool_choice", calls[0])
+
+    async def test_salvaged_response_reaches_service_with_one_state_revision(self):
+        calls = []
+        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["mapping"]
+
+        async def completion(**kwargs):
+            calls.append(copy.deepcopy(kwargs))
+            if len(calls) == 1:
+                return _response(
+                    "",
+                    finish_reason="length",
+                    completion_tokens=fuse + 1,
+                    reasoning_tokens=fuse,
+                )
+            return _response(
+                json.dumps(
+                    {
+                        "tables": ["metrics"],
+                        "join_keys": [],
+                        "column_mapping": [
+                            {"phrase": "value", "targets": ["metrics.value"]}
+                        ],
+                    }
+                )
+            )
+
+        observation = _mapping_observation("fuse-service")
+        runtime = _mapping_runtime()
         result = await process_sql_grounding_observation(
             runtime,
             observation,
             ValidationContext(
-                current_query="show metrics",
+                current_query="show value",
                 latest_observation_id=observation.observation_id,
                 known_tables=frozenset({"metrics"}),
                 known_columns=frozenset({"metrics.value"}),
             ),
             SQLGroundingUpdater(self._client(completion)),
-            grounding_input=grounding_input,
+            grounding_input=_mapping_input(runtime),
         )
         self.assertEqual(len(calls), 2)
-        self.assertEqual(runtime.grounding_revision, 0)
-        self.assertEqual(result.runtime.grounding_revision, 1)
+        self.assertEqual(runtime.grounding_revision, 1)
+        self.assertEqual(result.runtime.grounding_revision, 2)
         self.assertEqual(result.runtime.grounding_state.tables, ("metrics",))
+        self.assertEqual(
+            result.runtime.grounding_state.column_mapping[0].targets,
+            ("metrics.value",),
+        )
         self.assertEqual(result.llm_telemetry.attempt_count, 2)
 
     async def test_state_validation_failure_is_not_retried(self):
@@ -456,35 +507,33 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
         async def completion(**kwargs):
             calls.append(copy.deepcopy(kwargs))
             return _response(
-                json.dumps({"tables": ["invented"], "join_keys": []})
+                json.dumps(
+                    {
+                        "tables": ["metrics"],
+                        "join_keys": [],
+                        "column_mapping": [
+                            {
+                                "phrase": "value",
+                                "targets": ["metrics.invented"],
+                            }
+                        ],
+                    }
+                )
             )
 
-        observation = build_sql_grounding_observation(
-            task_id="fuse-semantic-reject",
-            phase=1,
-            sequence=1,
-            observation_type="schema",
-            content="CREATE TABLE metrics (value numeric);",
-            summary="Official schema",
-            tool_name="get_schema",
-            function_call_id="schema-call",
-        )
-        runtime = GroundingRuntime()
+        observation = _mapping_observation("fuse-semantic-reject")
+        runtime = _mapping_runtime()
         result = await process_sql_grounding_observation(
             runtime,
             observation,
             ValidationContext(
-                current_query="show metrics",
+                current_query="show value",
                 latest_observation_id=observation.observation_id,
                 known_tables=frozenset({"metrics"}),
                 known_columns=frozenset({"metrics.value"}),
             ),
             SQLGroundingUpdater(self._client(completion)),
-            grounding_input={
-                "query": "show metrics",
-                "current_state": runtime.grounding_state.model_dump(mode="json"),
-                "schema": "CREATE TABLE metrics (value numeric);",
-            },
+            grounding_input=_mapping_input(runtime),
         )
         self.assertEqual(len(calls), 1)
         self.assertEqual(result.state_update.status, "rejected")
@@ -494,7 +543,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_audit_records_both_real_attempts(self):
         calls = []
-        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["check"]
+        fuse = SQL_GROUNDING_STAGE_MAX_TOKENS["mapping"]
 
         async def completion(**kwargs):
             calls.append(copy.deepcopy(kwargs))
@@ -505,13 +554,13 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     completion_tokens=fuse + 1,
                     reasoning_tokens=fuse,
                 )
-            return _response(_valid_content("check"))
+            return _response(_valid_content("mapping"))
 
-        response = await self._client(completion).complete(_request("check"))
+        response = await self._client(completion).complete(_request("mapping"))
         audit_path = self.root / response.raw_private_audit_ref
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
-        self.assertEqual(audit["call_kind"], "check")
-        self.assertEqual(audit["configured_max_tokens"], 12_288)
+        self.assertEqual(audit["call_kind"], "mapping")
+        self.assertEqual(audit["configured_max_tokens"], 32_768)
         self.assertEqual(audit["attempt_count"], 2)
         self.assertTrue(audit["retry_triggered"])
         self.assertEqual(
@@ -519,10 +568,21 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
             SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON,
         )
         self.assertEqual(len(audit["attempts"]), 2)
+        self.assertEqual(calls[0], calls[1])
         self.assertEqual(
             audit["attempts"][0]["request_sha256"],
             audit["attempts"][1]["request_sha256"],
         )
+        self.assertEqual(audit["attempts"][0]["finish_reason"], "length")
+        self.assertTrue(audit["attempts"][0]["content_empty"])
+        self.assertEqual(
+            audit["attempts"][0]["completion_tokens"],
+            32_769,
+        )
+        self.assertEqual(audit["attempts"][1]["finish_reason"], "stop")
+        self.assertFalse(audit["attempts"][1]["content_empty"])
+        self.assertGreaterEqual(audit["attempts"][0]["latency_ms"], 0)
+        self.assertGreaterEqual(audit["attempts"][1]["latency_ms"], 0)
         self.assertEqual(audit["final_selected_attempt"], 2)
 
 
