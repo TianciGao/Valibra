@@ -221,20 +221,27 @@ previous_official_calls 和 answered_clarifications 都是只读、State 外的 
 你的任务是检查：当前 State 是否已经有足够证据完成 Query。
 
 0. Clarification Scope Gate（最高优先级）
-- 只要存在 latest_user_answer（以及后续 Check tool turn 中保留的 answered_clarifications），
-  在检查其他 complete 条件之前，必须先判断该回答属于以下哪一类：
+- 当输入包含 latest_user_answer 时，在检查其他 complete 条件之前，必须先判断本次回答属于以下
+  哪一类：
   A. 窄澄清：回答只为 current_state 中已经存在的 mapped concept 补充具体 literal、threshold
   或 formula 参数，没有引入新的字段概念、predicate、业务规则、公式或 AND / OR 组合条件。
   只有这一类回答可以继续下面的完整性检查，并在全部条件通过后允许 complete。
   B. 语义扩展：回答新增或重新定义了完成 Query 所需的字段概念、predicate、业务规则、公式
-  或 AND / OR 组合条件。本轮绝对禁止 complete，即使该回答同时解决了上一轮
-  missing_information。不得仅依赖 clarification overlay 把这些新增语义交给 Main；如果
+  或 AND / OR 组合条件。当前这个包含 latest_user_answer 的 Check turn 绝对禁止 complete，
+  即使该回答同时解决了上一轮 missing_information。不得仅依赖 clarification overlay 把这些
+  新增语义交给 Main；如果
   current_state 已包含相关 target，且存在新的合法 Official evidence direction，只选择一个最具体
   的工具，否则返回 incomplete + next_tool = null 并 terminal incomplete。不得使用 execute_sql、
   information_schema 或其他数据库探索重新做 Mapping。
   C. 未解决：回答模糊、拒绝、不知道、不确定、out of scope 或与缺口无关。必须 incomplete；
   不得生成或猜测任何缺失语义。
-- B / C 的 incomplete 规则高于所有“回答已经解决上一轮缺口即可 complete”的规则。
+- 在后续 Check tool turn 中，如果输入没有 latest_user_answer、只有保留的 answered_clarifications，
+  不得把历史上的 B 类语义扩展当作永久禁止 complete 的理由。必须把回答新增的所有 SQL-relevant
+  概念、predicate、规则、公式和组合关系作为完整性要求，逐项用 current_state 与本轮合法
+  Official evidence 重新验证：全部已充分 Ground 且其他检查均通过时允许 complete；仍有任一项
+  未被支持时继续 incomplete，一次只补一个最具体缺口。
+- 在包含 latest_user_answer 的当前 turn，B / C 的 incomplete 规则高于所有“回答已经解决上一轮
+  缺口即可 complete”的规则；后续 turn 适用上一条重新验证规则。
 - Clarification overlay 只是为已有 Grounding 补充参数的通道，不是替代新 Grounding 语义的通道。
 
 返回 complete 前必须先通过 Gate 0（如有用户回答），再逐项通过以下五项检查：
@@ -280,7 +287,8 @@ previous_official_calls 和 answered_clarifications 都是只读、State 外的 
   而制造缺口；其他 completeness 条件满足时可以 complete。
 
 5. 窄澄清是否直接解决上一轮缺口
-- 只有 Gate 0 判定为 A（窄澄清）后，才检查回答是否明确、直接提供上一轮缺少的具体
+- 本项只适用于输入包含 latest_user_answer 的当前 turn。只有 Gate 0 判定为 A（窄澄清）后，
+  才检查回答是否明确、直接提供上一轮缺少的具体
   threshold、formula 参数、literal 或 business-rule 参数。例如缺少 threshold 时，用户明确回答
   “1000 hours”可以解决该缺口；latest_user_answer 仍不等于缺口自动解决。
 - 回答解决缺口且第 1–4 项全部通过时，才可返回 complete、missing_information = null、

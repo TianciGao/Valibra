@@ -126,6 +126,12 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
         if "latest_user_answer" in grounding_input:
             observation = _observation(task, kind="user_answer", tool="ask_user")
+        elif isinstance(grounding_input.get("latest_tool"), dict):
+            observation = _observation(
+                task,
+                kind="knowledge",
+                tool=str(grounding_input["latest_tool"]["name"]),
+            )
         else:
             observation = _observation(
                 task,
@@ -304,7 +310,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("字段概念、predicate、业务规则、公式", CHECK_GROUNDING_PROMPT)
         self.assertIn("AND / OR 组合条件", CHECK_GROUNDING_PROMPT)
         self.assertIn(
-            "本轮绝对禁止 complete，即使该回答同时解决了上一轮",
+            "当前这个包含 latest_user_answer 的 Check turn 绝对禁止 complete",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
@@ -368,6 +374,73 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.response.status, "incomplete")
         self.assertIsNone(result.response.next_tool)
         self.assertEqual(result.response.column_mapping, state.column_mapping)
+        self.assertEqual(result.runtime, runtime)
+        self.assertEqual(
+            sql_grounding_state_sha256(result.runtime.grounding_state), before_sha
+        )
+
+    async def test_grounded_historical_expansion_can_complete_after_tool_turn(
+        self,
+    ) -> None:
+        self.assertIn(
+            "不得把历史上的 B 类语义扩展当作永久禁止 complete 的理由",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn(
+            "全部已充分 Ground 且其他检查均通过时允许 complete",
+            CHECK_GROUNDING_PROMPT,
+        )
+        state = SQLGroundingState(
+            tables=("mechanical_condition",),
+            join_keys=(),
+            column_mapping=(
+                ColumnMapping(
+                    phrase="aging terribly",
+                    targets=(
+                        "mechanical_condition.busbar_corrosion",
+                        "mechanical_condition.degyrrate",
+                        "mechanical_condition.delamination_status",
+                        "mechanical_condition.microcrack_count",
+                    ),
+                ),
+            ),
+            domain_knowledge=(),
+        )
+        answer = (
+            "aging terribly means degyrrate > 0.5 AND severe busbar corrosion "
+            "AND major delamination AND significant microcracking"
+        )
+        response = GroundingCheckResponse(
+            status="complete",
+            column_mapping=state.column_mapping or (),
+            domain_knowledge=(),
+        )
+        before_sha = sql_grounding_state_sha256(state)
+        runtime, result = await self._process_check(
+            task="grounded-expanded-answer",
+            query="Show plants aging terribly.",
+            state=state,
+            response=response,
+            grounding_input={
+                "query": "Show plants aging terribly.",
+                "current_state": state.model_dump(mode="json"),
+                "previous_official_calls": [],
+                "answered_clarifications": [
+                    {"question": "What does aging terribly mean?", "answer": answer}
+                ],
+                "latest_tool": {
+                    "name": "get_column_meaning",
+                    "arguments": {
+                        "table_name": "mechanical_condition",
+                        "column_name": "microcrack_count",
+                    },
+                    "result": "Count of detected module microcracks.",
+                },
+            },
+        )
+
+        self.assertEqual(result.state_update.status, "noop")
+        self.assertEqual(result.response.status, "complete")
         self.assertEqual(result.runtime, runtime)
         self.assertEqual(
             sql_grounding_state_sha256(result.runtime.grounding_state), before_sha
@@ -599,11 +672,11 @@ class FrozenContractTests(unittest.TestCase):
     def test_prompt_and_configuration_hashes_match_current_contract(self) -> None:
         self.assertEqual(
             SQL_GROUNDING_PROMPT_SHA256,
-            "102aa853ad0baef50a3d4f7841846348db1aa78ab1a19080e8d491a4cbf39bac",
+            "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7",
         )
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION_SHA256,
-            "fa3f4fd5f61546c0bc9fee9e2bf586001f4f82bba1d59807aaa783e3d1c02501",
+            "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437",
         )
 
 

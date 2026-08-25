@@ -118,7 +118,7 @@ class RuntimeProfileContractTests(unittest.TestCase):
     def test_grounding_check_writer_contract_hashes_are_unchanged(self) -> None:
         self.assertEqual(
             SQL_GROUNDING_PROMPT_SHA256,
-            "102aa853ad0baef50a3d4f7841846348db1aa78ab1a19080e8d491a4cbf39bac",
+            "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7",
         )
         self.assertEqual(
             SQL_GROUNDING_FORM_SCHEMA_SHA256,
@@ -126,7 +126,7 @@ class RuntimeProfileContractTests(unittest.TestCase):
         )
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION_SHA256,
-            "fa3f4fd5f61546c0bc9fee9e2bf586001f4f82bba1d59807aaa783e3d1c02501",
+            "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437",
         )
         self.assertEqual(
             SQL_GROUNDING_STAGE_PROMPT_SHA256,
@@ -134,7 +134,7 @@ class RuntimeProfileContractTests(unittest.TestCase):
                 "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
                 "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
                 "knowledge": "72ad5fd63b7a0e7a9107231326d2cd2468609ae1a275ab31d6c9c81f3b0c899c",
-                "check": "446f45c12a7d954b438d8a913a8171c0b99e2d6f0aed59f627e407171769f5b2",
+                "check": "fe9fbd964d6b8cb0ce923a1d3a91e407577d8f167ad67bb174da80053a1c38cb",
             },
         )
         self.assertEqual(

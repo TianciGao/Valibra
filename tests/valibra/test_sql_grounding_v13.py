@@ -48,15 +48,15 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "102aa853ad0baef50a3d4f7841846348db1aa78ab1a19080e8d491a4cbf39bac"
+PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "fa3f4fd5f61546c0bc9fee9e2bf586001f4f82bba1d59807aaa783e3d1c02501"
+CONFIG_SHA = "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437"
 WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "72ad5fd63b7a0e7a9107231326d2cd2468609ae1a275ab31d6c9c81f3b0c899c",
-    "check": "446f45c12a7d954b438d8a913a8171c0b99e2d6f0aed59f627e407171769f5b2",
+    "check": "fe9fbd964d6b8cb0ce923a1d3a91e407577d8f167ad67bb174da80053a1c38cb",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -278,6 +278,9 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             "不得复制、改写或概括进",
             "Clarification overlay 只是为已有 Grounding 补充参数的通道",
             "不是替代新 Grounding 语义的通道",
+            "当前这个包含 latest_user_answer 的 Check turn 绝对禁止 complete",
+            "不得把历史上的 B 类语义扩展当作永久禁止 complete 的理由",
+            "全部已充分 Ground 且其他检查均通过时允许 complete",
             "out of scope",
             "不知道",
             "不确定",
