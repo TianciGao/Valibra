@@ -297,12 +297,28 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_answer_expansion_contract_requires_incomplete(self) -> None:
-        self.assertIn("必须重新检查用户整份回答", CHECK_GROUNDING_PROMPT)
-        self.assertIn("字段概念、过滤条件、threshold / literal", CHECK_GROUNDING_PROMPT)
+        self.assertIn("Clarification Scope Gate（最高优先级）", CHECK_GROUNDING_PROMPT)
+        self.assertIn("A. 窄澄清", CHECK_GROUNDING_PROMPT)
+        self.assertIn("B. 语义扩展", CHECK_GROUNDING_PROMPT)
+        self.assertIn("C. 未解决", CHECK_GROUNDING_PROMPT)
+        self.assertIn("字段概念、predicate、业务规则、公式", CHECK_GROUNDING_PROMPT)
         self.assertIn("AND / OR 组合条件", CHECK_GROUNDING_PROMPT)
         self.assertIn(
-            "尚未 Ground 的新概念或 SQL 条件，不得直接 complete",
+            "本轮绝对禁止 complete，即使该回答同时解决了上一轮",
             CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn(
+            "Clarification overlay 只是为已有 Grounding 补充参数的通道",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn("不是替代新 Grounding 语义的通道", CHECK_GROUNDING_PROMPT)
+        self.assertLess(
+            CHECK_GROUNDING_PROMPT.index("0. Clarification Scope Gate"),
+            CHECK_GROUNDING_PROMPT.index("1. 业务规则完整性"),
+        )
+        self.assertLess(
+            CHECK_GROUNDING_PROMPT.index("B. 语义扩展"),
+            CHECK_GROUNDING_PROMPT.index("5. 窄澄清是否直接解决上一轮缺口"),
         )
 
         state = SQLGroundingState(
@@ -355,6 +371,32 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.runtime, runtime)
         self.assertEqual(
             sql_grounding_state_sha256(result.runtime.grounding_state), before_sha
+        )
+
+    def test_scope_gate_limits_user_literals_to_existing_mapped_concepts(self) -> None:
+        self.assertIn(
+            "用户回答只能直接补充 current_state 中已有 mapped concept 的 literal / threshold",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn(
+            "literal 属于回答新引入的概念或 predicate",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn(
+            "该回答本身不能使 State complete",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn(
+            "只有 Gate 0 判定为 A（窄澄清）后",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertIn(
+            "回答解决缺口且第 1–4 项全部通过时，才可返回 complete",
+            CHECK_GROUNDING_PROMPT,
+        )
+        self.assertNotIn(
+            "回答已经直接解决缺口，且 Query + current_state + clarification 已足够时，必须返回 complete",
+            CHECK_GROUNDING_PROMPT,
         )
 
     def test_check_prompt_requires_verbatim_phrase_and_mapping_reuse(self) -> None:
@@ -557,11 +599,11 @@ class FrozenContractTests(unittest.TestCase):
     def test_prompt_and_configuration_hashes_match_current_contract(self) -> None:
         self.assertEqual(
             SQL_GROUNDING_PROMPT_SHA256,
-            "3ba3220a23cbe96b2d7a99f481176da3e8e16b44c8b2b0c39f75f91a5a1ac164",
+            "102aa853ad0baef50a3d4f7841846348db1aa78ab1a19080e8d491a4cbf39bac",
         )
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION_SHA256,
-            "b4368d2b112ca1c42af9889798c48a1327a0e6bbb3c8a68eede0833b7497a249",
+            "fa3f4fd5f61546c0bc9fee9e2bf586001f4f82bba1d59807aaa783e3d1c02501",
         )
 
 

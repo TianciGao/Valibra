@@ -220,7 +220,24 @@ previous_official_calls 和 answered_clarifications 都是只读、State 外的 
 
 你的任务是检查：当前 State 是否已经有足够证据完成 Query。
 
-返回 complete 前必须逐项通过以下五项检查：
+0. Clarification Scope Gate（最高优先级）
+- 只要存在 latest_user_answer（以及后续 Check tool turn 中保留的 answered_clarifications），
+  在检查其他 complete 条件之前，必须先判断该回答属于以下哪一类：
+  A. 窄澄清：回答只为 current_state 中已经存在的 mapped concept 补充具体 literal、threshold
+  或 formula 参数，没有引入新的字段概念、predicate、业务规则、公式或 AND / OR 组合条件。
+  只有这一类回答可以继续下面的完整性检查，并在全部条件通过后允许 complete。
+  B. 语义扩展：回答新增或重新定义了完成 Query 所需的字段概念、predicate、业务规则、公式
+  或 AND / OR 组合条件。本轮绝对禁止 complete，即使该回答同时解决了上一轮
+  missing_information。不得仅依赖 clarification overlay 把这些新增语义交给 Main；如果
+  current_state 已包含相关 target，且存在新的合法 Official evidence direction，只选择一个最具体
+  的工具，否则返回 incomplete + next_tool = null 并 terminal incomplete。不得使用 execute_sql、
+  information_schema 或其他数据库探索重新做 Mapping。
+  C. 未解决：回答模糊、拒绝、不知道、不确定、out of scope 或与缺口无关。必须 incomplete；
+  不得生成或猜测任何缺失语义。
+- B / C 的 incomplete 规则高于所有“回答已经解决上一轮缺口即可 complete”的规则。
+- Clarification overlay 只是为已有 Grounding 补充参数的通道，不是替代新 Grounding 语义的通道。
+
+返回 complete 前必须先通过 Gate 0（如有用户回答），再逐项通过以下五项检查：
 
 1. 业务规则完整性
 - 如果 Query 需要派生指标、计算公式、阈值或业务判断规则，当前 State 必须包含完成 SQL 所需的
@@ -238,8 +255,10 @@ previous_official_calls 和 answered_clarifications 都是只读、State 外的 
 
 3. 关键 literal 的权威性与相关性
 - 只有 Query 所要求的概念或判断确实依赖某个阈值、类别值或条件时，该 literal 才是 complete
-  的必要条件；它必须在 current_state 或本轮合法 Official evidence / 用户回答中有明确、直接、
-  非示例性的依据。
+  的必要条件；它必须在 current_state 或本轮合法 Official evidence 中有明确、直接、非示例性的依据。
+  用户回答只能直接补充 current_state 中已有 mapped concept 的 literal / threshold；如果
+  literal 属于回答新引入的概念或 predicate，该回答本身不能使 State complete，必须先按 Gate 0
+  的语义扩展规则处理。
 - “for example / e.g. / such as / 例如”等措辞中的 literal 只是示例，不能升级为 frozen mandatory
   predicate，不能要求 Main 把它写进 SQL，也不能据此猜测新的阈值。
 - 如果 Query 明确要求某个固定阈值分类，而 State 只有示例性 literal，必须 incomplete，并指出缺少
@@ -260,29 +279,17 @@ previous_official_calls 和 answered_clarifications 都是只读、State 外的 
   已明确，且 Query 自身已经给出排序、最值或比较语义，则不得仅因 State 没有重复写一个聚合函数
   而制造缺口；其他 completeness 条件满足时可以 complete。
 
-5. latest_user_answer 是否直接解决上一轮缺口
-- latest_user_answer 只是候选证据，不等于上一轮 missing_information 已解决。只有回答
-  明确、直接提供上一轮缺少的具体 threshold、formula、literal 或 business rule，才能作为
-  新证据继续 Check。例如缺少 threshold 时，用户明确回答“1000 hours”才可以解决该缺口。
-- latest_user_answer 是 State 外的 phase-local clarification evidence，不是 Official schema、metadata
-  或 business knowledge evidence。即使回答已经解决缺口，也不得把回答复制、改写或概括进
+5. 窄澄清是否直接解决上一轮缺口
+- 只有 Gate 0 判定为 A（窄澄清）后，才检查回答是否明确、直接提供上一轮缺少的具体
+  threshold、formula 参数、literal 或 business-rule 参数。例如缺少 threshold 时，用户明确回答
+  “1000 hours”可以解决该缺口；latest_user_answer 仍不等于缺口自动解决。
+- 回答解决缺口且第 1–4 项全部通过时，才可返回 complete、missing_information = null、
+  next_tool = null；column_mapping 和 domain_knowledge 必须与 current_state 原样保持一致。
+- 回答没有解决缺口时必须 incomplete。没有新的合法补证据方向时，next_tool = null 并 terminal
+  incomplete；不得为了满足 Form 重复 ask_user，也不得伪造新的 gap 或 tool。
+- latest_user_answer 和 answered_clarifications 始终是 State 外的 phase-local clarification evidence，
+  不是 Official schema、metadata 或 business knowledge evidence；不得复制、改写或概括进
   tables、join_keys、column_mapping 或 domain_knowledge。
-- 回答已经直接解决缺口，且 Query + current_state + clarification 已足够时，必须返回 complete、
-  next_tool = null，并把 column_mapping 和 domain_knowledge 与 current_state 原样保持一致；
-  clarification 会由独立 overlay 传给 Main，不需要也不允许写入四维 State。
-- 在返回 complete 前，必须重新检查用户整份回答，而不只是检查它是否回答了上一轮缺口。回答中
-  新增的字段概念、过滤条件、threshold / literal、业务规则、公式以及 AND / OR 组合条件，都必须
-  已由 current_state 的 column_mapping / domain_knowledge 充分支持。若回答只是给一个已经映射的
-  概念补充具体 literal，可以在其他条件齐全时 complete，State 保持不变。
-- 如果回答引入了 current_state 尚未 Ground 的新概念或 SQL 条件，不得直接 complete，不得自动
-  生成 mapping。必须返回 incomplete，一次指出一个最具体缺口：有新的合法 Official evidence
-  direction 时选择一个工具，否则 next_tool = null 并 terminal incomplete。
-- “out of scope”、不知道、不确定、拒绝回答、模糊回答或与缺口无关的回答，都不是有效证据。
-  对这些回答不得 complete，不得凭空生成或猜测 threshold、formula、literal 或 business rule，
-  也不得修改任何四维 State 字段来猜测缺失语义。
-- 如果用户没有解决上一轮缺口，Check 仍必须为 incomplete。如果没有新的合法补证据方向，
-  next_tool 必须为 null，作为 terminal incomplete 直接 fail-closed；不得为了满足 Form 重复
-  ask_user，也不得伪造新的 gap 或 tool。
 
 只有 Query 所需的字段、关系、精确业务规则/公式和关键 literal 都已齐全且彼此语义一致时，
 才能 complete。Query 本身不需要规则、公式或 literal 时，不得把其缺席凭空当成缺口。

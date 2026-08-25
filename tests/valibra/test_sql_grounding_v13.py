@@ -48,15 +48,15 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "3ba3220a23cbe96b2d7a99f481176da3e8e16b44c8b2b0c39f75f91a5a1ac164"
+PROMPT_SHA = "102aa853ad0baef50a3d4f7841846348db1aa78ab1a19080e8d491a4cbf39bac"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "b4368d2b112ca1c42af9889798c48a1327a0e6bbb3c8a68eede0833b7497a249"
+CONFIG_SHA = "fa3f4fd5f61546c0bc9fee9e2bf586001f4f82bba1d59807aaa783e3d1c02501"
 WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
     "knowledge": "72ad5fd63b7a0e7a9107231326d2cd2468609ae1a275ab31d6c9c81f3b0c899c",
-    "check": "6eb077027bf07d517ad5c8daf20ca5d1ab8c82282984ec632a3039f6b64f7d3c",
+    "check": "446f45c12a7d954b438d8a913a8171c0b99e2d6f0aed59f627e407171769f5b2",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
@@ -266,34 +266,44 @@ class SQLGroundingV13FormTests(unittest.TestCase):
     def test_check_prompt_requires_clarification_to_resolve_the_exact_gap(self) -> None:
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         required_fragments = (
-            "latest_user_answer 只是候选证据",
-            "不等于上一轮 missing_information 已解决",
+            "Clarification Scope Gate（最高优先级）",
+            "A. 窄澄清",
+            "B. 语义扩展",
+            "C. 未解决",
+            "只有 Gate 0 判定为 A（窄澄清）后",
             "明确、直接提供上一轮缺少的具体",
+            "latest_user_answer 仍不等于缺口自动解决",
             "State 外的 phase-local clarification evidence",
             "不是 Official schema、metadata",
-            "不得把回答复制、改写或概括进",
-            "clarification 会由独立 overlay 传给 Main",
+            "不得复制、改写或概括进",
+            "Clarification overlay 只是为已有 Grounding 补充参数的通道",
+            "不是替代新 Grounding 语义的通道",
             "out of scope",
             "不知道",
             "不确定",
-            "拒绝回答",
-            "模糊回答",
-            "与缺口无关的回答",
-            "不得凭空生成或猜测 threshold、formula、literal 或 business rule",
-            "也不得修改任何四维 State 字段",
-            "Check 仍必须为 incomplete",
-            "next_tool 必须为 null",
-            "terminal incomplete 直接 fail-closed",
+            "回答模糊、拒绝",
+            "与缺口无关",
+            "不得生成或猜测任何缺失语义",
+            "回答没有解决缺口时必须 incomplete",
+            "next_tool = null 并 terminal",
             "不得为了满足 Form 重复",
             "不得伪造新的 gap 或 tool",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, check_prompt)
-        self.assertIn("用户明确回答“1000 hours”", check_prompt)
+        self.assertIn("“1000 hours”可以解决该缺口", check_prompt)
         self.assertIn(
             "column_mapping 和 domain_knowledge 必须与 current_state",
             check_prompt,
+        )
+        self.assertLess(
+            check_prompt.index("0. Clarification Scope Gate"),
+            check_prompt.index("1. 业务规则完整性"),
+        )
+        self.assertLess(
+            check_prompt.index("B. 语义扩展"),
+            check_prompt.index("5. 窄澄清是否直接解决上一轮缺口"),
         )
 
     def test_check_completeness_examples_keep_the_strict_existing_form(self) -> None:
