@@ -50,7 +50,7 @@ from valibra_agent.sql_grounding.updater import (
 QUERY = "Show the maintenance cost for active assets."
 PROMPT_SHA = "db5a44e94a0e7fba92e78e6ca99e6b324affdee92aaed4dcd45010ff03876454"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "31115d248a048c76a9ffd947aade7c4fa725915f82243809f06b8e14cbd98f0c"
+CONFIG_SHA = "bc3a636fbd12796184e74d850ae69d7a89fbf5c39165d2c4e9db856b36f1a43a"
 WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
