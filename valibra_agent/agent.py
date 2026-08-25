@@ -1,4 +1,4 @@
-"""Valibra Agent：保留 Baseline 行为，旁路维护临时需求 Frame。"""
+"""Valibra SQL Grounding Agent built around the frozen Official lifecycle."""
 
 from shared.config import settings
 from system_agent.agent import (
@@ -20,7 +20,7 @@ from valibra_agent.grounding_callbacks import (
 
 
 def build_agent(mode: str = "a-interact") -> Agent:
-    """构建规则 Shadow；Prompt、工具和主行为仍使用 Baseline。"""
+    """Build the SQL Grounding agent while reusing Official tools and model."""
 
     if mode != "a-interact":
         # 非 a-interact 模式直接使用原 Agent，保证接口兼容。

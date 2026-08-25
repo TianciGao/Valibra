@@ -116,14 +116,6 @@ GROUNDING_FAILED_CLOSED_CALLS_KEY = "valibra:sql_grounding_failed_closed_calls"
 GROUNDING_PENDING_CHECK_KEY = "valibra:sql_grounding_pending_check"
 GROUNDING_CHECK_AUDITS_KEY = "valibra:sql_grounding_check_audits"
 
-# The frozen P6 export module imports these names at module load.  They are
-# retained only so that historical, read-only export code remains importable;
-# SG3 never reads either key and never runs the retired semantic core.
-GROUNDING_LEGACY_INITIALIZATION_UNKNOWN_KEY = (
-    "valibra:frame_initialization_legacy_unknown"
-)
-REQUIREMENT_VIEW_AUDIT_KEY = GROUNDING_VIEW_AUDIT_KEY
-
 GROUNDING_VIEW_BEGIN = "[VALIBRA GROUNDING VIEW BEGIN]"
 GROUNDING_VIEW_END = "[VALIBRA GROUNDING VIEW END]"
 CONTROL_HINT_BEGIN = "[VALIBRA CONTROL HINT BEGIN]"

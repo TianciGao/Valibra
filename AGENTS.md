@@ -21,7 +21,6 @@
 
 ## SQL Grounding V1 Migration Boundary
 
-- 旧 Runtime key 固定为 `valibra:grounding_runtime`；新 Runtime key 固定为 `valibra:sql_grounding_runtime`。
-- 新旧 Runtime 不做自动迁移；旧结果只读归档，新实验必须创建新 Session。
-- `valibra_agent/requirement_grounding/` 暂时只读保留：不得删除，也不得继续扩展旧 Requirement Grounding 语义。
+- 当前 Runtime key 固定为 `valibra:sql_grounding_runtime`；旧 Runtime 只存在于不可变 tag 和历史 evidence，不做自动迁移。
+- 新实验必须创建新 Session；不得从历史 Runtime payload 恢复当前 SQL Grounding State。
 - 每个 SG 阶段只能实现当轮明确授权的范围；不得提前创建或实现后续阶段的 SQL Grounding 业务代码。

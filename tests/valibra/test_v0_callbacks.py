@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, patch
 from system_agent import callbacks as baseline_callbacks
 from system_agent.tools import get_ainteract_tools
 from valibra_agent import grounding_callbacks
-from valibra_agent.requirement_grounding.models import RequirementGroundingRuntime
 
 
 _RULE_MODE_PATCHER = None

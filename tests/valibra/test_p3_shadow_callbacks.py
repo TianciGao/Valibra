@@ -15,8 +15,6 @@ from google.adk.tools.tool_context import ToolContext
 from system_agent import callbacks as baseline_callbacks
 from valibra_agent import grounding_callbacks
 from valibra_agent.agent import build_agent as build_valibra_agent
-from valibra_agent.requirement_grounding.models import RequirementGroundingRuntime
-from valibra_agent.requirement_grounding.observations import stable_digest
 
 
 _RULE_MODE_PATCHER = None
@@ -55,12 +53,6 @@ def _context(state, call_id, invocation_id="invocation-shadow"):
         state=state,
         function_call_id=call_id,
         invocation_id=invocation_id,
-    )
-
-
-def _runtime(state):
-    return RequirementGroundingRuntime.model_validate(
-        state[grounding_callbacks.GROUNDING_RUNTIME_KEY]
     )
 
 

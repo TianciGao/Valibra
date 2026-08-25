@@ -28,7 +28,6 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 SQL_GROUNDING_RUNTIME_KEY = "valibra:sql_grounding_runtime"
-LEGACY_GROUNDING_RUNTIME_KEY = "valibra:grounding_runtime"
 
 EXPECTED_SQLGLOT_VERSION = "26.16.4"
 SQLGLOT_VERSION = version("sqlglot")

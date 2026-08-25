@@ -10,7 +10,6 @@ from valibra_agent.sql_grounding import (
     CORRELATED_RELATION_AST_WHITELIST,
     FIELD_EXPRESSION_AST_WHITELIST,
     FIELD_EXPRESSION_FUNCTION_WHITELIST,
-    LEGACY_GROUNDING_RUNTIME_KEY,
     RELATION_EXPRESSION_AST_WHITELIST,
     SAME_TABLE_MULTI_RECORD_AST_WHITELIST,
     SQLGLOT_VERSION,
@@ -1026,7 +1025,6 @@ class ResponseRuntimeAndCanonicalTests(unittest.TestCase):
         }
         with self.assertRaises(ValidationError):
             GroundingRuntime.model_validate(old_requirement_runtime)
-        self.assertEqual(LEGACY_GROUNDING_RUNTIME_KEY, "valibra:grounding_runtime")
         self.assertEqual(SQL_GROUNDING_RUNTIME_KEY, "valibra:sql_grounding_runtime")
 
 
