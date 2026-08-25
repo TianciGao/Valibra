@@ -180,6 +180,11 @@ KNOWLEDGE_GROUNDING_PROMPT = (
 - 相反、相邻、上游、下游或派生概念都不能代替 Query 真正要求的精确概念。
 - 如果没有精确匹配的 knowledge，不要猜或选择最接近项，selected_knowledge_ids 返回 []。
 - 多个 knowledge id 只能表示完成 Query 确实同时需要多条规则，不能表示候选项。
+- 如果 selected_knowledge_ids 返回 []，column_mapping 必须与输入 current_state.column_mapping
+  逐项、逐字、顺序完全一致；不得改字段、JSON path、组合表达式或公式。
+- 如果 selected_knowledge_ids 非空，只能修改被选中的 Official knowledge 明确、直接支持修正的
+  phrase；其他 phrase 的 mapping 必须与输入 current_state.column_mapping 原样保持一致。不得借一条
+  knowledge 顺手修改它没有直接提供依据的其他业务概念。
 - 如果精确 knowledge 证明字段 A 错、字段 B 对，可以把 column_mapping 从 A 修正为 B；B 必须
   有当前 candidate-table column meanings 支持。
 
@@ -265,6 +270,13 @@ previous_official_calls 和 answered_clarifications 都是只读、State 外的 
 - 回答已经直接解决缺口，且 Query + current_state + clarification 已足够时，必须返回 complete、
   next_tool = null，并把 column_mapping 和 domain_knowledge 与 current_state 原样保持一致；
   clarification 会由独立 overlay 传给 Main，不需要也不允许写入四维 State。
+- 在返回 complete 前，必须重新检查用户整份回答，而不只是检查它是否回答了上一轮缺口。回答中
+  新增的字段概念、过滤条件、threshold / literal、业务规则、公式以及 AND / OR 组合条件，都必须
+  已由 current_state 的 column_mapping / domain_knowledge 充分支持。若回答只是给一个已经映射的
+  概念补充具体 literal，可以在其他条件齐全时 complete，State 保持不变。
+- 如果回答引入了 current_state 尚未 Ground 的新概念或 SQL 条件，不得直接 complete，不得自动
+  生成 mapping。必须返回 incomplete，一次指出一个最具体缺口：有新的合法 Official evidence
+  direction 时选择一个工具，否则 next_tool = null 并 terminal incomplete。
 - “out of scope”、不知道、不确定、拒绝回答、模糊回答或与缺口无关的回答，都不是有效证据。
   对这些回答不得 complete，不得凭空生成或猜测 threshold、formula、literal 或 business rule，
   也不得修改任何四维 State 字段来猜测缺失语义。
@@ -324,6 +336,9 @@ ask_user：
 - ask_user 的 kind 只能精确为 user_intent 或 missing_knowledge。
 - ask_user 的 question 只写一次，只能位于 arguments.question；user_clarification_request
   只填 phrase 和 kind，不得重复填写 question。
+- user_clarification_request.phrase 必须是 query 或 follow_up 中逐字连续出现的片段。如果对应概念
+  已存在于 current_state.column_mapping，优先直接复用该 mapping.phrase，不能添加原 Query 中没有
+  的状态、column、identifier 或其他解释性后缀。
 - ask_user 只用于用户才能回答的意图或缺失知识，不能询问数据库、schema 或 SQL 实现问题。
 - 不允许调用 get_schema、get_all_column_meanings、get_all_knowledge_definitions 或 submit_sql。
 - column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有新证据需要修改时，必须原样保留，不能随意清空。

@@ -48,15 +48,15 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "db5a44e94a0e7fba92e78e6ca99e6b324affdee92aaed4dcd45010ff03876454"
+PROMPT_SHA = "3ba3220a23cbe96b2d7a99f481176da3e8e16b44c8b2b0c39f75f91a5a1ac164"
 FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "bc3a636fbd12796184e74d850ae69d7a89fbf5c39165d2c4e9db856b36f1a43a"
+CONFIG_SHA = "b4368d2b112ca1c42af9889798c48a1327a0e6bbb3c8a68eede0833b7497a249"
 WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
 STAGE_PROMPT_SHA = {
     "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
     "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
-    "knowledge": "4f805cabaa53200dfac4b5226d0bc90306e9c35164c8aaf1ae7ad47f56e42e8f",
-    "check": "128312a48ab98224ee56fa84a9bc77ba83e87e865ff5c76bb45705e2a81c1ff9",
+    "knowledge": "72ad5fd63b7a0e7a9107231326d2cd2468609ae1a275ab31d6c9c81f3b0c899c",
+    "check": "6eb077027bf07d517ad5c8daf20ca5d1ab8c82282984ec632a3039f6b64f7d3c",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",

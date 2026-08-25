@@ -30,7 +30,7 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "db5a44e94a0e7fba92e78e6ca99e6b324affdee92aaed4dcd45010ff03876454"
+PROMPT_SHA = "3ba3220a23cbe96b2d7a99f481176da3e8e16b44c8b2b0c39f75f91a5a1ac164"
 
 
 def _environment(key_file: Path) -> dict[str, str]:

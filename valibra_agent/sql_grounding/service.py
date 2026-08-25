@@ -234,6 +234,10 @@ def _materialize_stage_response(
     elif call_kind == "knowledge" and isinstance(
         response, KnowledgeGroundingResponse
     ):
+        _validate_knowledge_mapping_mutation(
+            old,
+            response,
+        )
         domain_knowledge = _materialize_official_business_rules(
             response.selected_knowledge_ids,
             grounding_input=grounding_input,
@@ -261,6 +265,19 @@ def _materialize_stage_response(
         user_clarification_requests=(),
         next_focus_dimension=focus,
     )
+
+
+def _validate_knowledge_mapping_mutation(
+    old: SQLGroundingState,
+    response: KnowledgeGroundingResponse,
+) -> None:
+    """Forbid mapping edits when no Official knowledge was selected."""
+
+    if not response.selected_knowledge_ids:
+        if response.column_mapping != (old.column_mapping or ()):
+            raise SQLGroundingValidationError(
+                "Knowledge cannot change column_mapping without selected Official knowledge"
+            )
 
 
 _OFFICIAL_BULK_KNOWLEDGE_FIELDS = frozenset(
