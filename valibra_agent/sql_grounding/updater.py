@@ -1,4 +1,28 @@
-"""Strict SQL Grounding updater and opt-in LiteLLM Provider adapter."""
+"""Strict SQL Grounding updater and opt-in LiteLLM Provider adapter.
+Structure
+  ↓
+Mapping
+  ↓
+Knowledge
+  ↓
+Check Provider
+  ↓
+┌─ status=complete
+│    → freeze 4D State
+│    → 进入 Main
+│
+├─ status=incomplete + next_tool
+│    → 调 1 个 Official tool
+│    → 把结果记入 phase-local context
+│    → 再调用一次 Check Provider
+│    → 循环
+│
+└─ status=incomplete + next_tool=null
+     → terminal incomplete
+     → fail-closed
+     → 不进 Main
+
+"""
 
 from __future__ import annotations
 
