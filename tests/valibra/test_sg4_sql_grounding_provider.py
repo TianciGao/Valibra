@@ -32,6 +32,8 @@ from valibra_agent.sql_grounding.observations import build_sql_grounding_observa
 from valibra_agent.sql_grounding.service import process_sql_grounding_observation
 from valibra_agent.sql_grounding.updater import (
     DEFAULT_GROUNDING_TIMEOUT_SECONDS,
+    MAPPING_REGROUNDING_GROUNDING_PROMPT,
+    MAPPING_REGROUNDING_PROMPT_SHA256,
     SQL_GROUNDING_CONFIGURATION_SHA256,
     SQL_GROUNDING_FORM_SCHEMA,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
@@ -58,10 +60,10 @@ from valibra_agent.sql_grounding.updater import (
 
 OLD_PROMPT_SHA = "17455ea076632901a9c2aa3bada96fe4c06baa500e0ce271be854d681ab74962"
 OLD_CONFIG_SHA = "405704b6798c4662df4dbe425ca0d15f284776551827e636bd0297f4f53a13f0"
-PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
-FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
+PROMPT_SHA = "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd"
+FORM_SHA = "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd"
 PRE_R1_CONFIG_SHA = "489a7185cb711429b4c5346481ae639851f02ad41893554cbedb6ca703d2ba9e"
-CONFIG_SHA = "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437"
+CONFIG_SHA = "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110"
 QUERY = "What is the maintenance cost?"
 
 
@@ -292,6 +294,44 @@ class ProviderAdapterOfflineTests(unittest.IsolatedAsyncioTestCase):
                 PROJECT_ROOT,
                 self.env | {"GROUNDING_TIMEOUT_SECONDS": "300"},
             )
+
+    def test_mapping_regrounding_provider_request_uses_isolated_prompt(self):
+        llm, provider = self.configs()
+        input_payload = {
+            "query": QUERY,
+            "current_state": {
+                "tables": ["assets"],
+                "join_keys": [],
+                "column_mapping": [],
+                "domain_knowledge": [],
+            },
+            "column_meanings": {"assets.metric": "REAL. Direct metric."},
+            "regrounding_context": {
+                "decision": "REGROUND_MAPPING",
+                "check_gap": None,
+                "answered_clarifications": [],
+                "official_knowledge": [],
+            },
+        }
+        request = GroundingLLMRequest(
+            prompt=MAPPING_REGROUNDING_GROUNDING_PROMPT,
+            input_json=canonical_json(input_payload),
+            response_schema=SQL_GROUNDING_STAGE_FORM_SCHEMAS["mapping"],
+            call_kind="mapping",
+        )
+        audit, provider_kwargs = _build_provider_request(
+            request,
+            llm,
+            provider,
+            api_key="synthetic-offline-credential",
+        )
+        self.assertEqual(
+            provider_kwargs["messages"][0]["content"],
+            MAPPING_REGROUNDING_GROUNDING_PROMPT,
+        )
+        self.assertEqual(
+            audit["prompt_sha256"], MAPPING_REGROUNDING_PROMPT_SHA256
+        )
 
     async def test_litellm_transformation_preserves_json_object_in_http_body(self):
         llm, provider = self.configs()

@@ -76,11 +76,35 @@ DomainKnowledgeKind: TypeAlias = Literal[
     "runtime_state",
     "database_capability",
 ]
+UnresolvedMappingReason: TypeAlias = Literal[
+    "ambiguous_user_intent",
+    "no_direct_metadata",
+    "derived_rule_required",
+    "scope_insufficient",
+]
 UserClarificationKind: TypeAlias = Literal[
     "user_intent",
     "missing_knowledge",
 ]
+CheckRequirementType: TypeAlias = Literal[
+    "threshold",
+    "category",
+    "literal",
+    "predicate",
+]
 GroundingCheckStatus: TypeAlias = Literal["complete", "incomplete"]
+GroundingClarificationRoute: TypeAlias = Literal[
+    "none",
+    "stay_check",
+    "restart_grounding",
+    "terminal",
+]
+FinalRegroundingDecision: TypeAlias = Literal[
+    "NO_REGROUND",
+    "REGROUND_MAPPING",
+    "REGROUND_STRUCTURE",
+    "TERMINAL",
+]
 GroundingCheckToolName: TypeAlias = Literal[
     "ask_user",
     "get_column_meaning",
@@ -296,6 +320,22 @@ class ColumnMapping(ContractModel):
         for target in value:
             canonicalize_field_expression(target)
         return _sorted_unique(value, label="column_mapping.targets")
+
+
+class UnresolvedMapping(ContractModel):
+    """One verbatim Query concept that Mapping could not directly ground."""
+
+    phrase: Annotated[str, Field(min_length=1, max_length=MAX_PHRASE_CHARS)]
+    reason: UnresolvedMappingReason
+
+    @field_validator("phrase")
+    @classmethod
+    def validate_phrase_shape(cls, value: str) -> str:
+        return _require_bounded_text(
+            value,
+            label="unresolved_mappings.phrase",
+            maximum=MAX_PHRASE_CHARS,
+        )
 
 
 class DomainKnowledge(ContractModel):
@@ -528,6 +568,10 @@ class MappingGroundingResponse(ContractModel):
         tuple[ColumnMapping, ...],
         Field(max_length=MAX_COLUMN_MAPPINGS),
     ]
+    unresolved_mappings: Annotated[
+        tuple[UnresolvedMapping, ...],
+        Field(max_length=MAX_COLUMN_MAPPINGS),
+    ]
 
     @field_validator("tables")
     @classmethod
@@ -552,6 +596,26 @@ class MappingGroundingResponse(ContractModel):
         if len(phrases) != len(set(phrases)):
             raise ValueError("column_mapping must not contain duplicate phrases")
         return tuple(sorted(value, key=lambda item: item.phrase))
+
+    @field_validator("unresolved_mappings")
+    @classmethod
+    def validate_unresolved_mappings(
+        cls, value: tuple[UnresolvedMapping, ...]
+    ) -> tuple[UnresolvedMapping, ...]:
+        phrases = [item.phrase for item in value]
+        if len(phrases) != len(set(phrases)):
+            raise ValueError("unresolved_mappings must not contain duplicate phrases")
+        return tuple(sorted(value, key=lambda item: item.phrase))
+
+    @model_validator(mode="after")
+    def validate_mapping_partition(self) -> "MappingGroundingResponse":
+        mapped = {item.phrase for item in self.column_mapping}
+        unresolved = {item.phrase for item in self.unresolved_mappings}
+        if mapped & unresolved:
+            raise ValueError(
+                "a phrase cannot be both column_mapping and unresolved_mappings"
+            )
+        return self
 
 
 class KnowledgeGroundingResponse(ContractModel):
@@ -585,12 +649,19 @@ class KnowledgeGroundingResponse(ContractModel):
             raise ValueError("selected_knowledge_ids must not contain duplicates")
         return tuple(sorted(value))
 
-
 class GroundingCheckClarificationProposal(ContractModel):
     """Provider-only clarification metadata; the question has one source."""
 
     phrase: Annotated[str, Field(min_length=1, max_length=MAX_PHRASE_CHARS)]
     kind: UserClarificationKind
+    requirement_type: CheckRequirementType | None = None
+    related_mapping_phrases: Annotated[
+        tuple[
+            Annotated[str, Field(min_length=1, max_length=MAX_PHRASE_CHARS)],
+            ...,
+        ],
+        Field(max_length=MAX_COLUMN_MAPPINGS),
+    ] = ()
 
     @field_validator("phrase")
     @classmethod
@@ -600,6 +671,34 @@ class GroundingCheckClarificationProposal(ContractModel):
             label="Grounding Check clarification phrase",
             maximum=MAX_PHRASE_CHARS,
         )
+
+    @field_validator("related_mapping_phrases")
+    @classmethod
+    def validate_related_mapping_phrases(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        for phrase in value:
+            _require_bounded_text(
+                phrase,
+                label="Grounding Check related mapping phrase",
+                maximum=MAX_PHRASE_CHARS,
+            )
+        if len(value) != len(set(value)):
+            raise ValueError("related_mapping_phrases must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def validate_requirement_event_shape(
+        self,
+    ) -> "GroundingCheckClarificationProposal":
+        has_type = self.requirement_type is not None
+        has_relations = bool(self.related_mapping_phrases)
+        if has_type != has_relations:
+            raise ValueError(
+                "requirement_type and related_mapping_phrases must be provided together"
+            )
+        return self
 
 
 class GroundingCheckToolRequest(ContractModel):
@@ -666,6 +765,7 @@ class GroundingCheckResponse(ContractModel):
     """Unified post-grounding completeness decision and bounded State correction."""
 
     status: GroundingCheckStatus
+    clarification_route: GroundingClarificationRoute
     missing_information: Annotated[
         str,
         Field(min_length=1, max_length=MAX_CLARIFICATION_QUESTION_CHARS),
@@ -679,6 +779,20 @@ class GroundingCheckResponse(ContractModel):
         tuple[DomainKnowledge, ...],
         Field(max_length=MAX_DOMAIN_KNOWLEDGE),
     ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_complete_blank_missing_information(cls, value: Any) -> Any:
+        """Canonicalize only the lexical no-gap spelling for complete Check."""
+
+        if not isinstance(value, dict) or value.get("status") != "complete":
+            return value
+        missing_information = value.get("missing_information")
+        if not isinstance(missing_information, str) or missing_information.strip():
+            return value
+        normalized = dict(value)
+        normalized["missing_information"] = None
+        return normalized
 
     @field_validator("missing_information")
     @classmethod
@@ -713,6 +827,12 @@ class GroundingCheckResponse(ContractModel):
 
     @model_validator(mode="after")
     def validate_decision(self) -> "GroundingCheckResponse":
+        if self.clarification_route in {"restart_grounding", "terminal"}:
+            if self.status != "incomplete" or self.next_tool is not None:
+                raise ValueError(
+                    f"{self.clarification_route} requires incomplete Check "
+                    "without an Official next_tool"
+                )
         if self.status == "complete":
             if self.missing_information is not None or self.next_tool is not None:
                 raise ValueError("complete Check cannot request more information")
@@ -721,11 +841,28 @@ class GroundingCheckResponse(ContractModel):
         return self
 
 
+class FinalRegroundingGateResponse(ContractModel):
+    """Thin end-of-round invalidation decision; never a State patch."""
+
+    decision: FinalRegroundingDecision
+    reason: Annotated[str, Field(min_length=1, max_length=2048)]
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        return _require_bounded_text(
+            value,
+            label="final re-Grounding reason",
+            maximum=2048,
+        )
+
+
 StageGroundingResponse: TypeAlias = (
     StructureGroundingResponse
     | MappingGroundingResponse
     | KnowledgeGroundingResponse
     | GroundingCheckResponse
+    | FinalRegroundingGateResponse
 )
 
 
@@ -1536,6 +1673,22 @@ def canonical_json(value: BaseModel | Any) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def domain_knowledge_semantic_ref(knowledge: DomainKnowledge) -> str:
+    """Return a stable content identity for one persisted knowledge entry."""
+
+    item = DomainKnowledge.model_validate(knowledge)
+    digest = hashlib.sha256(
+        canonical_json(
+            {
+                "content": item.content,
+                "kind": item.kind,
+                "version": 1,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"kref_v1_{digest}"
 
 
 def sql_grounding_state_sha256(state: SQLGroundingState) -> str:

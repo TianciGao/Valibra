@@ -27,6 +27,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.config import settings
 from valibra_agent.evaluation import export_valibra_result
 from valibra_agent.runtime_profile import valibra_execution_profile
+from valibra_agent.sql_grounding.main_entry_carrier import (
+    MAIN_EXECUTION_ENVELOPES_KEY,
+    build_main_execution_envelopes,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s") # 设置日志格式和级别
 logger = logging.getLogger(__name__)
@@ -90,6 +94,7 @@ async def init_agent_session(task_id: str, task_data: dict, budget: float): # �
         "phase1_completed": False,
         "phase2_completed": False,
         "task_done": False,
+        MAIN_EXECUTION_ENVELOPES_KEY: build_main_execution_envelopes(task_data),
     } # 定义一个字典，包含任务 ID、数据库名称、用户查询、当前阶段、剩余预算、初始预算、总奖励、对话历史、工具轨迹、ADK 事件、阶段完成状态和任务完成状态等信息
     return await _post(
         f"{SYSTEM_AGENT_URL}/init_session",

@@ -16,6 +16,7 @@ from shared.config import (
     settings,
 )
 from valibra_agent.adk_runtime import AdkRuntime
+from valibra_agent.fallback.ainteract_fallback import fallback_configuration_report
 from valibra_agent.runtime_profile import valibra_execution_profile
 from valibra_agent.sql_grounding.updater import sql_grounding_provider_health_report
 
@@ -99,6 +100,7 @@ def _configuration_summary() -> Dict[str, Any]:
         "attempt_gate_budget_liveness_bypass": research_profile,
         "control_enabled": True,
         "attempt_gate_enabled": research_profile,
+        "ainteract_fallback": fallback_configuration_report(),
     }
 
 

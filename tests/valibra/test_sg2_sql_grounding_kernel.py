@@ -47,9 +47,9 @@ FOLLOW_POWER = "also include current power"
 RATIO_RULE = "revenue impact ratio = maintenance cost / total revenue"
 UPDATED_RATIO_RULE = "revenue impact ratio uses adjusted maintenance cost"
 
-PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
-FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437"
+PROMPT_SHA = "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd"
+FORM_SHA = "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd"
+CONFIG_SHA = "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110"
 
 KNOWN_TABLES = frozenset(
     {
@@ -273,8 +273,8 @@ class UpdaterContractTests(unittest.IsolatedAsyncioTestCase):
             "Official evidence",
             "逐字来自 query",
             "selected_knowledge_ids",
-            "不要复制 definition",
-            "不能包含 SQL 语句",
+            "不能自行充当 Official knowledge",
+            "表达式不能包含完整 SQL 语句",
             "只返回裸 JSON",
         ):
             self.assertIn(phrase, SQL_GROUNDING_PROMPT)

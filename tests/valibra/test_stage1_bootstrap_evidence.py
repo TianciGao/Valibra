@@ -23,6 +23,7 @@ from valibra_agent.sql_grounding.models import (
     DomainKnowledge,
     GroundingLLMResponse,
     GroundingRuntime,
+    MappingGroundingResponse,
     SQLGroundingState,
     ValidationContext,
     validate_sql_grounding_state,
@@ -130,7 +131,12 @@ class _StagedOfflineUpdater:
             )
             focus = "none"
         return GroundingUpdaterResult(
-            response=GroundingLLMResponse(
+            response=MappingGroundingResponse(
+                tables=candidate.tables or (),
+                join_keys=candidate.join_keys or (),
+                column_mapping=candidate.column_mapping or (),
+                unresolved_mappings=(),
+            ) if "column_meanings" in fields else GroundingLLMResponse(
                 sql_grounding_state=candidate,
                 user_clarification_requests=(),
                 next_focus_dimension=focus,
@@ -316,17 +322,19 @@ class Stage1BootstrapEvidenceTests(unittest.IsolatedAsyncioTestCase):
             "current_state",
             "knowledge_definitions",
             "relevant_column_meanings",
+            "unresolved_mappings",
         })
         self.assertEqual(
             [set(item) for item in updater.inputs],
             [
                 {"query", "current_state", "schema"},
-                {"query", "current_state", "column_meanings"},
+                {"query", "current_state", "column_meanings", "unresolved_mappings"},
                 {
                     "query",
                     "current_state",
                     "knowledge_definitions",
                     "relevant_column_meanings",
+                    "unresolved_mappings",
                 },
             ],
         )

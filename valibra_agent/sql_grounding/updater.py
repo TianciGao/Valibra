@@ -12,10 +12,14 @@ Check Provider
 │    → 进入 Main
 │
 ├─ status=incomplete + next_tool
-│    → 调 1 个 Official tool
-│    → 把结果记入 phase-local context
-│    → 再调用一次 Check Provider
-│    → 循环
+│    ├─ ask_user
+│    │    → 回答写入 State-external clarification overlay
+│    │    → 在同一 Official phase 重新执行 Structure → Mapping → Knowledge → Check
+│    │
+│    └─ 其他 Official evidence tool
+│         → 把结果记入 phase-local context
+│         → 再调用一次 Check Provider
+│         → 循环
 │
 └─ status=incomplete + next_tool=null
      → terminal incomplete
@@ -48,6 +52,7 @@ from shared.model_presets import load_model_preset
 
 from valibra_agent.sql_grounding.models import (
     ContractModel,
+    FinalRegroundingGateResponse,
     GroundingCheckResponse,
     GroundingLLMResponse,
     GroundingRuntime,
@@ -55,6 +60,7 @@ from valibra_agent.sql_grounding.models import (
     MappingGroundingResponse,
     StageGroundingResponse,
     StructureGroundingResponse,
+    UnresolvedMapping,
     UserClarificationRecord,
     canonical_json,
 )
@@ -74,11 +80,15 @@ DEFAULT_GROUNDING_TIMEOUT_SECONDS = 600.0
 DEFAULT_GROUNDING_MAX_CALLS_PER_TASK = 32
 MAX_CHECK_PHASE_LOCAL_CALLS = 32
 MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS = 16
+MAX_P2_CHECK_CUMULATIVE_EVIDENCE_ENTRIES = 4
+MAX_P2_CHECK_CUMULATIVE_EVIDENCE_CHARS = 4_096
+MAX_P2_CHECK_CUMULATIVE_RESULT_CHARS = 2_048
 GroundingCallKind: TypeAlias = Literal[
     "structure",
     "mapping",
     "knowledge",
     "check",
+    "final_gate",
 ]
 SQL_GROUNDING_STAGE_MAX_TOKENS: dict[GroundingCallKind, int] = {
     "structure": 12_288,
@@ -89,6 +99,7 @@ SQL_GROUNDING_STAGE_MAX_TOKENS: dict[GroundingCallKind, int] = {
 SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES = frozenset(
     {"structure", "mapping", "knowledge", "check"}
 )
+FINAL_REGROUNDING_GATE_MAX_TOKENS = 12_288
 SQL_GROUNDING_MAX_IDENTICAL_RETRIES = 1
 SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON = "exact_empty_max_token_failure"
 GROUNDING_LLM_ENV_NAMES = (
@@ -124,196 +135,463 @@ _PRIVATE_KEY_BLOCK_RE = re.compile(
 )
 
 _COMMON_EXPRESSION_RULES = """
-所有表名和字段都必须来自输入中的 Official evidence。join_keys 和 targets 必须是
-sqlglot 26.16.4 PostgreSQL 方言的精确 canonical expression；每个表达式必须采用
-expression.sql(dialect="postgres") 渲染所得的精确词法形式。不能包含 SQL 语句、注释、
-分号或未批准函数。JSON 运算符 -> 和 ->> 两侧都必须各有一个 ASCII 空格。
+所有新生成或修改的表名、字段和 JSON path 必须来自当前输入中的 Official evidence。
+
+join_keys 和 targets 必须是 sqlglot 26.16.4 PostgreSQL 方言的 canonical expression，
+并与 expression.sql(dialect="postgres") 的精确词法渲染结果一致。
+
+Mapping-facing SQL target 必须保留 metadata / DDL 支持的 canonical identifier；
+内部 normalized / lowercase lookup key 不是 SQL target，不能直接暴露给 State。
+如果 canonical target 缺失或存在大小写歧义，不得猜测。
+
+表达式不能包含完整 SQL 语句、注释、分号或未批准函数。
+JSON 运算符 -> 和 ->> 两侧都必须各有一个 ASCII 空格。
 仅用于展示语法的示例：t.c -> 'key' ->> 'leaf'。这个示例只展示格式，不能复制未获
 当前 Official evidence 支持的标识符或字面量。
+
 column_mapping.phrase 必须逐字来自 query 或 follow_up。
-一个确定字段只输出一个 target；只有同一计算或判断确实同时需要多个字段时，才允许多个
-targets。targets 不是候选字段集合，不得把 A/B 候选一起塞入。
-只返回裸 JSON 对象，不要 Markdown、说明、reasoning 或额外字段。
+user_clarifications 可以帮助解释 phrase 的真实业务含义，但不能成为新的 phrase 文本来源。
+
+一个确定字段只输出一个 target。
+只有完成同一 Query concept 确实同时需要多个字段时，才允许多个 targets。
+多个 targets 只表示“这些字段都需要”，不表示 SUM / AVG / 加法 / 比率 / 排序 / 优先级
+或其他公式。targets 不是候选字段集合。
+
+只返回裸 JSON 对象，不要 Markdown、解释、reasoning、注释或额外字段。
 """.strip()
 
 STRUCTURE_GROUNDING_PROMPT = (
-    """你负责 Structure Grounding。只读取 query、current_state 和原始 get_schema evidence。
-填写固定表单 {tables, join_keys}。tables 是高召回但由 DDL 支持的候选表；join_keys 是
-由 PK/FK/DDL 支持的 canonical 关联表达式。不要填写字段映射、知识、工具或 SQL。
+    """你负责 Structure Grounding。
+
+输入包括：
+- query / follow_up
+- current_state
+- user_clarifications（如有）
+- 原始 get_schema evidence
+
+user_clarifications 是前一 Grounding cycle 已回答、State 外、只读的用户约束。
+新的 Grounding cycle 必须继续考虑其中仍然有效的约束，但不得把 clarification 文本复制、
+改写或概括进四维 State。
+
+你的任务只有两件事：
+1. 选择后续回答当前累计 Query 真正可能需要的候选表。
+2. 根据 DDL 中明确的 PK / FK 关系填写 join_keys。
+
+如果 current_state 已有 tables / join_keys，它们是本阶段输出的完整基线。
+返回值必须覆盖 Original Query + Follow-up + 仍然有效的 user_clarifications 所定义的累计需求，
+不能只返回本轮增量。
+
+已有 tables / join_keys 默认原样保留；只有以下情况才允许最小删除或修改：
+- follow_up / user clarification 明确撤回或取代旧需求；
+- 当前 DDL evidence 明确证明旧表或连接错误。
+
+选表保持高召回，但新增表必须至少承担一种明确职责：
+- Query data：直接承载后续所需数据；
+- Result identity：承载 Query 要返回、比较、排序或分组的 entity identity；
+- Required bridge：是连接已需要表的必要 DDL bridge。
+
+仅仅 topic-related、DDL-reachable、可能有用，不足以新增表。
+如果已有直接且足够的 DDL path，不要无理由同时加入 parallel association / bridge path。
+
+这一阶段不要做 column_mapping、domain knowledge、SQL、工具选择或业务规则推断。
+
+只返回：
+{"tables": ["..."], "join_keys": ["..."]}
 """.strip()
     + "\n\n"
     + _COMMON_EXPRESSION_RULES
 )
 MAPPING_GROUNDING_PROMPT = (
-    """你负责 Mapping Grounding。读取 query、current_state 和候选表内 column_meanings。
-填写固定表单 {tables, join_keys, column_mapping}。优先完成 phrase→确定字段表达式映射；
-只有 metadata 明确证明 Structure 有误时，才小范围修正 tables/join_keys。
+    """你负责 Mapping Grounding。
+
+输入包括：
+- query / follow_up
+- current_state
+- user_clarifications（如有）
+- 当前候选表范围内的 column_meanings
+- unresolved_mappings（本 phase 先前 Mapping 明确留下的 omission；首次 Mapping 为空）
+
+user_clarifications 是 State 外、只读的用户约束。它们可以帮助解释 query / follow_up 中
+业务短语的真实含义，但不能直接成为新的 mapping.phrase，也不能自行充当 metadata evidence。
+
+你的任务是为 query / follow_up 中真正需要落到数据库的每个 SQL-relevant concept 明确给出
+Mapping 结论：有直接 canonical metadata 支持时写入 column_mapping；当前证据不足时写入
+unresolved_mappings。不要用 targets=[]、特殊字符串或虚构 target 表示 omission。
+
+按下面顺序处理：
+1. 根据 query / follow_up 和仍然有效的 user_clarifications，确定当前累计任务真正需要的业务概念；
+2. 只为能够由完整用户上下文 + 当前 Official metadata 直接、唯一闭合的 SQL-relevant concept
+   生成 mapping；判断时必须保留该 phrase 在完整 query / follow_up 中的限定词、对象、动作和
+   语义角色，不能只按字段名或描述相似度选择 target；
+3. 从 current_state 的 tables / join_keys / column_mapping 以及输入 unresolved_mappings 的完整副本开始；
+4. 默认保留已有条目；
+5. 新澄清如果重新定义了已有 query phrase，可以基于新的用户意图和 Official metadata
+   定向修正该 phrase 的 target；
+6. 只有 follow_up / clarification 明确撤回旧需求，或当前 metadata 明确证明已有 mapping 错误时，
+   才允许最小删除或修改。
+
+返回值必须覆盖 Original Query + Follow-up 当前累计仍然有效的字段需求，而不是本轮 delta。
+
+column_mapping 规则：
+- phrase 必须是 query 或 follow_up 中逐字连续出现的原文片段；
+- 判断 phrase 的含义时必须结合完整 Query 上下文，不能只看 phrase 与字段名是否相似；
+- 只有当当前 metadata 能直接、唯一支持用户真正要求的业务概念时，才生成 mapping。
+  一个简单判断是：如果用 target 的 metadata 含义替换 Query 中这个 concept，
+  原问题的业务含义基本不变，也不需要额外加入用户没有表达的业务假设，
+  才可以认为是直接映射；
+- 如果存在两个或以上业务含义不同的合理解释，而 Query / follow_up /
+  user_clarifications 仍无法确定是哪一个，不要任选一个，也不要把候选字段全部输出；
+   本轮把这个 phrase 写入 unresolved_mappings，reason=ambiguous_user_intent；
+- 对派生 concept，先判断其计算或判定关系的来源。如果 query / follow_up 没有明确给出完成
+  该 concept 所需的 operator、operands 和方向，不得根据 metadata、字段名、指标名称或常识
+  补全公式；可直接 Ground 的 operands 分别处理，未闭合 concept 写入 unresolved_mappings，
+  reason=derived_rule_required；
+- 如果 query / follow_up 本身已经明确给出外层 operator、operands 和方向，该外层关系属于
+  Query，不构成缺失的 Mapping-level business rule。分别 Ground 这些 operands；不得仅因该
+  外层关系创建 derived_rule_required。任一 operand 尚不能直接、唯一 Ground 时，只为该
+  operand 保留对应的 unresolved mapping；
+- 上一条授权只覆盖 Query 明确表达的外层关系，不授权推断 operand 内部组成、aggregation、
+  normalization、scaling、time scope、grain、dedup 或其它未表达的计算关系。指标名称中出现
+  ratio / score / index 等词，本身不构成 operator provenance；
+- mapping.phrase 可以使用较短的 Query 原文片段，但不能因为缩短 phrase 而丢掉会改变
+  业务含义的 modifier。特别是 calculated / adjusted / corrected 等修饰不能被删除后，
+  再把剩余的普通 concept 映射到一个 stored metric。
+  如果外围上下文只是帮助唯一消歧、并没有改变 concept 本身，则仍可以使用较短 phrase；
+- 一个确定字段只输出一个 target。
+  只有完成同一个 Query concept 明确需要多个字段时，才允许多个 targets。
+  多个 targets 不是候选字段集合，也不代表 SUM / AVG / ratio 或其他公式；
+- 如果现有 metadata 不能直接、唯一确定某个 Query concept 对应的字段，
+  就不要为这个 phrase 生成 mapping，而要写入 unresolved_mappings。
+  不要为了保持 Query coverage 而选择“最接近”的字段；
+  后续 Knowledge / Check 会继续处理这个未解决的 concept。
+
+unresolved_mappings 规则：
+- 它只记录 Mapping 自己未完成的字段语义映射；不得用它记录 aggregation、grain、threshold、
+  literal、predicate、time scope、output identity 或其它仅由 Check 判断的缺口；
+- phrase 与 column_mapping.phrase 一样，必须是 query 或 follow_up 中逐字连续出现的原文片段；
+- reason 只能是：
+  - ambiguous_user_intent：存在 metadata 无法替用户决定的业务含义；
+  - no_direct_metadata：当前 scope 内没有直接、唯一的 metadata target；
+  - derived_rule_required：该 concept 需要 Official rule / formula，不能由 stored proxy 闭合；
+  - scope_insufficient：当前候选表范围不足以提供所需 canonical target；
+- reason 只是 routing hint，不是 evidence，不能据此猜 target 或自动认为 concept 已解决；
+- 同一 phrase 必须且只能出现在 column_mapping 或 unresolved_mappings 之一；
+- 已有 unresolved phrase 默认原样保留。只有本次是携带新 clarification / Official evidence /
+  metadata scope 的合法 re-Grounding，且该 exact phrase 现在获得 canonical target 时，Mapping
+  才能把它从 unresolved_mappings 移入 column_mapping；同输入随机重跑不得清除 omission。
+
+Canonical evidence 规则：
+- 新生成或修改的 target 必须来自 Mapping-facing column_meanings 中的 canonical schema evidence；
+- normalized lookup key 只用于内部检索，不能作为 SQL target；
+- JSON / JSONB base column与 path key 都必须有 metadata 支持；
+- canonical target 缺失或有歧义时 fail-closed。
+
+这一阶段不要猜业务公式、阈值或聚合方式，不选择 knowledge，不生成 SQL。
 
 输出形状必须精确为：
 {"tables": ["..."],
  "join_keys": ["..."],
- "column_mapping": [{"phrase": "...", "targets": ["..."]}]}
-
-column_mapping 的字段名必须是 targets，不能是 target。targets 永远是 JSON array；
-即使只有一个确定字段，也必须写成 ["table.column"]。多个 targets 只允许表示共同
-参与同一计算或判断的字段，不是候选集合。
+ "column_mapping": [{"phrase": "...", "targets": ["..."]}],
+ "unresolved_mappings": [{"phrase": "...", "reason": "no_direct_metadata"}]}
 """.strip()
+    + "\n\n"
+    + _COMMON_EXPRESSION_RULES
+)
+MAPPING_REGROUNDING_CONSUMPTION_RULES = """第二轮 re-Grounding consumption contract：
+
+本 Prompt 只用于输入包含 regrounding_context，且 decision 为 REGROUND_MAPPING 或
+REGROUND_STRUCTURE 的 Mapping Draft。
+
+- regrounding_context 中的 official_knowledge、answered_clarifications 和 check_gap 是触发本次
+  re-Grounding 的必要上下文，必须与 query、current_state、column_meanings 一起重新判断旧 Mapping；
+- clarification / check_gap 可以定义本轮必须补齐的 Query requirement，但不能充当字段 metadata；
+- 如果 answered_clarifications 已经明确、完整地定义了 unresolved_mappings 中一个 exact Query
+  phrase 的、用户有权定义的 predicate、classification、filter、entity scope 或组合条件，并且该定义
+  所需的每个数据库字段都能由当前 column_meanings 直接、唯一地确定 canonical target，则必须把该
+  原 Query phrase 映射到全部必要 canonical targets，并清除它的 omission；
+- 上一条只允许 clarification 授权用户意图中的 literal、operator、threshold、boundary 和 AND / OR
+  组合关系；SQL identifier 仍只能来自 Official metadata。这些用户条件继续保留在 clarification
+  overlay 中，不得写入 targets，也不得从 clarification 创建新的 mapping.phrase；
+- “derived / classification concept 不得映射到 raw operands”的限制适用于缺少权威定义或定义不完整
+  的情况，不得阻止上一条已经由用户完整定义的 exact unresolved phrase 在合法 re-Grounding 中
+  映射其必要字段。用户回答仍不能替代必须由 Official Knowledge 定义的 business formula / derived
+  rule；此类情况继续遵守下面的 Official formula consumption contract；
+- 如果 exact Official rule / formula 明确列出完成原 Query concept 所需的 operands，必须把其中每个
+  在当前 column_meanings 中有 canonical metadata 支持的必要 operand 映射到该原 Query concept；
+- 这些多个 targets 只承载公式所需字段，formula 本身仍留在 domain_knowledge，不得写进 target；
+- 不得因为 current_state 已有 stored / derived / proxy target，就用它替代 Official formula 明确要求的
+  operands；只有同一 Official evidence 明确证明该字段与该公式结果语义等价时才可保留为替代；
+- 与本次 invalidation 无关的 cumulative mappings 必须原样保留；缺少 canonical operand target 时
+  不得猜测，必须把 exact Query phrase 保留或写入 unresolved_mappings；
+- 旧 unresolved phrase 只有在本轮新增 actionable evidence 确实给出 canonical target 时才能清除；
+  仅有 check_gap、reason 或要求“重新考虑”不属于 actionable evidence。
+""".strip()
+MAPPING_REGROUNDING_GROUNDING_PROMPT = (
+    MAPPING_GROUNDING_PROMPT
+    + "\n\n"
+    + MAPPING_REGROUNDING_CONSUMPTION_RULES
+)
+MAPPING_VALIDATION_CORRECTION_PROMPT = (
+    """你只负责修正一份被确定性 Form / State validator 拒绝的 Mapping 输出。
+
+这不是新的 Grounding，也不是重新解释 Query 的机会。输入中的 query、current_state、
+column_meanings 与第一次 Mapping 完全相同；mapping_validation_correction 另外给出：
+- rejected_mapping：第一次被拒绝的原始 Mapping；
+- validation_error：确定性 validator 的精确错误；
+- invalid_phrases：唯一允许修正或删除的 phrase。
+
+严格执行：
+1. tables 和 join_keys 必须与 rejected_mapping 完全相同；不得重选表或连接；
+2. 不在 invalid_phrases 中的 column_mapping 条目必须逐项原样保留；
+3. 对 invalid_phrases 中的条目，只能：
+   - 按当前 column_meanings 修正非法 target / JSON path / canonical expression；或
+   - 没有 metadata-supported 合法 target 时，从 column_mapping 删除，并以完全相同 phrase、
+     reason=no_direct_metadata 写入 unresolved_mappings；
+4. rejected_mapping 中已有 unresolved_mappings 必须逐项原样保留；不得新增无关 phrase，
+   不得查询新 evidence，不得改变 business concept；
+5. 修正后的完整输出仍必须满足普通 Mapping Form 和 validator。
+
+只返回与普通 Mapping 完全相同形状的裸 JSON。""".strip()
     + "\n\n"
     + _COMMON_EXPRESSION_RULES
 )
 KNOWLEDGE_GROUNDING_PROMPT = (
     """你负责 Knowledge Grounding。
 
-输入包括 query / follow_up、current_state、Official knowledge_definitions 和 candidate tables
-的 column meanings。
+输入包括：
+- query / follow_up
+- current_state
+- user_clarifications（如有）
+- Official knowledge_definitions
+- 当前候选表范围内的 column_meanings
+- unresolved_mappings（Mapping 留下的 State 外只读 omission sidecar）
 
-你的任务是：
-1. 从 Official knowledge_definitions 中选择当前 Query 真正需要的精确 knowledge；
-2. 再用选中的 knowledge 检查并修正 current column_mapping。
+user_clarifications 是 State 外、只读的用户意图证据。它们可以帮助消歧 Query 真正指的业务概念，
+但不能自行充当 Official knowledge / metadata，也不能凭用户回答生成新的 business rule、字段事实
+或 formula。
 
-重要：
-- current column_mapping 只是上一轮的暂定结果，可能是错的，不是选择 knowledge 的依据。
-- 先根据 Query 的原意以及 knowledge 的 name / description / definition，判断用户实际要求的
-  业务概念；选定精确 knowledge 后，再检查 current column_mapping 是否与它一致。
-- 如果 current mapping 与精确 knowledge 冲突，应修正 mapping；不要为了保留 current mapping，
-  改选一条能解释它的相似 knowledge。
-- 相反、相邻、上游、下游或派生概念都不能代替 Query 真正要求的精确概念。
-- 如果没有精确匹配的 knowledge，不要猜或选择最接近项，selected_knowledge_ids 返回 []。
-- 多个 knowledge id 只能表示完成 Query 确实同时需要多条规则，不能表示候选项。
-- 如果 selected_knowledge_ids 返回 []，column_mapping 必须与输入 current_state.column_mapping
-  逐项、逐字、顺序完全一致；不得改字段、JSON path、组合表达式或公式。
-- 如果 selected_knowledge_ids 非空，只能修改被选中的 Official knowledge 明确、直接支持修正的
-  phrase；其他 phrase 的 mapping 必须与输入 current_state.column_mapping 原样保持一致。不得借一条
-  knowledge 顺手修改它没有直接提供依据的其他业务概念。
-- 如果精确 knowledge 证明字段 A 错、字段 B 对，可以把 column_mapping 从 A 修正为 B；B 必须
-  有当前 candidate-table column meanings 支持。
+unresolved_mappings 只表示 Mapping 尚未完成的字段语义映射。Knowledge 可以用其中的 exact phrase
+帮助寻找直接匹配的 Official knowledge，但它是只读 routing context，不是 evidence：
+- 不得新增、修改、删除 unresolved_mappings；
+- 不得因为选中 knowledge 就自行填写 omission 的 target；
+- 不得触发或请求 re-Grounding；
+- 找到 direct Official rule 时，仍只通过 selected_knowledge_ids 正常选择该 rule；
+- 找不到 direct rule 时，selected_knowledge_ids 可以为 []，omission 仍由 Mapping carrier 原样持有。
+
+unresolved_mappings 的唯一 owner 是 Mapping。Knowledge response 没有这个字段，也不得通过
+column_mapping 新增与 omission exact phrase 相同的 mapping 来绕过只读边界。
+
+你的任务严格分两步，顺序不能反：
+第一步：选择完成当前累计 Query 真正需要的 Official knowledge。
+第二步：只有 selected knowledge 明确证明某条 current mapping 错误时，才做 bounded targeted correction。
+
+选择 Knowledge 前先做 direct-match gate：
+“这条 knowledge 是否直接定义 Query / follow_up / user clarification 真正要求的同一个业务概念
+和同一个语义角色，并且没有加入 Query 未要求的更窄限定？”
+
+只有明确 YES 才选择。以下都不能替代 direct match：topic related、supporting metric / formula、
+upstream / downstream、derived / correlated concept、narrower subtype / specific rule。
+
+不要根据 current column_mapping 反向选择一条能够解释当前 mapping 的相似 knowledge。
+如果没有 direct match：selected_knowledge_ids = []。
+
+Official phase 2 中，runtime 默认保留 current_state.domain_knowledge；本轮
+selected_knowledge_ids 只负责从当前 Official inventory 追加直接需要的 knowledge，未选择既有 knowledge
+不构成删除；既有 knowledge 不得被删除或替换。
+
+preserve-first mapping correction：
+- 从 current_state.column_mapping 的完整副本开始；
+- selected=[] 时，mapping 必须逐项、逐字、顺序完全不变；
+- selected 非空时，只能修改该 knowledge 明确、直接证明错误的 phrase；
+- 其他 phrase 必须原样保持；
+- replacement target 必须由当前 Mapping-facing canonical column_meanings 直接支持；
+- 不得把 lookup key、未支持 JSON path、任意 SQL expression 或 formula 写成 target；
+- 如果没有合法 replacement target，保持旧 mapping fail-closed，让 Check 暴露冲突，不得猜替代值。
+
+多个 knowledge id 只表示完成 Query 确实同时需要多条规则，不是候选项。
+多个 targets 也只表示多个字段都需要，不表示组合公式。
 
 只返回：
 {"column_mapping": [{"phrase": "...", "targets": ["..."]}],
  "selected_knowledge_ids": [1, 2]}
-
-规则：column_mapping 返回修正后的完整当前 mapping；selected_knowledge_ids 必须是 JSON array，
-ID 必须来自当前 Official knowledge_definitions，没有需要时返回 []；不要复制 definition，不要
-生成 knowledge kind，不返回 tables、join_keys 或其他字段，不生成 SQL，不输出解释、reasoning、
-Markdown 或额外文字。
 """.strip()
     + "\n\n"
     + _COMMON_EXPRESSION_RULES
 )
-CHECK_GROUNDING_PROMPT = (
-    """你负责 Grounding Check。
+CHECK_GROUNDING_PROMPT = """你负责 Grounding Check。
 
-输入包括：
+你的任务是判断 current_state 加上当前 Official phase 已获得的合法 Official evidence 与 State 外
+user_clarifications，是否已经足够支持 Query；如果不足，只补一个最具体缺口。
+
+不要重新执行完整 Grounding。
+
+输入可能包括：
 - query / follow_up
 - current_state
-- 最新一次补充证据或用户回答（如有）
-- previous_official_calls：当前 phase 已真实执行的 Check Official tool name、canonical arguments
-  和 request digest；不包含 raw tool result
-- answered_clarifications：当前 phase 已真实完成的 exact question / exact answer
+- user_clarifications（前序 Grounding cycle 已回答、State 外、只读）
+- unresolved_mappings（Mapping 留下的 State 外只读 omission sidecar）
+- answered_clarifications（当前 Official phase 的 question / answer 只读投影）
+- latest_tool（刚执行完的 Official Check tool 及结果，如有）
+- previous_official_calls（当前 Official phase 已执行的 tool + canonical arguments）
 
-previous_official_calls 和 answered_clarifications 都是只读、State 外的 phase-local context：
-- previous_official_calls 中已经出现的 exact tool + arguments 不得再次选择；不得通过无意义改写参数
-  绕过 duplicate guard。若没有新的合法 evidence direction，返回 terminal incomplete。
-- answered_clarifications 可用于 complete / incomplete 判断；即使之后又执行了 Official Check tool，
-  其中的回答仍然有效。不得把它们复制、改写或概括进 tables、join_keys、column_mapping 或
-  domain_knowledge。
+user_clarifications 只定义用户真实意图；clarification 不是 schema、metadata 或 Official business
+knowledge，永远不得复制、改写、摘要或 materialize 到四维 State。Main 会在 State 外单独接收这层
+用户意图，不需要把它伪装成 domain_knowledge。
 
-你的任务是检查：当前 State 是否已经有足够证据完成 Query。
+Mapping omission contract：
+- unresolved_mappings 只表示 Mapping 尚未完成的字段语义映射；唯一 owner 是 Mapping；
+- Check 不得新增、删除、修改 omission，也不得通过 column_mapping 自行填入同一 exact phrase；
+- reason 只是 routing hint，不是 Official evidence；
+- unresolved_mappings 非空时，本轮 Check 不得返回 complete。
 
-0. Clarification Scope Gate（最高优先级）
-- 当输入包含 latest_user_answer 时，在检查其他 complete 条件之前，必须先判断本次回答属于以下
-  哪一类：
-  A. 窄澄清：回答只为 current_state 中已经存在的 mapped concept 补充具体 literal、threshold
-  或 formula 参数，没有引入新的字段概念、predicate、业务规则、公式或 AND / OR 组合条件。
-  只有这一类回答可以继续下面的完整性检查，并在全部条件通过后允许 complete。
-  B. 语义扩展：回答新增或重新定义了完成 Query 所需的字段概念、predicate、业务规则、公式
-  或 AND / OR 组合条件。当前这个包含 latest_user_answer 的 Check turn 绝对禁止 complete，
-  即使该回答同时解决了上一轮 missing_information。不得仅依赖 clarification overlay 把这些
-  新增语义交给 Main；如果
-  current_state 已包含相关 target，且存在新的合法 Official evidence direction，只选择一个最具体
-  的工具，否则返回 incomplete + next_tool = null 并 terminal incomplete。不得使用 execute_sql、
-  information_schema 或其他数据库探索重新做 Mapping。
-  C. 未解决：回答模糊、拒绝、不知道、不确定、out of scope 或与缺口无关。必须 incomplete；
-  不得生成或猜测任何缺失语义。
-- 在后续 Check tool turn 中，如果输入没有 latest_user_answer、只有保留的 answered_clarifications，
-  不得把历史上的 B 类语义扩展当作永久禁止 complete 的理由。必须把回答新增的所有 SQL-relevant
-  概念、predicate、规则、公式和组合关系作为完整性要求，逐项用 current_state 与本轮合法
-  Official evidence 重新验证：全部已充分 Ground 且其他检查均通过时允许 complete；仍有任一项
-  未被支持时继续 incomplete，一次只补一个最具体缺口。
-- 在包含 latest_user_answer 的当前 turn，B / C 的 incomplete 规则高于所有“回答已经解决上一轮
-  缺口即可 complete”的规则；后续 turn 适用上一条重新验证规则。
-- Clarification overlay 只是为已有 Grounding 补充参数的通道，不是替代新 Grounding 语义的通道。
+对当前最高优先级 unresolved mapping，Check 只能选择一个动作：
+1. 仍有新的合法 Official evidence 可获得：调用一个最具体 Official tool；
+2. 缺口属于用户有权决定的业务意图：ask_user，clarification phrase 必须等于该 omission 的 exact phrase；
+3. 本轮已经获得新的 actionable clarification / Official evidence，足以让 Mapping 在不同输入下
+   重新判断该 omission：status=incomplete、next_tool=null，交 Final Regrounding Gate；
+4. 没有合法 evidence direction，用户也不能解决：terminal incomplete。
 
-返回 complete 前必须先通过 Gate 0（如有用户回答），再逐项通过以下五项检查：
+Check 不得根据名称相似、proxy、raw measure、“最自然解释”或 SQL 默认习惯消除 omission。
+只有后续合法 re-Grounding 中的新 Mapping 输出，才能正式清除 unresolved_mappings entry。
+
+0. Clarification routing（输入含 latest_user_answer 时最高优先级）
+- clarification_route 只描述当前这一次 Check request 对顶层 latest_user_answer 的即时路由，
+  不能从历史调用继承，也不能表示过去曾经采用过的 route；
+- 只有当前输入 JSON 顶层明确存在 latest_user_answer 字段时，才视为“本轮刚收到用户回答”。
+  user_clarifications、answered_clarifications 以及 regrounding_context.answered_clarifications 都只是
+  历史 evidence，绝不等同于 latest_user_answer；
+- 本轮必须先返回一个明确 clarification_route，并且 column_mapping / domain_knowledge 必须与
+  current_state 完全一致：
+  - stay_check：回答只给 current_state 中已有 mapped concept 补 literal、threshold 或参数，没有新增
+    concept、predicate、formula、entity、grain 或组合关系；继续本轮完整性检查，可 complete 或继续取证。
+  - restart_grounding：回答新增或重新定义 concept、predicate、formula、entity、grain 或组合关系；
+    必须 status=incomplete、next_tool=null。Runtime 会在同一 Official phase 启动新的
+    Structure → Mapping → Knowledge → Check cycle；本轮 Check 不得一点点修旧 State。
+  - terminal：回答模糊、不知道、拒绝或未解决问题；必须 status=incomplete、next_tool=null。
+- 如果 latest_user_answer.clarification_event.origin=atomic_draft，产生问题的 private Draft 已经
+  rollback，绝不能返回 stay_check 试图继续旧 Draft。回答未拒绝且能继续处理时应返回
+  restart_grounding；runtime 会把它交给 Final Gate 并创建全新的 Draft。
+- 当前输入顶层没有 latest_user_answer 时，clarification_route 必须为 none；即使输入包含历史
+  user_clarifications / answered_clarifications / regrounding_context，或当前是它们触发的新 Mapping /
+  Knowledge 之后的 initial Check，也不能返回 stay_check、restart_grounding 或 terminal。
+  历史 clarification 中曾有语义扩展，不是永久禁止 complete 的理由；后续新 Grounding 已完整覆盖时
+  仍可 status=complete，但此时 clarification_route 必须为 none。
+
+返回 complete 前逐项检查：
 
 1. 业务规则完整性
-- 如果 Query 需要派生指标、计算公式、阈值或业务判断规则，当前 State 必须包含完成 SQL 所需的
-  精确规则及其组合方式。只有相关字段不够；知道涉及 A、B 两个字段，不等于已经知道 A、B
-  应如何组合计算。
-- 缺少精确规则时必须 incomplete，missing_information 要写明缺少的公式、阈值或判断规则，
-  并只选择一个最相关的补证据动作。不得自行补公式或猜规则。
+- Query 如果需要派生指标、公式、阈值或业务判断规则，State 必须有足够精确的 Official rule
+  及组合方式；只有相关字段不够。
+- Query 本身不需要公式、阈值或 literal 时，不得凭空制造缺口。
 
-2. Query 与 State 的语义一致性
-- 逐项检查 Query / follow_up 的关键概念是否由 column_mapping 和 domain_knowledge 中同一语义的
-  字段与规则支持。
-- 如果 Query 要求的概念与 State 中已有概念明显不同、相反，或只是相邻/派生概念，不得
-  complete；missing_information 必须明确指出冲突，并按现有工具规则选择一个最相关的补证据动作。
+1.1 Exact Official formula operand completeness
+- 如果 current_state.domain_knowledge 中存在直接定义 Query concept 的 exact Official formula / rule，
+  complete 不仅要求该 rule 存在，还要求公式所需的 SQL operands 已得到合法 Grounding；
+- 只有以下两种情况之一成立，才可认为该 formula concept 的字段侧完整：
+  A. exact formula 明确要求的每个必要 operand 已由 current_state.column_mapping 承载；
+  B. Official evidence 明确证明 current mapping 中某个 stored / derived target 与该 exact formula 的
+     结果语义等价，因此可以合法替代这些 operands；
+- B 的“明确证明”必须由 Official evidence 直接说明该 target 存储 / 表示该 exact formula 的计算结果，
+  或者 target 的 Official definition 明确给出与该 formula 相同的必要 operands、关系和计算语义；
+- target 名称与 Query / rule 名称相似、column description 使用相近业务词、单位或类型相同、
+  target 是 related / derived / precomputed metric，或者根据字段名与上下文推断“很可能等价”，
+  均不足以证明 B；没有上述 explicit Official proof 时不得自行推断 equivalence；
+- 如果 exact formula 已存在、必要 operands 的 canonical metadata 在当前 table / join scope 内可用，
+  但 current mapping 缺少这些 operands且没有 Official equivalence evidence，则 current Mapping 不完整，
+  不得 complete，也不得继续为旧 stored target 寻找语义合理化；若无需再调用新的 Official evidence
+  tool，应返回 status=incomplete、clarification_route=none、next_tool=null，并在
+  missing_information 中明确说明缺失的 operands / invalidation gap，交给 Final Regrounding Gate；
+  不在 Check 中自行修改 Mapping。
+
+2. Direct semantic coverage
+- 对 Query / follow_up / user_clarifications 当前要求的每个 SQL-relevant concept，检查 State 是否有
+  直接支持该 concept 的字段 / rule。
+- related metric、proxy、inverse metric、derived score、supporting signal、相邻概念或更窄/更宽概念
+  不能单独证明目标 concept 已闭合。
+- 一个 State target 如果不能直接替换 Query target 而保持业务含义不变，则该 concept 仍未 Ground。
 - 不得为了保留 current mapping 而放行错误语义。
 
-3. 关键 literal 的权威性与相关性
-- 只有 Query 所要求的概念或判断确实依赖某个阈值、类别值或条件时，该 literal 才是 complete
-  的必要条件；它必须在 current_state 或本轮合法 Official evidence 中有明确、直接、非示例性的依据。
-  用户回答只能直接补充 current_state 中已有 mapped concept 的 literal / threshold；如果
-  literal 属于回答新引入的概念或 predicate，该回答本身不能使 State complete，必须先按 Gate 0
-  的语义扩展规则处理。
-- “for example / e.g. / such as / 例如”等措辞中的 literal 只是示例，不能升级为 frozen mandatory
-  predicate，不能要求 Main 把它写进 SQL，也不能据此猜测新的阈值。
-- 如果 Query 明确要求某个固定阈值分类，而 State 只有示例性 literal，必须 incomplete，并指出缺少
-  authoritative literal；不得采用示例值。
-- 如果 Query 只要求排序、最值或返回观测值，并不要求该阈值分类，则示例性 literal 与任务无关：
-  不得因为它不具权威性而制造 missing threshold，也不得强制加入对应谓词。Query 已明确给出的
-  MAX / MIN / ORDER BY 等操作不要求在 State 中重复成业务规则。
-- 没有示例限定词的明确固定 predicate 可以作为 authoritative rule，但仍须先确认 Query 的目标概念
-  确实需要该 predicate。
+3. literal / predicate 权威性
+- 只有 Query 真正依赖的 threshold、类别值、predicate 才是 complete 条件；
+- 必须由 Query、仍然有效的 user clarification 或 Official evidence 明确支持；
+- “for example / e.g. / such as / 例如”中的成员只是示例，不能自动升级为 mandatory predicate；
+- Query 已明确给出的排序、MAX / MIN 等操作不要求在 State 中重复成 business rule。
 
 4. entity grain 与 output identity
-- 如果 Query 要求返回、比较或排序某个 entity / group，而 measure 来自更细粒度的 event、snapshot
-  或 record，只有 State 明确包含该 entity 的 identity / output target，以及 measure 到该 entity 的
-  grouping target / 关系时，才能 complete。仅有细粒度 measure 和一条可达 join path 不够。
-- 缺少 entity identity 或 grouping grain 时必须 incomplete，missing_information 应明确写出哪个
-  entity identity / grouping target 尚未确定。
-- Check 不得自动猜 SUM / AVG / MAX 等聚合函数，也不得自动补 mapping。若 entity identity / grouping
-  已明确，且 Query 自身已经给出排序、最值或比较语义，则不得仅因 State 没有重复写一个聚合函数
-  而制造缺口；其他 completeness 条件满足时可以 complete。
+- Query 如果要求返回、比较、排序或分组某个 entity / group，而 measure 来自更细粒度 record，
+  State 必须明确包含该 entity identity / output target 以及必要 grouping / relation；
+- 仅有细粒度 measure 和一条可达 join path 不够；
+- 不得自动猜 SUM / AVG / MAX 等聚合规则。
 
-5. 窄澄清是否直接解决上一轮缺口
-- 本项只适用于输入包含 latest_user_answer 的当前 turn。只有 Gate 0 判定为 A（窄澄清）后，
-  才检查回答是否明确、直接提供上一轮缺少的具体
-  threshold、formula 参数、literal 或 business-rule 参数。例如缺少 threshold 时，用户明确回答
-  “1000 hours”可以解决该缺口；latest_user_answer 仍不等于缺口自动解决。
-- 回答解决缺口且第 1–4 项全部通过时，才可返回 complete、missing_information = null、
-  next_tool = null；column_mapping 和 domain_knowledge 必须与 current_state 原样保持一致。
-- 回答没有解决缺口时必须 incomplete。没有新的合法补证据方向时，next_tool = null 并 terminal
-  incomplete；不得为了满足 Form 重复 ask_user，也不得伪造新的 gap 或 tool。
-- latest_user_answer 和 answered_clarifications 始终是 State 外的 phase-local clarification evidence，
-  不是 Official schema、metadata 或 business knowledge evidence；不得复制、改写或概括进
-  tables、join_keys、column_mapping 或 domain_knowledge。
-
-只有 Query 所需的字段、关系、精确业务规则/公式和关键 literal 都已齐全且彼此语义一致时，
-才能 complete。Query 本身不需要规则、公式或 literal 时，不得把其缺席凭空当成缺口。
-
-如果已经足够：
-- status = "complete"
-- missing_information = null
-- next_tool = null
+全部通过才 complete。
 
 如果还不够：
-- status = "incomplete"
-- missing_information 必须明确写出当前还缺哪一条具体信息。
-- 有新的合法补证据方向时，只选择一个最相关的 Official tool，并把 next_tool 填为对应对象。
-- 已无新的合法 Official tool 可调用时，next_tool = null。这表示 terminal incomplete：不调用工具、
-  不扣 Bird-Coin、不 retry 或 fallback、不修改 State，并且当前 phase fail-closed、不得进入 Main。
-- 不要为了“再确认一下”调用工具。
+- missing_information 只写当前最具体、最高优先级的一条 gap；
+- 有新的合法 Official evidence direction 时，只选择一个最具体 next_tool；
+- 没有 latest_user_answer 时，Check 只能根据 current_state + 本轮 latest_tool 的一条合法 Official
+  evidence 做 bounded repair：
+  - 无 latest_tool 或 latest_tool 只是 knowledge names / execute_sql：两项必须原样保留；
+  - latest_tool=get_column_meaning：最多修正该证据直接支持的一条 column_mapping，
+    domain_knowledge 原样保留；
+  - latest_tool=get_knowledge_definition：column_mapping 原样保留；domain_knowledge 只能保留旧值，
+    并至多新增这一条 exact Official definition，形状必须是
+    {"kind": "business_rule", "content": "<Official definition 原文>"}；
+    禁止返回 {"name": "...", "definition": "..."}，禁止改写或总结 definition；
+- 不修改 tables / join_keys；
+- 如果 gap 来自 clarification 改变 scope / field concept / rule，而新 Grounding cycle 尚未覆盖它，
+  不要在 Check 中一点点重做 Structure / Mapping / Knowledge，应 fail-closed。
+
+previous_official_calls 中已经执行过的 exact tool + arguments 不得重复调用，
+也不得通过无意义参数改写绕过 duplicate guard。
+
+ask_user 是高成本 Grounding-cycle boundary，不是普通 schema / evidence discovery 工具。
+只有同时满足以下条件才允许：
+1. 至少存在两个合理的用户业务解释；
+2. 不同解释会实质改变 SQL-relevant Grounding；
+3. Official evidence 无法替用户决定真实意图。
+
+生成 ask_user.question 前，先检查当前 clarification phrase 下是否还存在从当前 Query、State 与
+Official evidence 已经能够明确预见、必须由用户决定且会实质改变 SQL 的未定项。这些未定项可能
+包括：
+- 业务概念的具体解释或类别；
+- threshold、上下界、比较方向；
+- 多个用户定义条件之间的 AND / OR / optional 关系。
+
+一次仍然只询问一个 clarification phrase，但应尽量在同一个问题中收齐这个 phrase 下已经能够预见的
+必要用户参数，避免用户回答后立即产生同一概念下新的 user-only 缺口。特别是如果回答可能继续使用
+high、low、severe、major、multiple、significant、typical 等定性词，应明确要求用户同时给出可执行的
+类别、cutoff、boundary 或业务判定标准；如果存在多个条件，还应说明它们的组合关系。
+
+不得要求用户提供可由 Official metadata / knowledge 确定的信息，不得为了“问完整”而猜测 Query
+尚未提出的新条件，不得询问数据库、schema、字段名或 SQL 实现。
+
+优先询问最高影响的一处歧义，一次只问一个问题。question 必须使用用户可理解的业务语言，
+不得出现 database / table / column / record / schema / SQL / JSON path、raw target 或 table.column
+等实现术语。
+
+user_clarification_request.phrase 必须逐字连续来自 query 或 follow_up。如果该 phrase 已在
+current_state.column_mapping 中，优先复用 mapping.phrase。
+
+Atomic Draft 中，如果 Mapping-level omission 已全部清除，但仍缺一个依附于已 Ground concept 的
+threshold、category、literal 或 predicate，允许把它表达为一次短生命周期的 Check requirement event：
+- requirement_type 只能是 threshold、category、literal 或 predicate；
+- related_mapping_phrases 必须非空，并逐项精确复用 current_state.column_mapping 中已经存在的 phrase；
+- phrase 仍必须是 query 或 follow_up 的逐字连续片段，可以不同于 related mapping phrase；
+- 该 event 只描述依附于现有 Mapping 的用户参数，不得用于索取新的字段语义、formula、derived rule、
+  grain、aggregation、time scope 或 output identity；
+- 如果仍有 unresolved_mappings，不得使用这个 Check-level event 绕过 Mapping omission。
+
+普通 Mapping-level omission clarification 不填写 requirement_type，related_mapping_phrases 为空。
+这些字段只提供 typed routing evidence；Check 仍无权创建、删除或修改 Mapping。
+
+user_intent 用于业务对象、类别、范围、解释或用户意图之间的真实歧义。
+missing_knowledge 只用于已有 Grounded concept / rule 中仍缺失且必须由用户确定的参数、literal、
+选项或范围；不得要求用户提供一条全新的 formula、字段语义、predicate 或完整 business rule
+来替代 Official evidence。
+
+一旦返回 ask_user，当前 Grounding cycle 结束；用户回答必须由 runtime 加入 State 外
+user_clarifications，并先由下一次 Check 按 Clarification routing 分类。stay_check 留在 Check，
+restart_grounding 才启动新的四阶段 Grounding cycle；不得再次询问已经回答的同一 phrase。
 
 允许的 next_tool 形状只有：
 
@@ -333,49 +611,122 @@ get_knowledge_definition：
  "user_clarification_request": null}
 
 execute_sql：
-{"tool_name": "execute_sql",
- "arguments": {"sql": "..."},
- "user_clarification_request": null}
+只有输入中已经存在明确 candidate_sql 时，才允许用于 SQL implementation validation。
+如果没有 candidate_sql，execute_sql 不是合法 next_tool。Check 不负责创造、拼接或探索 SQL。
 
 ask_user：
 {"tool_name": "ask_user",
  "arguments": {"question": "..."},
  "user_clarification_request": {
-   "phrase": "...", "kind": "user_intent"}}
+   "phrase": "...", "kind": "user_intent",
+   "requirement_type": null, "related_mapping_phrases": []}}
+
+Atomic Draft Check-level requirement event 的 ask_user 形状：
+{"tool_name": "ask_user",
+ "arguments": {"question": "..."},
+ "user_clarification_request": {
+   "phrase": "...", "kind": "user_intent",
+   "requirement_type": "threshold",
+   "related_mapping_phrases": ["<exact existing mapping.phrase>"]}}
 
 重要：
 - next_tool 必须是上述对象之一或 null，不能是字符串。
-- status = "incomplete" 且 next_tool = null 只用于缺口仍存在、但已无新的合法 Official tool
-  可调用的 terminal incomplete；不得用它掩盖可补齐的缺口。
+- status = "incomplete" 且 next_tool = null 只用于：缺口已无新的合法 Official tool 可调用的
+  terminal incomplete；或本轮已有新的 actionable evidence 足以交 Final Gate 重新 Grounding。
+  不得用它掩盖仍可由一个合法工具补齐的缺口。
 - user_clarification_request 只能位于 next_tool 内部，不能放在顶层。
 - ask_user 的 kind 只能精确为 user_intent 或 missing_knowledge。
 - ask_user 的 question 只写一次，只能位于 arguments.question；user_clarification_request
-  只填 phrase 和 kind，不得重复填写 question。
+  不得重复填写 question。requirement_type 与 related_mapping_phrases 必须同时填写或同时省略；
+  仅上述 Atomic Draft Check-level requirement event 可以填写它们。
 - user_clarification_request.phrase 必须是 query 或 follow_up 中逐字连续出现的片段。如果对应概念
   已存在于 current_state.column_mapping，优先直接复用该 mapping.phrase，不能添加原 Query 中没有
   的状态、column、identifier 或其他解释性后缀。
 - ask_user 只用于用户才能回答的意图或缺失知识，不能询问数据库、schema 或 SQL 实现问题。
 - 不允许调用 get_schema、get_all_column_meanings、get_all_knowledge_definitions 或 submit_sql。
-- column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有新证据需要修改时，必须原样保留，不能随意清空。
-- 只能根据当前 State 和最新证据修正 column_mapping / domain_knowledge，不能修改 tables / join_keys。
-- 当输入包含 latest_user_answer 时，column_mapping 和 domain_knowledge 必须与 current_state
-  完全一致；用户回答只用于 complete / incomplete 判断，绝不能用于修改四维 State。
+- column_mapping 和 domain_knowledge 必须返回修正后的完整当前值；没有上述授权时必须逐项原样保留，
+  不能随意新增、改写或清空。
+- latest_user_answer / user_clarifications / answered_clarifications 绝不能成为 State 修改依据。
 - 没有足够证据时不要猜。
-- Check 只判断并补齐一个最具体的缺口，不重新执行完整 Grounding，也不使用 execute_sql 探索
-  业务语义。
+- Check 只判断并补齐一个最具体的缺口，不重新执行完整 Grounding。
 
-只返回下面五个顶层字段：
-{"status": "complete 或 incomplete",
- "missing_information": null,
- "next_tool": null,
- "column_mapping": [],
- "domain_knowledge": []}
+只返回下面六个顶层字段：
+status、clarification_route、missing_information、next_tool、column_mapping、domain_knowledge。
+clarification_route 只能是 none、stay_check、restart_grounding 或 terminal。
+column_mapping 和 domain_knowledge 必须始终返回修正后的完整当前值；除非当前值本来为空，
+不得用空数组作占位或清空 State。
 
 不要返回其他顶层字段，不要输出解释、reasoning、Markdown 或额外文字。
+
+所有新生成或修改的表名、字段和 JSON path 必须来自当前输入中的 Official evidence。
+
+join_keys 和 targets 必须是 sqlglot 26.16.4 PostgreSQL 方言的 canonical expression，
+并与 expression.sql(dialect="postgres") 的精确词法渲染结果一致。
+
+Mapping-facing SQL target 必须保留 metadata / DDL 支持的 canonical identifier；
+内部 normalized / lowercase lookup key 不是 SQL target，不能直接暴露给 State。
+如果 canonical target 缺失或存在大小写歧义，不得猜测。
+
+表达式不能包含完整 SQL 语句、注释、分号或未批准函数。
+JSON 运算符 -> 和 ->> 两侧都必须各有一个 ASCII 空格。
+仅用于展示语法的示例：t.c -> 'key' ->> 'leaf'。这个示例只展示格式，不能复制未获
+当前 Official evidence 支持的标识符或字面量。
+
+column_mapping.phrase 必须逐字来自 query 或 follow_up。
+user_clarifications 可以帮助解释 phrase 的真实业务含义，但不能成为新的 phrase 文本来源。
+
+一个确定字段只输出一个 target。
+只有完成同一 Query concept 确实同时需要多个字段时，才允许多个 targets。
+多个 targets 只表示“这些字段都需要”，不表示 SUM / AVG / 加法 / 比率 / 排序 / 优先级
+或其他公式。targets 不是候选字段集合。
+
+只返回裸 JSON 对象，不要 Markdown、解释、reasoning、注释或额外字段。""".strip()
+FINAL_REGROUNDING_GATE_PROMPT = """你是本轮 Grounding 结束后的薄 invalidation Gate。
+
+Structure、Mapping、Knowledge、ask_user 和 Check 已经完成本轮的信息收集。你不重新做这些阶段，
+不修 State，不选工具，也不提出新的用户问题。你只比较：
+- 当前正式 4D State；
+- 本轮得到的 clarification、Official knowledge/evidence 和最终 Check 结果；
+- 当前 schema / metadata 证据。
+
+只判断新信息是否使当前 State 失效，以及最早需要从哪里重新 Grounding：
+
+Mapping owner transition（先于下面四种路由判断）：
+- final_gate_context.mapping_owner_transition 是 runtime 从当前 Mapping omission sidecar 生成的只读
+  lifecycle 事实；它不替 Check 判断公式、operands 或业务语义是否充分；
+- 如果其中列出的 existing omission 仍由 Mapping 独占清除权限，actionable_evidence_changed_since_mapping
+  为 true，并且 final_check 已明确说明当前合法 evidence 足以让 Mapping 重新判断并清除该 omission，
+  则必须选择 REGROUND_MAPPING。即使公式与 operands 在语义上已经齐全，仍存在的 omission 也表示
+  lifecycle 尚未完成；不得把 semantic completeness 当成 NO_REGROUND；
+- 只有 omission 非空本身不构成 re-Grounding 理由。如果 final_check 仍在报告缺少 rule、operand、
+  denominator、grain、dedup、用户参数或其它 evidence，不得自行推导它已经可清除，也不得仅凭该
+  lifecycle carrier 选择 REGROUND_MAPPING；
+- Gate 不重新验证公式或选择 operands，只消费 final_check 对 actionable evidence 的结论并完成
+  owner routing。相同 omission、evidence 与 Mapping input 的重复 transition 由 runtime bounded terminal。
+
+1. NO_REGROUND
+   新信息没有使 tables / join_keys / column_mapping 失效。已有 mapped concept 的 literal、threshold、
+   boundary、排序方向或其它窄参数属于 clarification overlay，不触发 re-Grounding。
+
+2. REGROUND_MAPPING
+   新信息引入或重定义 SQL-relevant concept、operand、predicate、formula input 或 canonical target；
+   当前 Mapping 不完整或不再正确，但 schema 明确显示所需 carrier 仍在当前 tables / join scope 内。
+
+3. REGROUND_STRUCTURE
+   新信息改变 entity、grain、relation、table scope 或 join path，或者 schema 明确显示所需 carrier
+   位于当前 tables 之外。只有确有 table/join-scope 变化时才能选择。
+
+4. TERMINAL
+   当前没有足够、合法、可验证的信息选择一次有意义的 re-Grounding；重跑不能产生缺失的用户参数
+   或 Official evidence；或者输入没有稳定的可验证 State。
+
+约束：
+- 不因为 State 本来可能有错就 restart；必须有本轮新信息造成的 invalidation。
+- 不把 clarification 当 Official metadata。
+- 不猜未知字段或表。无法证明需要新表时，不得升级为 REGROUND_STRUCTURE。
+- 输出只是路由，不授权任何中间 State 对 Main 可见。
+- 只返回 decision 和 reason 两个字段的裸 JSON。
 """.strip()
-    + "\n\n"
-    + _COMMON_EXPRESSION_RULES
-)
 
 SQL_GROUNDING_STAGE_PROMPTS: dict[GroundingCallKind, str] = {
     "structure": STRUCTURE_GROUNDING_PROMPT,
@@ -387,6 +738,12 @@ SQL_GROUNDING_STAGE_PROMPT_SHA256: dict[GroundingCallKind, str] = {
     key: hashlib.sha256(value.encode("utf-8")).hexdigest()
     for key, value in SQL_GROUNDING_STAGE_PROMPTS.items()
 }
+MAPPING_REGROUNDING_PROMPT_SHA256 = hashlib.sha256(
+    MAPPING_REGROUNDING_GROUNDING_PROMPT.encode("utf-8")
+).hexdigest()
+MAPPING_VALIDATION_CORRECTION_PROMPT_SHA256 = hashlib.sha256(
+    MAPPING_VALIDATION_CORRECTION_PROMPT.encode("utf-8")
+).hexdigest()
 SQL_GROUNDING_STAGE_FORM_SCHEMAS: dict[GroundingCallKind, dict[str, Any]] = {
     "structure": StructureGroundingResponse.model_json_schema(),
     "mapping": MappingGroundingResponse.model_json_schema(),
@@ -400,7 +757,105 @@ SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256: dict[GroundingCallKind, str] = {
 
 # Compatibility names now identify the complete executable 1.3 contract
 # bundle, never a hidden fifth Provider form.
-SQL_GROUNDING_PROMPT = canonical_json(SQL_GROUNDING_STAGE_PROMPTS)
+FINAL_REGROUNDING_GATE_PROMPT_SHA256 = hashlib.sha256(
+    FINAL_REGROUNDING_GATE_PROMPT.encode("utf-8")
+).hexdigest()
+FINAL_REGROUNDING_GATE_FORM_SCHEMA = (
+    FinalRegroundingGateResponse.model_json_schema()
+)
+FINAL_REGROUNDING_GATE_FORM_SCHEMA_SHA256 = hashlib.sha256(
+    canonical_json(FINAL_REGROUNDING_GATE_FORM_SCHEMA).encode("utf-8")
+).hexdigest()
+
+
+def _prompt_for_call_kind(call_kind: GroundingCallKind) -> str:
+    if call_kind == "final_gate":
+        return FINAL_REGROUNDING_GATE_PROMPT
+    if call_kind == "check" and resolved_literal_executable_carrier_enabled():
+        from valibra_agent.sql_grounding.resolved_literal_proposal_shadow import (
+            CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_PROMPT,
+        )
+
+        return CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_PROMPT
+    return SQL_GROUNDING_STAGE_PROMPTS[call_kind]
+
+
+def _prompt_for_input_payload(
+    call_kind: GroundingCallKind,
+    input_payload: Mapping[str, Any],
+) -> str:
+    if call_kind == "mapping" and "mapping_validation_correction" in input_payload:
+        return MAPPING_VALIDATION_CORRECTION_PROMPT
+    context = input_payload.get("regrounding_context")
+    if (
+        call_kind == "mapping"
+        and isinstance(context, Mapping)
+        and context.get("decision") in {"REGROUND_MAPPING", "REGROUND_STRUCTURE"}
+    ):
+        return MAPPING_REGROUNDING_GROUNDING_PROMPT
+    return _prompt_for_call_kind(call_kind)
+
+
+def _prompt_sha(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _form_schema_for_call_kind(call_kind: GroundingCallKind) -> dict[str, Any]:
+    if call_kind == "final_gate":
+        return FINAL_REGROUNDING_GATE_FORM_SCHEMA
+    if call_kind == "check" and resolved_literal_executable_carrier_enabled():
+        from valibra_agent.sql_grounding.resolved_literal_proposal_shadow import (
+            CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_FORM_SCHEMA,
+        )
+
+        return CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_FORM_SCHEMA
+    return SQL_GROUNDING_STAGE_FORM_SCHEMAS[call_kind]
+
+
+def _prompt_sha_for_call_kind(call_kind: GroundingCallKind) -> str:
+    if call_kind == "final_gate":
+        return FINAL_REGROUNDING_GATE_PROMPT_SHA256
+    if call_kind == "check" and resolved_literal_executable_carrier_enabled():
+        from valibra_agent.sql_grounding.resolved_literal_proposal_shadow import (
+            CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_PROMPT_SHA256,
+        )
+
+        return CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_PROMPT_SHA256
+    return SQL_GROUNDING_STAGE_PROMPT_SHA256[call_kind]
+
+
+def _form_sha_for_call_kind(call_kind: GroundingCallKind) -> str:
+    if call_kind == "final_gate":
+        return FINAL_REGROUNDING_GATE_FORM_SCHEMA_SHA256
+    if call_kind == "check" and resolved_literal_executable_carrier_enabled():
+        from valibra_agent.sql_grounding.resolved_literal_proposal_shadow import (
+            CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_FORM_SHA256,
+        )
+
+        return CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_FORM_SHA256
+    return SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256[call_kind]
+
+
+def resolved_literal_executable_carrier_enabled() -> bool:
+    """Return the explicit executable-carrier experiment switch."""
+
+    return os.environ.get(
+        "VALIBRA_RESOLVED_LITERAL_EXECUTABLE_CARRIER_R1"
+    ) == "1"
+
+
+def _max_tokens_for_call_kind(call_kind: GroundingCallKind) -> int:
+    if call_kind == "final_gate":
+        return FINAL_REGROUNDING_GATE_MAX_TOKENS
+    return SQL_GROUNDING_STAGE_MAX_TOKENS[call_kind]
+
+
+SQL_GROUNDING_PROMPT = canonical_json(
+    {
+        "stage_prompts": SQL_GROUNDING_STAGE_PROMPTS,
+        "mapping_regrounding_prompt": MAPPING_REGROUNDING_GROUNDING_PROMPT,
+    }
+)
 SQL_GROUNDING_PROMPT_SHA256 = hashlib.sha256(
     SQL_GROUNDING_PROMPT.encode("utf-8")
 ).hexdigest()
@@ -409,6 +864,15 @@ SQL_GROUNDING_FORM_SCHEMA_SHA256 = hashlib.sha256(
     canonical_json(SQL_GROUNDING_FORM_SCHEMA).encode("utf-8")
 ).hexdigest()
 SQL_GROUNDING_CONFIGURATION = {
+    "answered_clarification_routing": {
+        "official_phase_unchanged": True,
+        "routes": {
+            "stay_check": ["check"],
+            "restart_grounding": ["structure", "mapping", "knowledge", "check"],
+            "terminal": [],
+        },
+        "state_external_overlay": True,
+    },
     "check_phase_local_context": {
         "max_answered_clarifications": MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS,
         "max_previous_official_calls": MAX_CHECK_PHASE_LOCAL_CALLS,
@@ -416,6 +880,7 @@ SQL_GROUNDING_CONFIGURATION = {
     },
     "stage_form_schema_sha256": SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256,
     "stage_prompt_sha256": SQL_GROUNDING_STAGE_PROMPT_SHA256,
+    "mapping_regrounding_prompt_sha256": MAPPING_REGROUNDING_PROMPT_SHA256,
     "form_schema_sha256": SQL_GROUNDING_FORM_SCHEMA_SHA256,
     "max_calls_per_task": DEFAULT_GROUNDING_MAX_CALLS_PER_TASK,
     "max_request_chars": MAX_GROUNDING_REQUEST_CHARS,
@@ -605,7 +1070,7 @@ class LiteLLMSQLGroundingClient:
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.perf_counter()
         observation_id, observation_type = _request_observation_identity(request)
-        configured_max_tokens = SQL_GROUNDING_STAGE_MAX_TOKENS[request.call_kind]
+        configured_max_tokens = _max_tokens_for_call_kind(request.call_kind)
         self._last_configured_max_tokens = configured_max_tokens
         self._last_provider_attempts = ()
         self._last_retry_triggered = False
@@ -624,10 +1089,8 @@ class LiteLLMSQLGroundingClient:
             "retry_trigger_reason": None,
             "attempts": [],
             "final_selected_attempt": None,
-            "prompt_sha256": SQL_GROUNDING_STAGE_PROMPT_SHA256[request.call_kind],
-            "form_schema_sha256": SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256[
-                request.call_kind
-            ],
+            "prompt_sha256": _prompt_sha(request.prompt),
+            "form_schema_sha256": _form_sha_for_call_kind(request.call_kind),
             "configuration_sha256": SQL_GROUNDING_CONFIGURATION_SHA256,
             "model": self.config.model_id,
             "provider": _provider_endpoint_identity(self.config.api_base),
@@ -662,6 +1125,7 @@ class LiteLLMSQLGroundingClient:
         provider_kwargs_sha = _stable_provider_kwargs_sha256(provider_kwargs)
         max_attempts = 1 + int(
             request.call_kind in SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES
+            or request.call_kind == "final_gate"
         )
         for attempt_number in range(1, max_attempts + 1):
             attempt_kwargs = copy.deepcopy(provider_kwargs)
@@ -928,20 +1392,43 @@ class LiteLLMSQLGroundingClient:
         self._last_final_selected_attempt = final_selected_attempt
 
 
+class KnowledgeRetirementAuditSidecar(ContractModel):
+    """Non-authoritative digest of a stripped legacy Provider field."""
+
+    value_shape: Literal["array", "non_array"]
+    item_count: int = Field(ge=0, le=MAX_GROUNDING_RESPONSE_CHARS)
+    value_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class GroundingUpdaterResult(ContractModel):
     response: GroundingLLMResponse | StageGroundingResponse
     call_kind: GroundingCallKind | None = None
     telemetry: GroundingLLMTelemetry
     transport_normalization: Literal["none", "single_json_fence"]
+    knowledge_omission_mapping_ignored: tuple[str, ...] = ()
+    knowledge_retirement_audit_sidecar: (
+        KnowledgeRetirementAuditSidecar | None
+    ) = None
 
 
 class GroundingUpdaterError(RuntimeError):
-    """A bounded updater failure with telemetry but no raw response body."""
+    """A bounded failure; rejected Mapping content is private and in-memory only."""
 
-    def __init__(self, reason: str, telemetry: GroundingLLMTelemetry) -> None:
+    def __init__(
+        self,
+        reason: str,
+        telemetry: GroundingLLMTelemetry,
+        *,
+        rejected_mapping_payload: str | None = None,
+        validation_detail: str | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.telemetry = telemetry
+        # These fields are an in-memory repair carrier only.  They are never
+        # copied into ordinary telemetry or persisted by the service.
+        self.rejected_mapping_payload = rejected_mapping_payload
+        self.validation_detail = validation_detail
 
 
 class SQLGroundingUpdater:
@@ -961,6 +1448,7 @@ class SQLGroundingUpdater:
         original_query: str,
         follow_up_query: str | None = None,
         grounding_input: Mapping[str, Any] | None = None,
+        mapping_validation_correction: Mapping[str, Any] | None = None,
     ) -> GroundingUpdaterResult:
         """Return a typed proposal without mutating Runtime or Observation."""
 
@@ -970,8 +1458,10 @@ class SQLGroundingUpdater:
             original_query=original_query,
             follow_up_query=follow_up_query,
             grounding_input=grounding_input,
+            mapping_validation_correction=mapping_validation_correction,
         )
         request_sha = hashlib.sha256(canonical_json(request).encode("utf-8")).hexdigest()
+        request_prompt_sha = _prompt_sha(request.prompt)
         started = time.perf_counter()
         try:
             client_response = await asyncio.wait_for(
@@ -990,6 +1480,7 @@ class SQLGroundingUpdater:
                 ),
                 error_type="timeout",
                 call_kind=request.call_kind,
+                prompt_sha256=request_prompt_sha,
                 **metadata,
             )
             raise GroundingUpdaterError("timeout", telemetry) from exc
@@ -1007,6 +1498,7 @@ class SQLGroundingUpdater:
                     else "provider_preflight_error"
                 ),
                 call_kind=request.call_kind,
+                prompt_sha256=request_prompt_sha,
                 **metadata,
             )
             raise GroundingUpdaterError(
@@ -1021,6 +1513,7 @@ class SQLGroundingUpdater:
                 request_sha=request_sha,
                 error_type="client_error",
                 call_kind=request.call_kind,
+                prompt_sha256=request_prompt_sha,
                 **_client_telemetry_metadata(self._client),
             )
             raise GroundingUpdaterError("client_error", telemetry) from exc
@@ -1040,6 +1533,7 @@ class SQLGroundingUpdater:
                 response_sha=response_sha,
                 error_type="response_too_large",
                 call_kind=request.call_kind,
+                prompt_sha256=request_prompt_sha,
                 **provider_metadata,
             )
             raise GroundingUpdaterError("response_too_large", telemetry)
@@ -1047,6 +1541,18 @@ class SQLGroundingUpdater:
             payload, normalization = normalize_grounding_transport(
                 client_response.content
             )
+            knowledge_omission_mapping_ignored: tuple[str, ...] = ()
+            knowledge_retirement_audit_sidecar = None
+            if request.call_kind == "knowledge" and grounding_input is not None:
+                payload, knowledge_retirement_audit_sidecar = (
+                    _strip_knowledge_retirement_audit_sidecar(payload)
+                )
+                payload, knowledge_omission_mapping_ignored = (
+                    _strip_knowledge_omission_owned_mappings(
+                        payload,
+                        grounding_input=grounding_input,
+                    )
+                )
             try:
                 response = parse_grounding_response(
                     payload,
@@ -1072,9 +1578,21 @@ class SQLGroundingUpdater:
                 response_sha=response_sha,
                 error_type=exc.reason,
                 call_kind=request.call_kind,
+                prompt_sha256=request_prompt_sha,
                 **provider_metadata,
             )
-            raise GroundingUpdaterError(exc.reason, telemetry) from exc
+            raise GroundingUpdaterError(
+                exc.reason,
+                telemetry,
+                rejected_mapping_payload=(
+                    client_response.content
+                    if request.call_kind == "mapping"
+                    and exc.reason == "form_validation_failed"
+                    and mapping_validation_correction is None
+                    else None
+                ),
+                validation_detail=exc.detail,
+            ) from exc
 
         telemetry = _telemetry(
             attempted=True,
@@ -1084,6 +1602,7 @@ class SQLGroundingUpdater:
             request_sha=effective_request_sha,
             response_sha=response_sha,
             call_kind=request.call_kind,
+            prompt_sha256=request_prompt_sha,
             **provider_metadata,
         )
         return GroundingUpdaterResult(
@@ -1091,13 +1610,20 @@ class SQLGroundingUpdater:
             call_kind=request.call_kind,
             telemetry=telemetry,
             transport_normalization=normalization,
+            knowledge_omission_mapping_ignored=(
+                knowledge_omission_mapping_ignored
+            ),
+            knowledge_retirement_audit_sidecar=(
+                knowledge_retirement_audit_sidecar
+            ),
         )
 
 
 class _StrictResponseError(ValueError):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, detail: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.detail = detail
 
 
 def _build_request(
@@ -1107,6 +1633,7 @@ def _build_request(
     original_query: str,
     follow_up_query: str | None,
     grounding_input: Mapping[str, Any] | None,
+    mapping_validation_correction: Mapping[str, Any] | None = None,
 ) -> GroundingLLMRequest:
     call_kind: GroundingCallKind = "structure"
     if grounding_input is None:
@@ -1129,6 +1656,37 @@ def _build_request(
             grounding_input,
             phase=observation.phase,
         )
+    if mapping_validation_correction is not None:
+        if grounding_input is None or call_kind != "mapping":
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        correction = dict(mapping_validation_correction)
+        if (
+            set(correction)
+            != {"invalid_phrases", "rejected_mapping", "validation_error"}
+            or not isinstance(correction["rejected_mapping"], dict)
+            or not isinstance(correction["validation_error"], str)
+            or not correction["validation_error"].strip()
+            or not isinstance(correction["invalid_phrases"], list)
+            or not correction["invalid_phrases"]
+            or any(
+                not isinstance(phrase, str) or not phrase.strip()
+                for phrase in correction["invalid_phrases"]
+            )
+            or len(correction["invalid_phrases"])
+            != len(set(correction["invalid_phrases"]))
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        input_payload["mapping_validation_correction"] = correction
     input_json = canonical_json(input_payload)
     if len(input_json) > MAX_GROUNDING_REQUEST_CHARS:
         telemetry = _telemetry(
@@ -1138,9 +1696,9 @@ def _build_request(
         )
         raise GroundingUpdaterError("request_too_large", telemetry)
     request = GroundingLLMRequest(
-        prompt=SQL_GROUNDING_STAGE_PROMPTS[call_kind],
+        prompt=_prompt_for_input_payload(call_kind, input_payload),
         input_json=input_json,
-        response_schema=SQL_GROUNDING_STAGE_FORM_SCHEMAS[call_kind],
+        response_schema=_form_schema_for_call_kind(call_kind),
         call_kind=call_kind,
         observation_id=observation.observation_id,
         observation_type=observation.observation_type,
@@ -1192,6 +1750,48 @@ def _validated_bundled_grounding_input(
             error_type="grounding_bundle_invalid",
         )
         raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if call_kind in {"mapping", "knowledge", "check"}:
+        raw_unresolved = payload.get("unresolved_mappings")
+        if not isinstance(raw_unresolved, list):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        try:
+            unresolved = tuple(
+                UnresolvedMapping.model_validate(item)
+                for item in raw_unresolved
+            )
+        except ValidationError as exc:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError(
+                "grounding_bundle_invalid", telemetry
+            ) from exc
+        phrases = [item.phrase for item in unresolved]
+        sources = [original_query]
+        if follow_up_query is not None:
+            sources.append(follow_up_query)
+        mapped_phrases = {
+            item.phrase
+            for item in (runtime.grounding_state.column_mapping or ())
+        }
+        if (
+            len(phrases) != len(set(phrases))
+            or any(not any(phrase in source for source in sources) for phrase in phrases)
+            or mapped_phrases & set(phrases)
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     if observation.phase == 2:
         if (
             not isinstance(follow_up_query, str)
@@ -1205,6 +1805,7 @@ def _validated_bundled_grounding_input(
                 error_type="grounding_bundle_invalid",
             )
             raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if "user_clarifications" in payload:
         clarifications = payload["user_clarifications"]
         if not isinstance(clarifications, list):
             telemetry = _telemetry(
@@ -1227,7 +1828,10 @@ def _validated_bundled_grounding_input(
             raise GroundingUpdaterError(
                 "grounding_bundle_invalid", telemetry
             ) from exc
-        if any(item.phase != 1 or item.answer is None for item in records):
+        if any(
+            item.phase > observation.phase or item.answer is None
+            for item in records
+        ):
             telemetry = _telemetry(
                 attempted=False,
                 status="rejected",
@@ -1242,9 +1846,160 @@ def _validated_bundled_grounding_input(
                 error_type="grounding_bundle_invalid",
             )
             raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if "regrounding_context" in payload:
+        context = payload["regrounding_context"]
+        if not isinstance(context, dict) or set(context) != {
+            "decision",
+            "check_gap",
+            "answered_clarifications",
+            "official_knowledge",
+        }:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        decision = context.get("decision")
+        gap = context.get("check_gap")
+        if decision not in {"REGROUND_MAPPING", "REGROUND_STRUCTURE"} or (
+            gap is not None
+            and (
+                not isinstance(gap, str)
+                or not gap
+                or gap != gap.strip()
+                or len(gap) > 4_096
+            )
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        expected_clarifications = payload.get("user_clarifications", [])
+        current_state = payload.get("current_state")
+        expected_knowledge = (
+            current_state.get("domain_knowledge")
+            if isinstance(current_state, dict)
+            else None
+        )
+        if (
+            context.get("answered_clarifications") != expected_clarifications
+            or context.get("official_knowledge") != expected_knowledge
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+    if call_kind == "final_gate":
+        gate_context = payload.get("final_gate_context")
+        if not isinstance(gate_context, dict) or set(gate_context) != {
+            "answered_clarifications",
+            "column_meanings",
+            "final_check",
+            "mapping_owner_transition",
+            "previous_official_calls",
+            "schema",
+        }:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        if (
+            not isinstance(gate_context["answered_clarifications"], list)
+            or not isinstance(gate_context["previous_official_calls"], list)
+            or not isinstance(gate_context["final_check"], dict)
+            or not isinstance(gate_context["schema"], str)
+            or not isinstance(gate_context["column_meanings"], dict)
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        owner_transition = gate_context["mapping_owner_transition"]
+        if not isinstance(owner_transition, dict) or set(owner_transition) != {
+            "actionable_evidence_changed_since_mapping",
+            "eligible_owner_transition_omissions",
+            "mapping_is_only_owner",
+            "unresolved_mappings",
+        }:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        raw_owner_unresolved = owner_transition["unresolved_mappings"]
+        raw_owner_eligible = owner_transition[
+            "eligible_owner_transition_omissions"
+        ]
+        try:
+            owner_unresolved = tuple(
+                UnresolvedMapping.model_validate(item)
+                for item in raw_owner_unresolved
+            )
+            owner_eligible = tuple(
+                UnresolvedMapping.model_validate(item)
+                for item in raw_owner_eligible
+            )
+        except (TypeError, ValidationError) as exc:
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError(
+                "grounding_bundle_invalid", telemetry
+            ) from exc
+        owner_unresolved_payloads = {
+            canonical_json(item.model_dump(mode="json"))
+            for item in owner_unresolved
+        }
+        owner_eligible_payloads = {
+            canonical_json(item.model_dump(mode="json"))
+            for item in owner_eligible
+        }
+        if (
+            not isinstance(raw_owner_unresolved, list)
+            or not isinstance(raw_owner_eligible, list)
+            or owner_transition["mapping_is_only_owner"] is not True
+            or not isinstance(
+                owner_transition[
+                    "actionable_evidence_changed_since_mapping"
+                ],
+                bool,
+            )
+            or len(owner_unresolved) != len(owner_unresolved_payloads)
+            or len(owner_eligible) != len(owner_eligible_payloads)
+            or not owner_eligible_payloads <= owner_unresolved_payloads
+            or any(
+                item.reason != "derived_rule_required"
+                for item in owner_eligible
+            )
+            or (
+                owner_transition[
+                    "actionable_evidence_changed_since_mapping"
+                ]
+                and not owner_eligible
+            )
+        ):
+            telemetry = _telemetry(
+                attempted=False,
+                status="rejected",
+                error_type="grounding_bundle_invalid",
+            )
+            raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
     if call_kind == "check":
         previous_calls = payload.get("previous_official_calls")
         answered_clarifications = payload.get("answered_clarifications")
+        cumulative_evidence = payload.get("check_evidence_context")
         if (
             not isinstance(previous_calls, list)
             or len(previous_calls) > MAX_CHECK_PHASE_LOCAL_CALLS
@@ -1258,6 +2013,94 @@ def _validated_bundled_grounding_input(
                 error_type="grounding_bundle_invalid",
             )
             raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+        if "check_evidence_context" in payload:
+            if (
+                not isinstance(cumulative_evidence, list)
+                or len(cumulative_evidence)
+                > MAX_P2_CHECK_CUMULATIVE_EVIDENCE_ENTRIES
+                or len(canonical_json(cumulative_evidence))
+                > MAX_P2_CHECK_CUMULATIVE_EVIDENCE_CHARS
+            ):
+                telemetry = _telemetry(
+                    attempted=False,
+                    status="rejected",
+                    error_type="grounding_bundle_invalid",
+                )
+                raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
+            cumulative_digests: list[str] = []
+            for item in cumulative_evidence:
+                if not isinstance(item, dict) or set(item) != {
+                    "arguments",
+                    "request_digest",
+                    "result",
+                    "result_sha256",
+                    "source",
+                    "tool_name",
+                }:
+                    telemetry = _telemetry(
+                        attempted=False,
+                        status="rejected",
+                        error_type="grounding_bundle_invalid",
+                    )
+                    raise GroundingUpdaterError(
+                        "grounding_bundle_invalid", telemetry
+                    )
+                tool_name = item.get("tool_name")
+                arguments = item.get("arguments")
+                request_digest = item.get("request_digest")
+                result = item.get("result")
+                result_sha256 = item.get("result_sha256")
+                if (
+                    tool_name != "get_column_meaning"
+                    or not isinstance(arguments, dict)
+                    or set(arguments) != {"table_name", "column_name"}
+                    or not all(
+                        isinstance(value, str)
+                        and value
+                        and value == value.strip()
+                        and len(value) <= 256
+                        for value in arguments.values()
+                    )
+                    or not isinstance(result, str)
+                    or not result
+                    or len(result) > MAX_P2_CHECK_CUMULATIVE_RESULT_CHARS
+                    or item.get("source")
+                    not in {"official_call", "p2_exact_p1_replay"}
+                ):
+                    telemetry = _telemetry(
+                        attempted=False,
+                        status="rejected",
+                        error_type="grounding_bundle_invalid",
+                    )
+                    raise GroundingUpdaterError(
+                        "grounding_bundle_invalid", telemetry
+                    )
+                expected_request_digest = hashlib.sha256(
+                    f"{tool_name}:{canonical_json(arguments)}".encode("utf-8")
+                ).hexdigest()
+                expected_result_sha256 = hashlib.sha256(
+                    canonical_json(result).encode("utf-8")
+                ).hexdigest()
+                if (
+                    request_digest != expected_request_digest
+                    or result_sha256 != expected_result_sha256
+                ):
+                    telemetry = _telemetry(
+                        attempted=False,
+                        status="rejected",
+                        error_type="grounding_bundle_invalid",
+                    )
+                    raise GroundingUpdaterError(
+                        "grounding_bundle_invalid", telemetry
+                    )
+                cumulative_digests.append(request_digest)
+            if len(cumulative_digests) != len(set(cumulative_digests)):
+                telemetry = _telemetry(
+                    attempted=False,
+                    status="rejected",
+                    error_type="grounding_bundle_invalid",
+                )
+                raise GroundingUpdaterError("grounding_bundle_invalid", telemetry)
         previous_digests: list[str] = []
         for item in previous_calls:
             if not isinstance(item, dict) or set(item) != {
@@ -1353,21 +2196,31 @@ def _validated_bundled_grounding_input(
 
 _CALL_KIND_EVIDENCE_FIELDS: Mapping[GroundingCallKind, frozenset[str]] = {
     "structure": frozenset({"schema"}),
-    "mapping": frozenset({"column_meanings"}),
+    "mapping": frozenset({"column_meanings", "unresolved_mappings"}),
     "knowledge": frozenset(
-        {"knowledge_definitions", "relevant_column_meanings"}
+        {
+            "knowledge_definitions",
+            "relevant_column_meanings",
+            "unresolved_mappings",
+        }
     ),
     "check": frozenset(
         {
             "answered_clarifications",
             "check_context",
             "previous_official_calls",
+            "unresolved_mappings",
         }
     ),
+    "final_gate": frozenset({"final_gate_context"}),
 }
 
 _CHECK_PHASE_LOCAL_CONTEXT_FIELDS = frozenset(
-    {"answered_clarifications", "previous_official_calls"}
+    {
+        "answered_clarifications",
+        "previous_official_calls",
+        "unresolved_mappings",
+    }
 )
 
 
@@ -1381,22 +2234,50 @@ def classify_grounding_input(
     if not isinstance(grounding_input, Mapping):
         raise TypeError("Grounding input must be a mapping")
     common = {"query", "current_state"}
+    common_variants: tuple[set[str], ...]
     if phase == 2:
         common.update({"follow_up", "user_clarifications"})
+        common_variants = (common,)
+    elif phase == 1:
+        common_variants = (common, common | {"user_clarifications"})
     elif phase != 1:
         raise ValueError("Grounding phase must be 1 or 2")
     fields = set(grounding_input)
-    matches = [
-        call_kind
-        for call_kind, evidence_fields in _CALL_KIND_EVIDENCE_FIELDS.items()
-        if fields == common | set(evidence_fields)
-    ]
+    stage_common_variants = tuple(
+        variant
+        for candidate_common in common_variants
+        for variant in (
+            candidate_common,
+            candidate_common | {"regrounding_context"},
+        )
+    )
+    matches: list[GroundingCallKind] = []
+    for candidate_common in stage_common_variants:
+        for call_kind, evidence_fields in _CALL_KIND_EVIDENCE_FIELDS.items():
+            evidence_variants = [set(evidence_fields)]
+            if (
+                any(
+                    fields == candidate_common | candidate_evidence
+                    for candidate_evidence in evidence_variants
+                )
+                and (
+                    "regrounding_context" not in candidate_common
+                    or call_kind != "final_gate"
+                )
+            ):
+                matches.append(call_kind)
     check_suffixes = tuple(
-        _CHECK_PHASE_LOCAL_CONTEXT_FIELDS | {latest_field}
+        context_fields | {latest_field}
+        for context_fields in (
+            _CHECK_PHASE_LOCAL_CONTEXT_FIELDS,
+            _CHECK_PHASE_LOCAL_CONTEXT_FIELDS | {"check_evidence_context"},
+        )
         for latest_field in ("check_context", "latest_tool", "latest_user_answer")
     )
     if "check" not in matches and any(
-        fields == common | suffix for suffix in check_suffixes
+        fields == candidate_common | suffix
+        for candidate_common in stage_common_variants
+        for suffix in check_suffixes
     ):
         matches.append("check")
     if len(matches) != 1:
@@ -1454,11 +2335,119 @@ def parse_grounding_response(
             "mapping": MappingGroundingResponse,
             "knowledge": KnowledgeGroundingResponse,
             "check": GroundingCheckResponse,
+            "final_gate": FinalRegroundingGateResponse,
             None: GroundingLLMResponse,
         }[call_kind]
+        if call_kind == "check" and resolved_literal_executable_carrier_enabled():
+            from valibra_agent.sql_grounding.resolved_literal_proposal_shadow import (
+                GroundingCheckResolvedLiteralProposalShadowResponse,
+            )
+
+            model = GroundingCheckResolvedLiteralProposalShadowResponse
         return model.model_validate(raw)
     except ValidationError as exc:
-        raise _StrictResponseError("form_validation_failed") from exc
+        raise _StrictResponseError(
+            "form_validation_failed",
+            detail=json.dumps(
+                exc.errors(include_url=False, include_input=False),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ),
+        ) from exc
+
+
+def _strip_knowledge_retirement_audit_sidecar(
+    payload: str,
+) -> tuple[str, KnowledgeRetirementAuditSidecar | None]:
+    """Remove a legacy retirement field before authoritative Knowledge parse.
+
+    P2_KNOWLEDGE_RETIREMENT_DECOUPLING_R1: executable retirement does not yet
+    exist, so Provider retirement content cannot participate in core response
+    validity or State materialization.  Retain only a bounded digest summary for
+    audit; never retain or interpret the Provider's proposed authority.
+    """
+
+    try:
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_finite_constant,
+        )
+    except _StrictResponseError:
+        raise
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise _StrictResponseError("json_invalid") from exc
+    if not isinstance(raw, dict) or "knowledge_retirement_proposals" not in raw:
+        return payload, None
+    retired_value = raw.pop("knowledge_retirement_proposals")
+    serialized_value = canonical_json(retired_value)
+    sidecar = KnowledgeRetirementAuditSidecar(
+        value_shape="array" if isinstance(retired_value, list) else "non_array",
+        item_count=len(retired_value) if isinstance(retired_value, list) else 0,
+        value_sha256=hashlib.sha256(serialized_value.encode("utf-8")).hexdigest(),
+    )
+    return canonical_json(raw), sidecar
+
+
+def _strip_knowledge_omission_owned_mappings(
+    payload: str,
+    *,
+    grounding_input: Mapping[str, Any],
+) -> tuple[str, tuple[str, ...]]:
+    """Drop only Knowledge mappings for exact Mapping-owned omissions.
+
+    This narrow transport projection runs before the typed Knowledge form so
+    even an invalid ``targets=[]`` object cannot poison an otherwise valid
+    Official-knowledge selection.  It never repairs or invents a target.
+    """
+
+    raw_unresolved = grounding_input.get("unresolved_mappings")
+    if not isinstance(raw_unresolved, list) or not raw_unresolved:
+        return payload, ()
+    unresolved = tuple(
+        UnresolvedMapping.model_validate(item) for item in raw_unresolved
+    )
+    unresolved_phrases = {item.phrase for item in unresolved}
+    try:
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_finite_constant,
+        )
+    except _StrictResponseError:
+        raise
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise _StrictResponseError("json_invalid") from exc
+    if not isinstance(raw, dict):
+        return payload, ()
+    mappings = raw.get("column_mapping")
+    if not isinstance(mappings, list):
+        return payload, ()
+    ignored = tuple(
+        sorted(
+            {
+                item.get("phrase")
+                for item in mappings
+                if isinstance(item, dict)
+                and isinstance(item.get("phrase"), str)
+                and item.get("phrase") in unresolved_phrases
+            }
+        )
+    )
+    if not ignored:
+        return payload, ()
+    ignored_set = set(ignored)
+    raw["column_mapping"] = [
+        item
+        for item in mappings
+        if not (
+            isinstance(item, dict)
+            and item.get("phrase") in ignored_set
+        )
+    ]
+    return canonical_json(raw), ignored
 
 
 def _contains_unquoted_fence(text: str) -> bool:
@@ -1761,9 +2750,19 @@ def _build_provider_request(
     *,
     api_key: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    if request.prompt != SQL_GROUNDING_STAGE_PROMPTS[request.call_kind]:
+    try:
+        input_payload = json.loads(request.input_json)
+    except (TypeError, ValueError) as exc:
+        raise SQLGroundingProviderError(
+            "SQL Grounding input JSON invalid"
+        ) from exc
+    if (
+        not isinstance(input_payload, dict)
+        or request.prompt
+        != _prompt_for_input_payload(request.call_kind, input_payload)
+    ):
         raise SQLGroundingProviderError("SQL Grounding prompt mismatch")
-    if request.response_schema != SQL_GROUNDING_STAGE_FORM_SCHEMAS[request.call_kind]:
+    if request.response_schema != _form_schema_for_call_kind(request.call_kind):
         raise SQLGroundingProviderError("SQL Grounding form schema mismatch")
     messages = [
         {"role": "system", "content": request.prompt},
@@ -1776,7 +2775,7 @@ def _build_provider_request(
     preset = llm_config.preset_config
     generation: dict[str, Any] = {
         "temperature": preset.get("temperature", 0.0),
-        "max_tokens": SQL_GROUNDING_STAGE_MAX_TOKENS[request.call_kind],
+        "max_tokens": _max_tokens_for_call_kind(request.call_kind),
     }
     if "top_p" in preset:
         generation["top_p"] = preset["top_p"]
@@ -1819,10 +2818,8 @@ def _build_provider_request(
             ),
         },
         "call_kind": request.call_kind,
-        "prompt_sha256": SQL_GROUNDING_STAGE_PROMPT_SHA256[request.call_kind],
-        "form_schema_sha256": SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256[
-            request.call_kind
-        ],
+        "prompt_sha256": _prompt_sha(request.prompt),
+        "form_schema_sha256": _form_sha_for_call_kind(request.call_kind),
         "kernel_configuration_sha256": SQL_GROUNDING_CONFIGURATION_SHA256,
         "model_preset": llm_config.model_preset,
         "model_preset_sha256": llm_config.preset_sha256,
@@ -1935,7 +2932,10 @@ def _is_exact_empty_fuse_hit(
         .rsplit(".", 1)[-1]
     )
     return (
-        call_kind in SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES
+        (
+            call_kind in SQL_GROUNDING_EXACT_EMPTY_RETRY_STAGES
+            or call_kind == "final_gate"
+        )
         and content == ""
         and normalized_finish in {"length", "max_tokens"}
         and usage.output_tokens
@@ -2095,6 +3095,7 @@ def _telemetry(
     provider_attempts: tuple[GroundingProviderAttemptTelemetry, ...] = (),
     final_selected_attempt: int | None = None,
     call_kind: GroundingCallKind | None = None,
+    prompt_sha256: str | None = None,
 ) -> GroundingLLMTelemetry:
     return GroundingLLMTelemetry(
         attempted=attempted,
@@ -2119,12 +3120,16 @@ def _telemetry(
         request_sha256=request_sha,
         response_sha256=response_sha,
         prompt_sha256=(
-            SQL_GROUNDING_STAGE_PROMPT_SHA256[call_kind]
-            if call_kind is not None
-            else SQL_GROUNDING_PROMPT_SHA256
+            prompt_sha256
+            if prompt_sha256 is not None
+            else (
+                _prompt_sha_for_call_kind(call_kind)
+                if call_kind is not None
+                else SQL_GROUNDING_PROMPT_SHA256
+            )
         ),
         form_schema_sha256=(
-            SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256[call_kind]
+            _form_sha_for_call_kind(call_kind)
             if call_kind is not None
             else SQL_GROUNDING_FORM_SCHEMA_SHA256
         ),

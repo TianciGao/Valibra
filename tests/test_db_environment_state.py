@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -23,6 +24,10 @@ FULL_INPUT = (
 
 
 class TaskDatabaseNameTests(unittest.TestCase):
+    @unittest.skipUnless(
+        FULL_INPUT.is_file(),
+        "Full600 dataset is not distributed with the code; install it to run this integrity check.",
+    )
     def test_all_full_task_database_names_are_bounded_and_unique(self) -> None:
         records = [
             json.loads(line)
@@ -116,6 +121,94 @@ class EvaluatorCompatibilityTests(unittest.TestCase):
             "events",
         )
         self.assertIsNone(db_utils._analyze_target_table("SELECT 1"))
+
+
+class KnowledgeCatalogIntegrityTests(unittest.TestCase):
+    def test_source_latex_commands_survive_json_decoding(self) -> None:
+        raw = (
+            r'{"id":1,"knowledge":"formula","description":"",'
+            r'"definition":"\text{A} = \frac{B}{C} \times 100"}'
+        )
+
+        entry = server._decode_source_knowledge_entry(raw)
+
+        self.assertEqual(
+            entry["definition"],
+            r"\text{A} = \frac{B}{C} \times 100",
+        )
+        self.assertNotIn("\t", entry["definition"])
+        self.assertNotIn("\f", entry["definition"])
+
+    def test_correct_json_escapes_and_newlines_are_not_rewritten(self) -> None:
+        raw = json.dumps(
+            {
+                "id": 1,
+                "knowledge": "formula",
+                "description": "",
+                "definition": "Line one\n" + r"\text{Line two}",
+            },
+            separators=(",", ":"),
+        )
+
+        entry = server._decode_source_knowledge_entry(raw)
+
+        self.assertEqual(entry["definition"], "Line one\n" + r"\text{Line two}")
+
+    def test_one_bad_record_does_not_poison_catalog_or_change_task_mask(self) -> None:
+        rows = [
+            json.dumps(
+                {
+                    "id": 1,
+                    "knowledge": "first",
+                    "description": "",
+                    "definition": "First definition.",
+                }
+            ),
+            '{"id":2,"knowledge":"broken",',
+            json.dumps(
+                {
+                    "id": 3,
+                    "knowledge": "third",
+                    "description": "",
+                    "definition": "Third definition.",
+                }
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unit_kb.jsonl"
+            path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            with self.assertLogs(server.logger, level="ERROR"):
+                catalog = server._load_knowledge_catalog(str(path))
+
+        self.assertEqual(set(catalog), {"first", "third"})
+        with patch.dict(server._external_knowledge_cache, {"unit": catalog}):
+            visible = server._filter_knowledge(
+                "unit",
+                {"knowledge_ambiguity": [{"deleted_knowledge": 3}]},
+            )
+        self.assertEqual(set(visible), {"first"})
+
+    def test_shipped_malformed_intent_latex_is_preserved(self) -> None:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "bird-interact-full"
+            / "mental_health"
+            / "mental_health_kb.jsonl"
+        )
+        if not path.is_file():
+            self.skipTest(
+                "Full knowledge catalog is not distributed with the code; "
+                "install it to run this source-data integrity check."
+            )
+
+        catalog = server._load_knowledge_catalog(str(path))
+        definition = next(
+            item["definition"] for item in catalog.values() if item["id"] == 65
+        )
+
+        self.assertTrue(definition.startswith(r"\text{PHRT}"))
+        self.assertNotIn("\t", definition)
+        self.assertNotIn("\f", definition)
 
 
 class DatabaseStateFlowTests(unittest.TestCase):

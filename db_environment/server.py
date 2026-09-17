@@ -33,6 +33,16 @@ app = FastAPI(title="BIRD-Interact DB Environment", version="1.0.0")
 MAX_RESULT_LENGTH = 500
 KNOWLEDGE_VISIBLE_FIELDS = ["id", "knowledge", "description", "definition"]
 
+# Some source KB files contain LaTeX commands with a single backslash even
+# though JSON requires the backslash itself to be escaped. A subset of those
+# commands collide with otherwise-valid JSON escapes (for example ``\text``
+# becomes a tab plus ``ext`` and ``\frac`` becomes a form-feed plus ``rac``),
+# so json.loads() succeeds after silently changing the Official definition.
+# Keep this list limited to command spellings observed in the shipped KBs.
+_SOURCE_KB_LATEX_COMMANDS = frozenset(
+    {"bar", "begin", "beta", "frac", "text", "times"}
+)
+
 _task_data: Dict[str, Dict[str, Any]] = {}
 _schema_cache: Dict[str, str] = {}
 _column_meanings_cache: Dict[str, Dict] = {}
@@ -43,6 +53,87 @@ _successful_phase1_sql: Dict[str, str] = {}
 
 class DatabaseStateError(RuntimeError):
     """Infrastructure failure while preparing/restoring an evaluation database."""
+
+
+def _preserve_source_kb_latex_escapes(raw_line: str) -> str:
+    """Escape known single-backslash LaTeX commands before JSON decoding.
+
+    Already-correct ``\\command`` spellings and ordinary JSON escapes such as
+    ``\n`` remain byte-for-byte unchanged. This is a source-carrier repair,
+    not a semantic rewrite of a Knowledge definition.
+    """
+
+    result: list[str] = []
+    index = 0
+    while index < len(raw_line):
+        character = raw_line[index]
+        if character != "\\":
+            result.append(character)
+            index += 1
+            continue
+
+        run_end = index
+        while run_end < len(raw_line) and raw_line[run_end] == "\\":
+            run_end += 1
+        slash_count = run_end - index
+        result.append("\\" * slash_count)
+
+        # An odd run leaves one source-level escape. Preserve it when it is a
+        # known LaTeX command; an even run is already JSON-safe.
+        if slash_count % 2 == 1:
+            command_end = run_end
+            while command_end < len(raw_line) and raw_line[command_end].isalpha():
+                command_end += 1
+            command = raw_line[run_end:command_end]
+            if command in _SOURCE_KB_LATEX_COMMANDS:
+                result.append("\\")
+        index = run_end
+    return "".join(result)
+
+
+def _decode_source_knowledge_entry(raw_line: str) -> Dict[str, Any]:
+    """Decode one source KB record without allowing lexical escape loss."""
+
+    value = json.loads(_preserve_source_kb_latex_escapes(raw_line))
+    if not isinstance(value, dict):
+        raise ValueError("knowledge record must be an object")
+    knowledge_id = value.get("id")
+    knowledge_name = value.get("knowledge")
+    definition = value.get("definition")
+    if isinstance(knowledge_id, bool) or not isinstance(knowledge_id, int):
+        raise ValueError("knowledge record must have an integer id")
+    if not isinstance(knowledge_name, str) or not knowledge_name.strip():
+        raise ValueError("knowledge record must have a non-empty name")
+    if (
+        not isinstance(definition, str)
+        or not definition
+        or definition != definition.strip()
+    ):
+        raise ValueError("knowledge record must have a canonical definition")
+    return value
+
+
+def _load_knowledge_catalog(path: str) -> Dict[str, Dict[str, Any]]:
+    """Load valid KB entries while quarantining a malformed record locally."""
+
+    catalog: Dict[str, Dict[str, Any]] = {}
+    with open(path, encoding="utf-8") as knowledge_file:
+        for line_number, raw_line in enumerate(knowledge_file, start=1):
+            if not raw_line.strip():
+                continue
+            try:
+                entry = _decode_source_knowledge_entry(raw_line.strip())
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logger.error(
+                    "Knowledge entry quarantined at %s:%s: %s: %s",
+                    path,
+                    line_number,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            catalog[entry["knowledge"]] = entry
+    return catalog
 
 
 def _normalise_sql_sequence(value: Any) -> List[str]:
@@ -171,13 +262,9 @@ def _load_db_data(db_name: str):
         _column_meanings_cache[db_name] = {}
     # Knowledge
     try:
-        kb = {}
-        with open(os.path.join(db_folder, f"{db_name}_kb.jsonl")) as f:
-            for line in f:
-                if not line.strip(): continue
-                entry = json.loads(line.strip())
-                kb[entry["knowledge"]] = entry
-        _external_knowledge_cache[db_name] = kb
+        _external_knowledge_cache[db_name] = _load_knowledge_catalog(
+            os.path.join(db_folder, f"{db_name}_kb.jsonl")
+        )
     except Exception as e:
         logger.error(f"Knowledge load failed for {db_name}: {e}")
         _external_knowledge_cache[db_name] = {}

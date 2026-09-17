@@ -118,39 +118,39 @@ class RuntimeProfileContractTests(unittest.TestCase):
     def test_grounding_check_writer_contract_hashes_are_unchanged(self) -> None:
         self.assertEqual(
             SQL_GROUNDING_PROMPT_SHA256,
-            "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7",
+            "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd",
         )
         self.assertEqual(
             SQL_GROUNDING_FORM_SCHEMA_SHA256,
-            "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81",
+            "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd",
         )
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION_SHA256,
-            "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437",
+            "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110",
         )
         self.assertEqual(
             SQL_GROUNDING_STAGE_PROMPT_SHA256,
             {
-                "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
-                "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
-                "knowledge": "72ad5fd63b7a0e7a9107231326d2cd2468609ae1a275ab31d6c9c81f3b0c899c",
-                "check": "fe9fbd964d6b8cb0ce923a1d3a91e407577d8f167ad67bb174da80053a1c38cb",
+                "structure": "04fe3f57e52e09c4ad41e059afd8a211f9808f54f7cfca15e67524594b0f61e1",
+                "mapping": "a1bad3f28e8328fefea85c87b7092c0069649a0f4d73f2ad7a3135a0d37ac60b",
+                "knowledge": "02a8adcb72c1dcb1ee817c3ca1dc0bb6be5d2dd6521b1ea67a0f8a6dd986cfa7",
+                "check": "d70eedd5785774cec00fa681e8c76f862a41fb5755d3a2af10c5634f29892d44",
             },
         )
         self.assertEqual(
             SQL_GROUNDING_STAGE_FORM_SCHEMA_SHA256,
             {
                 "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
-                "mapping": "7a1e8cb588d1c0b89546bfd02b8be0d254ca015cdee753e5e2d23e0da5ea3b44",
+                "mapping": "830520e298bf044ea34757e6c752774601f44e3a51ce081191087fa52d46ccd7",
                 "knowledge": "c80f6dc31b8bc4aad425fb73fe62e361dd06362551827473ee8e9302052ed246",
-                "check": "ed4bdaf32e5415be3b4f30bd041c0c4dba4225705736c55bd0b516f5079327e6",
+                "check": "10afc916a928a6e31c746817dc1e7cf9c7bd065606b5122cc7f639219d6b25b7",
             },
         )
         self.assertEqual(
             hashlib.sha256(
                 grounding_callbacks._SQL_WRITER_PROMPT.encode("utf-8")
             ).hexdigest(),
-            "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711",
+            "86fdcbc7059bd0d5aea9384805a036ce585346b74fe021a645f9175d9b0d8a6d",
         )
 
     def test_health_summary_identifies_effective_profile(self) -> None:

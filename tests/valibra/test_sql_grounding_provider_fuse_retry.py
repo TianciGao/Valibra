@@ -15,6 +15,7 @@ from valibra_agent.sql_grounding.models import (
 from valibra_agent.sql_grounding.observations import build_sql_grounding_observation
 from valibra_agent.sql_grounding.service import process_sql_grounding_observation
 from valibra_agent.sql_grounding.updater import (
+    MAPPING_VALIDATION_CORRECTION_PROMPT,
     SQL_GROUNDING_CONFIGURATION,
     SQL_GROUNDING_EXACT_EMPTY_RETRY_REASON,
     SQL_GROUNDING_STAGE_FORM_SCHEMAS,
@@ -30,7 +31,7 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
+PROMPT_SHA = "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd"
 
 
 def _environment(key_file: Path) -> dict[str, str]:
@@ -62,7 +63,7 @@ def _request(call_kind: str) -> GroundingLLMRequest:
 def _valid_content(call_kind: str) -> str:
     payloads = {
         "structure": {"tables": [], "join_keys": []},
-        "mapping": {"tables": [], "join_keys": [], "column_mapping": []},
+        "mapping": {"tables": [], "join_keys": [], "column_mapping": [], "unresolved_mappings": []},
         "knowledge": {"column_mapping": [], "selected_knowledge_ids": []},
         "check": {
             "status": "complete",
@@ -105,6 +106,7 @@ def _mapping_input(runtime: GroundingRuntime) -> dict[str, object]:
         "query": "show value",
         "current_state": runtime.grounding_state.model_dump(mode="json"),
         "column_meanings": {"metrics.value": "numeric metric value"},
+        "unresolved_mappings": [],
     }
 
 
@@ -141,6 +143,7 @@ def _knowledge_input(runtime: GroundingRuntime) -> dict[str, object]:
             {"id": 32, "definition": "Use the official metric rule."}
         ],
         "relevant_column_meanings": {},
+        "unresolved_mappings": [],
     }
 
 
@@ -305,6 +308,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "tables": ["metrics"],
                         "join_keys": [],
+                        "unresolved_mappings": [],
                         "column_mapping": [],
                         "unexpected": True,
                     }
@@ -562,6 +566,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "tables": ["metrics"],
                         "join_keys": [],
+                        "unresolved_mappings": [],
                         "column_mapping": [
                             {"phrase": "value", "targets": ["metrics.value"]}
                         ],
@@ -604,6 +609,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "tables": ["metrics"],
                         "join_keys": [],
+                        "unresolved_mappings": [],
                         "column_mapping": [
                             {"phrase": "value", "targets": ["metrics.value"]}
                         ],
@@ -635,7 +641,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.llm_telemetry.attempt_count, 2)
 
-    async def test_state_validation_failure_is_not_retried(self):
+    async def test_state_validation_failure_gets_one_logical_correction_not_retry(self):
         calls = []
 
         async def completion(**kwargs):
@@ -645,6 +651,7 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "tables": ["metrics"],
                         "join_keys": [],
+                        "unresolved_mappings": [],
                         "column_mapping": [
                             {
                                 "phrase": "value",
@@ -669,11 +676,18 @@ class StageSpecificFuseRetryTests(unittest.IsolatedAsyncioTestCase):
             SQLGroundingUpdater(self._client(completion)),
             grounding_input=_mapping_input(runtime),
         )
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["messages"][0]["content"], MAPPING_VALIDATION_CORRECTION_PROMPT)
         self.assertEqual(result.state_update.status, "rejected")
         self.assertEqual(result.state_update.error_type, "state_validation_failed")
         self.assertEqual(result.runtime, runtime)
         self.assertFalse(result.llm_telemetry.retry_triggered)
+        self.assertEqual(result.llm_telemetry.attempt_count, 1)
+        self.assertIsNotNone(result.mapping_validation_repair)
+        self.assertEqual(
+            result.mapping_validation_repair.outcome,
+            "repair_validation_failed",
+        )
 
     async def test_private_audit_records_both_real_attempts(self):
         calls = []

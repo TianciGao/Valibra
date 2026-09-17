@@ -24,6 +24,7 @@ from valibra_agent.sql_grounding.models import (
     DomainKnowledge,
     GroundingLLMResponse,
     GroundingRuntime,
+    MappingGroundingResponse,
     SQLGroundingState,
     SQLGroundingValidationError,
     ValidationContext,
@@ -190,7 +191,12 @@ class PrimaryFakeUpdater:
             candidate = complete_state()
             focus = "none"
         return GroundingUpdaterResult(
-            response=GroundingLLMResponse(
+            response=MappingGroundingResponse(
+                tables=candidate.tables or (),
+                join_keys=candidate.join_keys or (),
+                column_mapping=candidate.column_mapping or (),
+                unresolved_mappings=(),
+            ) if "column_meanings" in fields else GroundingLLMResponse(
                 sql_grounding_state=candidate,
                 user_clarification_requests=(),
                 next_focus_dimension=focus,
@@ -342,11 +348,12 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
             [set(item) for item in updater.inputs],
             [
                 {"query", "schema", "current_state"},
-                {"query", "column_meanings", "current_state"},
+                {"query", "column_meanings", "current_state", "unresolved_mappings"},
                 {
                     "query",
                     "knowledge_definitions",
                     "relevant_column_meanings",
+                    "unresolved_mappings",
                     "current_state",
                 },
             ],
@@ -409,7 +416,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
                 "metadata",
                 "get_all_column_meanings",
                 COLUMN_MEANINGS,
-                {"column_meanings": json.loads(COLUMN_MEANINGS)},
+                {"column_meanings": json.loads(COLUMN_MEANINGS), "unresolved_mappings": []},
                 mapping_state(),
                 "domain_knowledge",
             ),
@@ -420,6 +427,7 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "knowledge_definitions": json.loads(KNOWLEDGE_DEFINITIONS),
                     "relevant_column_meanings": json.loads(COLUMN_MEANINGS),
+                    "unresolved_mappings": [],
                 },
                 complete_state(),
                 "none",
@@ -805,8 +813,8 @@ class Stage2PrimaryGroundingTests(unittest.IsolatedAsyncioTestCase):
             phase=1,
         )
         relevant = request_payload["relevant_column_meanings"]
-        self.assertIn("stage2|operational_metrics|maintcost", relevant)
-        self.assertIn("stage2|operational_metrics|payload", relevant)
+        self.assertIn("operational_metrics.maintcost", relevant)
+        self.assertIn("operational_metrics.payload", relevant)
         self.assertNotIn("stage2|unrelated_table|other_column", relevant)
 
         observation = build_sql_grounding_observation(

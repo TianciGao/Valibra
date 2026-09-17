@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "status": "offline_validated",
+  "publication_date": "2026-09-17",
+  "evaluated_runtime_note": "runtime_source_sha256 identifies the scored Full600 snapshot, before the audit-only storage fix.",
+  "release_runtime_overrides": {
+    "valibra_agent/grounding_callbacks.py": "4f779358006f1556a4cd62aaa911cbf4db676f4172582a7e72c16690ec1fe949"
+  },
+  "release_runtime_patch": "audit_storage.patch",
+  "parent_commit": "c8ffcfa3b75b47ff1455de9ecfd8214fb6ea3fd2",
+  "branch": "research/sql-grounding-v1",
+  "evaluation_model": "glm-5.2",
+  "evaluation_provider": "Zhipu official",
+  "execution_profile": "leaderboard",
+  "feature_flags": {
+    "VALIBRA_AINTERACT_FALLBACK": "1",
+    "VALIBRA_ANSWER_CONTRACT_GUARD_V0": "1",
+    "VALIBRA_ANSWER_CONTRACT_SHADOW": "1",
+    "VALIBRA_FINAL_REGROUNDING_GATE": "1",
+    "VALIBRA_MAIN_FRESH_RECOMPILE_R1": "1",
+    "VALIBRA_P2_CHECK_CUMULATIVE_OFFICIAL_EVIDENCE": "1",
+    "VALIBRA_P2_EXACT_OFFICIAL_EVIDENCE_REUSE": "1"
+  },
+  "disabled_experiment_flags": {
+    "VALIBRA_CHECK_RESOLVED_LITERAL_EXECUTABLE_CARRIER_R1": "0",
+    "VALIBRA_CHECK_RESOLVED_LITERAL_PROPOSAL_SHADOW_R1": "0"
+  },
+  "identities": {
+    "grounding_configuration_sha256": "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110",
+    "grounding_form_sha256": "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd",
+    "grounding_prompt_sha256": "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd",
+    "main_prompt_sha256": "86fdcbc7059bd0d5aea9384805a036ce585346b74fe021a645f9175d9b0d8a6d"
+  },
+  "runtime_source_sha256": {
+    "db_environment/server.py": "2c38b3d41301c1ad6a5c743a7f9b2a06f53fa9fbb13605293c00f53ae3d18a2f",
+    "orchestrator/ainteract.py": "a1490b5d92cb13c77635f7550f07312d6b3019e1f4848dbe59b93ec0bfcf0d2e",
+    "valibra_agent/adk_runtime.py": "f218bde21e65824c937b9f2eb0f88e150e900fa95cd7379a966cb84f2494a070",
+    "valibra_agent/fallback/__init__.py": "9928eaae7b371ce09d76d0558964f3aa58cdea9b64bf6a589608f9d1f8415e07",
+    "valibra_agent/fallback/ainteract_fallback.py": "50cff6363562215f32db9e98da81c82736d4adb0c4169f582cf093c5e90ab61a",
+    "valibra_agent/grounding_callbacks.py": "f5463417715703d6092a2590d317cca467bcb452922f065ed6e1c18b10ef161d",
+    "valibra_agent/server.py": "3cf6afb09ac5a851e337ea65e094d08163a5df1d4445a39794149015fc42852f",
+    "valibra_agent/sql_grounding/__init__.py": "45b6d21d1361019951ae8b794751a6d781b50f9fd39f21d6bb0b3f990c400b10",
+    "valibra_agent/sql_grounding/answer_contract_lite.py": "c9dc12b2488e57ab19bcb026bd17a0749682e9ebb17bd3e2d63102d79eaaffa3",
+    "valibra_agent/sql_grounding/main_entry_carrier.py": "0fb2586428f8379f3761d1a6ad06a6bb3f92b6294d049e0e13783416f45dcd80",
+    "valibra_agent/sql_grounding/models.py": "94715b7dceeb055779ed09aca41d300995d1b99978ed1778f80ca234ad9f1309",
+    "valibra_agent/sql_grounding/resolved_literal_carrier_materialization.py": "11ee5be7b1fec59bf94a4b8fd4fb0947c5ed34856a97b92e9a2f2e83a5b71e62",
+    "valibra_agent/sql_grounding/resolved_literal_main_overlay.py": "63db3eac7e515431f77bc657e7869139d2841f72bd5f6e70ecbfff83e85d3a67",
+    "valibra_agent/sql_grounding/resolved_literal_proposal_shadow.py": "7ef619ec0adec07c2fc3a24fb0c0c7dc0ca3d2fce4aef5fc32fd97984e008728",
+    "valibra_agent/sql_grounding/semantic_guard_v0.py": "7db4da403003266686892578639a7ac0a1021b95eb8d4d2c8806ae131c64ea89",
+    "valibra_agent/sql_grounding/service.py": "38b05b7bd6bab98de6ff0f2b7b3e184d983cad67cd9cf15468d797419fb6edd5",
+    "valibra_agent/sql_grounding/updater.py": "330a7a703b9050e6b34c5bef56c31352802fa1149c922a19108e8c99e8ac6b70"
+  },
+  "artifact_sha256": {
+    "private_comparative_score_audit": "d108bc6fdfa1a17e05876211615cf280b0573706391ae5367fe3d72032ba70c9",
+    "private_token_audit": "2c7b878649cc50a6e524891e5a58f8c5fd7c74857dd2380aa817086af44b76fd"
+  },
+  "secrets_and_private_evaluation_artifacts_included": false
+}

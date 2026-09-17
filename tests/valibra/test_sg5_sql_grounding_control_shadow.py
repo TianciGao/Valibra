@@ -15,6 +15,7 @@ from valibra_agent.sql_grounding.models import (
     ColumnMapping,
     GroundingLLMResponse,
     GroundingRuntime,
+    MappingGroundingResponse,
     SQLGroundingState,
 )
 from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
@@ -26,9 +27,9 @@ from valibra_agent.sql_grounding.updater import (
 )
 
 
-PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
-FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437"
+PROMPT_SHA = "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd"
+FORM_SHA = "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd"
+CONFIG_SHA = "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110"
 QUERY = "Show the maintenance cost."
 SCHEMA = """CREATE TABLE operational_metrics (
   maintcost NUMERIC
@@ -167,6 +168,14 @@ class QueueUpdater:
             )
         else:
             response = self.responses.pop(0)
+        if "column_meanings" in fields:
+            candidate = response.sql_grounding_state
+            response = MappingGroundingResponse(
+                tables=candidate.tables or (),
+                join_keys=candidate.join_keys or (),
+                column_mapping=candidate.column_mapping or (),
+                unresolved_mappings=(),
+            )
         self.calls += 1
         return GroundingUpdaterResult(
             response=response,
@@ -432,7 +441,9 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.stage, "P2_INCREMENTAL")
         self.assertEqual(updater.calls, 3)
         self.assertEqual(updater.observation_types, ["p2_follow_up"] * 3)
-        audit = current["tool_trajectory"][-1][grounding_callbacks.SHADOW_AUDIT_KEY]
+        # P2 creates additional events; resolve the submit audit by its exact ID.
+        record = current[grounding_callbacks.GROUNDING_TOOL_AUDITS_KEY]["p1-pass"]
+        audit = record[grounding_callbacks.SHADOW_AUDIT_KEY]
         self.assertEqual(
             [
                 item["service_status"]
@@ -440,9 +451,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
             ],
             ["accepted", "accepted", "accepted"],
         )
-        control = current["tool_trajectory"][-1][
-            grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
-        ]
+        control = record[grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY]
         self.assertEqual(control["official_outcome"], "p1_follow_up")
         self.assertEqual(control["event"], "official_p2_follow_up")
 
@@ -485,7 +494,7 @@ class SG5ControlShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.stage, "P2_INCREMENTAL")
         self.assertEqual(final.grounding_revision, 2)
         self.assertEqual(updater.calls, 3)
-        control = current["tool_trajectory"][-1][
+        control = current[grounding_callbacks.GROUNDING_TOOL_AUDITS_KEY]["repair-pass-success"][
             grounding_callbacks.GROUNDING_CONTROL_AUDIT_KEY
         ]
         self.assertEqual(control["official_outcome"], "p1_follow_up")

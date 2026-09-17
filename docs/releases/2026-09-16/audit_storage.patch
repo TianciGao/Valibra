@@ -1,0 +1,86 @@
+--- a/valibra_agent/grounding_callbacks.py
++++ b/valibra_agent/grounding_callbacks.py
+@@ -212,7 +212,9 @@
+ _MAX_KNOWLEDGE_OMISSION_PROTECTION_AUDITS = 32
+ _MAX_RESOLVED_LITERAL_CARRIER_AUDITS = 32
+ _MAX_ATOMIC_REGROUNDING_OFFICIAL_CALLS = 8
+-_MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
++# Two bounded headers (shadow/control) plus at most four bounded P2 stages.
++_MAX_P2_AUDIT_STAGES = 4
++_MAX_TOOL_AUDIT_RECORD_BYTES = (2 + _MAX_P2_AUDIT_STAGES) * _MAX_AUDIT_BYTES + 256
+ _MAX_ACTIVE_TASK_SYNCHRONIZERS = 512
+ _MAX_SEQUENCE = 9_223_372_036_854_775_807
+ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+@@ -9494,6 +9496,9 @@
+             raise ValueError("invalid exact tool callback audit key")
+         if not isinstance(value, dict) or value.get("function_call_id") != key:
+             raise ValueError("invalid exact tool callback audit record")
++        _require_bounded_tool_audit(value.get(SHADOW_AUDIT_KEY))
++        if GROUNDING_CONTROL_AUDIT_KEY in value:
++            _require_bounded_audit(value[GROUNDING_CONTROL_AUDIT_KEY])
+         encoded = canonical_json(value).encode("utf-8")
+         if len(encoded) > _MAX_TOOL_AUDIT_RECORD_BYTES:
+             raise ValueError("exact tool callback audit record exceeds bound")
+@@ -9512,7 +9517,7 @@
+ 
+     if not _IDENTIFIER_RE.fullmatch(function_call_id):
+         raise ValueError("exact tool callback audit requires function_call_id")
+-    _require_bounded_audit(shadow_audit)
++    _require_bounded_tool_audit(shadow_audit)
+     if control_audit is not None:
+         _require_bounded_audit(control_audit)
+     records = _load_tool_callback_audits(state)
+@@ -10227,7 +10232,10 @@
+     trajectory = state.get("tool_trajectory", [])
+     if not isinstance(trajectory, list) or not 0 <= index < len(trajectory):
+         return
+-    _require_bounded_audit(metadata)
++    if key == SHADOW_AUDIT_KEY:
++        _require_bounded_tool_audit(metadata)
++    else:
++        _require_bounded_audit(metadata)
+     event = trajectory[index]
+     if not isinstance(event, dict):
+         return
+@@ -10265,6 +10273,41 @@
+     }
+ 
+ 
++def _require_bounded_tool_audit(metadata: dict[str, Any]) -> None:
++    """Bound a P2 audit by stage, without dropping or rewriting its contents.
++
++    A submit callback contains up to four stage observations. Applying the
++    single-observation limit to their concatenation discarded healthy P2 audit
++    records. The header and every child still have the original byte limit;
++    nested composites and additional stages do not get a larger allowance.
++    This validator is used only at audit persistence/attachment boundaries.
++    """
++
++    if not isinstance(metadata, dict):
++        raise ValueError("invalid tool callback audit")
++    if "p2_follow_up" not in metadata:
++        _require_bounded_audit(metadata)
++        return
++    follow_up = metadata["p2_follow_up"]
++    if not isinstance(follow_up, dict) or set(follow_up) != {"staged_grounding"}:
++        raise ValueError("invalid P2 tool audit envelope")
++    stages = follow_up["staged_grounding"]
++    if not isinstance(stages, list) or not 1 <= len(stages) <= _MAX_P2_AUDIT_STAGES:
++        raise ValueError("invalid P2 tool audit stage count")
++    expected = ("structure", "mapping", "knowledge", "check")
++    for index, stage in enumerate(stages):
++        if (
++            not isinstance(stage, dict)
++            or stage.get("staged_grounding_kind") != expected[index]
++            or "p2_follow_up" in stage
++        ):
++            raise ValueError("invalid P2 tool audit stage")
++        _require_bounded_audit(stage)
++    # Preserve the envelope overhead in the header limit. No input is mutated.
++    header = {**metadata, "p2_follow_up": {"staged_grounding": []}}
++    _require_bounded_audit(header)
++
++
+ def _require_bounded_audit(metadata: dict[str, Any]) -> None:
+     encoded = canonical_json(metadata).encode("utf-8")
+     if len(encoded) > _MAX_AUDIT_BYTES:

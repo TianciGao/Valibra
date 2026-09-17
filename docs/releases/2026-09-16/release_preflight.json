@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-17",
+  "status": "offline_validation_passed",
+  "scope": "Pre-commit validation record; Git commit and remote branch identify publication.",
+  "runtime_code_changed_by_release_preparation": true,
+  "runtime_change": "Bounded P2 audit storage only; see audit_storage.patch.",
+  "provider_calls": 0,
+  "database_calls": 0,
+  "new_e2e_runs": 0,
+  "evaluated_runtime_files_checked": 17,
+  "evaluated_runtime_hashes_unchanged": 16,
+  "authorized_audit_only_overrides": 1,
+  "prompt_form_configuration_hashes_unchanged": true,
+  "offline_test_summary": {
+    "passed": 513,
+    "failed_including_subtests": 0,
+    "skipped": 5,
+    "collection_errors": 0,
+    "passed_subtests": 315,
+    "warnings": 11
+  },
+  "staged_snapshot_without_local_data": {
+    "passed": 511,
+    "failed": 0,
+    "skipped": 7,
+    "passed_subtests": 315,
+    "warnings": 11,
+    "additional_skips": "Two source-data integrity checks require datasets excluded from Git."
+  },
+  "initial_offline_test_summary": {
+    "passed": 440,
+    "failed_including_subtests": 156,
+    "skipped": 4,
+    "collection_errors": 1,
+    "passed_subtests": 248
+  },
+  "after_test_sync_before_runtime_fix": {
+    "passed": 504,
+    "failed": 2,
+    "skipped": 5,
+    "passed_subtests": 303
+  },
+  "historical_prompt_assertion_modules_archived": 2,
+  "historical_sg7_dependency_skip": true,
+  "test_only_sync_authorized": true,
+  "audit_only_runtime_fix_separately_authorized": true,
+  "audit_limits": {
+    "ordinary_header_or_stage_bytes": 4096,
+    "max_p2_stages": 4,
+    "max_tool_record_bytes": 24832,
+    "max_tool_records": 64
+  },
+  "audit_patch_reverse_check": "passed",
+  "private_artifacts_excluded": true,
+  "secret_pattern_scan": {
+    "files": 70,
+    "potential_matches": 0,
+    "files_over_1mb": 0
+  },
+  "expanded_credential_scan": {
+    "reviewed_matches": 6,
+    "real_credentials_found": 0,
+    "note": "All six are unchanged synthetic credential-parser / mocked-provider fixtures already in the parent commit."
+  },
+  "reviewed_whitespace_warnings": "Three frozen-source EOF blank lines and three unified-diff context lines are preserved; other staged whitespace checks pass.",
+  "confirmed_blockers": []
+}

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from system_agent import callbacks as baseline_callbacks
 from valibra_agent import grounding_callbacks
+from valibra_agent.sql_grounding import updater as grounding_updater
 from valibra_agent.sql_grounding.models import (
     ColumnMapping,
     DomainKnowledge,
@@ -48,21 +49,21 @@ from valibra_agent.sql_grounding.updater import (
 
 
 QUERY = "Show the maintenance cost for active assets."
-PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
-FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437"
-WRITER_PROMPT_SHA = "61deab4ea63bdef3a8c511a0a625abdbe87969f9df36130f76344d7bcc8ea711"
+PROMPT_SHA = "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd"
+FORM_SHA = "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd"
+CONFIG_SHA = "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110"
+WRITER_PROMPT_SHA = "86fdcbc7059bd0d5aea9384805a036ce585346b74fe021a645f9175d9b0d8a6d"
 STAGE_PROMPT_SHA = {
-    "structure": "dacb466200beafb6dfc6ba6d1f8cf3da40cfd0ea791d7f77e8d940f84f6528fd",
-    "mapping": "2dced1fcc8aaeb5b22dc5f861209d22f8a21b64613d31d3b4472f1ddd4cde3c3",
-    "knowledge": "72ad5fd63b7a0e7a9107231326d2cd2468609ae1a275ab31d6c9c81f3b0c899c",
-    "check": "fe9fbd964d6b8cb0ce923a1d3a91e407577d8f167ad67bb174da80053a1c38cb",
+    "structure": "04fe3f57e52e09c4ad41e059afd8a211f9808f54f7cfca15e67524594b0f61e1",
+    "mapping": "a1bad3f28e8328fefea85c87b7092c0069649a0f4d73f2ad7a3135a0d37ac60b",
+    "knowledge": "02a8adcb72c1dcb1ee817c3ca1dc0bb6be5d2dd6521b1ea67a0f8a6dd986cfa7",
+    "check": "d70eedd5785774cec00fa681e8c76f862a41fb5755d3a2af10c5634f29892d44",
 }
 STAGE_FORM_SHA = {
     "structure": "d040bb89edcd2331b8ab51e5169dedcc6b87fefadc39abdabcbfd11a2fdcc0b5",
-    "mapping": "7a1e8cb588d1c0b89546bfd02b8be0d254ca015cdee753e5e2d23e0da5ea3b44",
+    "mapping": "830520e298bf044ea34757e6c752774601f44e3a51ce081191087fa52d46ccd7",
     "knowledge": "c80f6dc31b8bc4aad425fb73fe62e361dd06362551827473ee8e9302052ed246",
-    "check": "ed4bdaf32e5415be3b4f30bd041c0c4dba4225705736c55bd0b516f5079327e6",
+    "check": "10afc916a928a6e31c746817dc1e7cf9c7bd065606b5122cc7f639219d6b25b7",
 }
 SCHEMA_WITH_ROWS = """CREATE TABLE operational_metrics (
   asset_id INTEGER PRIMARY KEY,
@@ -78,6 +79,7 @@ asset_id | maintcost | reported_cost | status | payload
 """
 EMPTY_CHECK_PHASE_CONTEXT = {
     "previous_official_calls": [],
+    "unresolved_mappings": [],
     "answered_clarifications": [],
 }
 
@@ -157,24 +159,44 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             self.assertFalse(schema.get("additionalProperties", True))
         knowledge_prompt = SQL_GROUNDING_STAGE_PROMPTS["knowledge"]
         self.assertLess(
-            knowledge_prompt.index("选择当前 Query 真正需要的精确 knowledge"),
-            knowledge_prompt.index("再用选中的 knowledge 检查并修正"),
+            knowledge_prompt.index("选择完成当前累计 Query 真正需要的 Official knowledge"),
+            knowledge_prompt.index("bounded targeted correction"),
         )
         self.assertIn(
-            "current column_mapping 只是上一轮的暂定结果",
+            "不要根据 current column_mapping 反向选择",
             knowledge_prompt,
         )
-        self.assertIn("不是选择 knowledge 的依据", knowledge_prompt)
-        self.assertIn("不生成 SQL", knowledge_prompt)
+        self.assertIn("如果没有 direct match", knowledge_prompt)
+        self.assertIn("selected_knowledge_ids = []", knowledge_prompt)
         mapping_prompt = SQL_GROUNDING_STAGE_PROMPTS["mapping"]
         self.assertIn('"targets": ["..."]', mapping_prompt)
-        self.assertIn("字段名必须是 targets，不能是 target", mapping_prompt)
-        self.assertIn('必须写成 ["table.column"]', mapping_prompt)
+        self.assertIn("多个 targets 不是候选字段集合", mapping_prompt)
+        self.assertIn("多个 targets 不是候选字段集合，也不代表 SUM / AVG / ratio", mapping_prompt)
+        self.assertNotIn("第二轮 re-Grounding consumption contract", mapping_prompt)
+        regrounding_prompt = (
+            grounding_updater.MAPPING_REGROUNDING_GROUNDING_PROMPT
+        )
+        self.assertIn(
+            "第二轮 re-Grounding consumption contract",
+            regrounding_prompt,
+        )
+        self.assertIn(
+            "必须把其中每个",
+            regrounding_prompt,
+        )
+        self.assertIn(
+            "不得因为 current_state 已有 stored / derived / proxy target",
+            regrounding_prompt,
+        )
+        self.assertIn(
+            "与本次 invalidation 无关的 cumulative mappings 必须原样保留",
+            regrounding_prompt,
+        )
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         self.assertIn("previous_official_calls", check_prompt)
         self.assertIn("answered_clarifications", check_prompt)
-        self.assertIn("不得通过无意义改写参数", check_prompt)
-        self.assertIn("不包含 raw tool result", check_prompt)
+        self.assertIn("无意义参数改写绕过 duplicate guard", check_prompt)
+        self.assertIn("当前 Official phase 已执行的 tool + canonical arguments", check_prompt)
         self.assertIn(
             "next_tool 必须是上述对象之一或 null，不能是字符串",
             check_prompt,
@@ -186,34 +208,30 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         self.assertIn('"tool_name": "get_column_meaning"', check_prompt)
         self.assertIn('"tool_name": "ask_user"', check_prompt)
         self.assertIn("question 只写一次", check_prompt)
-        self.assertIn("只填 phrase 和 kind", check_prompt)
-        self.assertIn("必须原样保留，不能随意清空", check_prompt)
+        self.assertIn("requirement_type 与 related_mapping_phrases 必须同时填写或同时省略", check_prompt)
+        self.assertIn("不能随意新增、改写或清空", check_prompt)
 
     def test_check_prompt_requires_semantic_completeness_before_complete(self) -> None:
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         requirements = {
             "formula": (
-                "派生指标、计算公式、阈值或业务判断规则",
+                "派生指标、公式、阈值或业务判断规则",
                 "只有相关字段不够",
-                "应如何组合计算",
-                "缺少精确规则时必须 incomplete",
+                "足够精确的 Official rule",
             ),
             "semantic_conflict": (
-                "Query 与 State 的语义一致性",
-                "明显不同、相反",
-                "相邻/派生概念",
+                "Direct semantic coverage",
+                "每个 SQL-relevant concept",
+                "related metric、proxy、inverse metric",
                 "不得为了保留 current mapping 而放行错误语义",
             ),
             "literal": (
-                "阈值、类别值或条件时",
-                "必须在 current_state 或本轮合法 Official",
-                "非示例性的依据",
-                "不得采用示例值",
+                "只有 Query 真正依赖的 threshold、类别值、predicate 才是 complete 条件",
+                "Query、仍然有效的 user clarification 或 Official evidence",
+                "只是示例",
             ),
             "complete": (
-                "字段、关系、精确业务规则/公式和关键 literal 都已齐全",
-                "彼此语义一致时",
-                "才能 complete",
+                "全部通过才 complete",
             ),
         }
         for case, fragments in requirements.items():
@@ -221,41 +239,59 @@ class SQLGroundingV13FormTests(unittest.TestCase):
                 for fragment in fragments:
                     self.assertIn(fragment, check_prompt)
         self.assertIn("只判断并补齐一个最具体的缺口", check_prompt)
-        self.assertIn("不使用 execute_sql 探索", check_prompt)
+        self.assertIn("Check 不负责创造、拼接或探索 SQL", check_prompt)
+
+    def test_mapping_regrounding_prompt_is_selected_for_both_restart_routes(
+        self,
+    ) -> None:
+        ordinary = {"query": QUERY, "current_state": {}}
+        mapping_restart = {
+            **ordinary,
+            "regrounding_context": {"decision": "REGROUND_MAPPING"},
+        }
+        structure_restart = {
+            **ordinary,
+            "regrounding_context": {"decision": "REGROUND_STRUCTURE"},
+        }
+        self.assertEqual(
+            grounding_updater._prompt_for_input_payload("mapping", ordinary),
+            SQL_GROUNDING_STAGE_PROMPTS["mapping"],
+        )
+        self.assertEqual(
+            grounding_updater._prompt_for_input_payload(
+                "mapping", structure_restart
+            ),
+            grounding_updater.MAPPING_REGROUNDING_GROUNDING_PROMPT,
+        )
+        self.assertEqual(
+            grounding_updater._prompt_for_input_payload(
+                "mapping", mapping_restart
+            ),
+            grounding_updater.MAPPING_REGROUNDING_GROUNDING_PROMPT,
+        )
 
     def test_check_prompt_distinguishes_entity_grain_and_literal_authority(self) -> None:
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         cases = {
             "finer_grain_without_identity_is_incomplete": (
-                "measure 来自更细粒度的 event、snapshot",
+                "measure 来自更细粒度 record",
                 "identity / output target",
-                "grouping target / 关系",
-                "仅有细粒度 measure 和一条可达 join path 不够",
-                "缺少 entity identity 或 grouping grain 时必须 incomplete",
+                "grouping / relation",
+                "join path 不够",
             ),
             "explicit_entity_grain_does_not_require_guessed_aggregate": (
                 "不得自动猜 SUM / AVG / MAX",
-                "不得自动补 mapping",
-                "entity identity / grouping",
-                "已明确，且 Query",
-                "其他 completeness 条件满足时可以 complete",
+                "entity identity / output target",
             ),
             "illustrative_literal_is_not_authoritative": (
-                "for example / e.g. / such as / 例如",
+                "for example / e.g. /",
+                "such as / 例如",
                 "只是示例",
-                "不能升级为 frozen mandatory",
-                "不得采用示例值",
-            ),
-            "direct_predicate_can_be_authoritative": (
-                "没有示例限定词的明确固定 predicate",
-                "authoritative rule",
-                "确实需要该 predicate",
+                "不能自动升级为 mandatory predicate",
             ),
             "irrelevant_example_does_not_create_threshold_gap": (
-                "只要求排序、最值或返回观测值",
-                "不得因为它不具权威性而制造 missing threshold",
-                "不得强制加入对应谓词",
-                "MAX / MIN / ORDER BY 等操作不要求在 State 中重复",
+                "排序、MAX / MIN",
+                "不要求在 State 中重复成 business rule",
             ),
         }
         for case, fragments in cases.items():
@@ -266,47 +302,25 @@ class SQLGroundingV13FormTests(unittest.TestCase):
     def test_check_prompt_requires_clarification_to_resolve_the_exact_gap(self) -> None:
         check_prompt = SQL_GROUNDING_STAGE_PROMPTS["check"]
         required_fragments = (
-            "Clarification Scope Gate（最高优先级）",
-            "A. 窄澄清",
-            "B. 语义扩展",
-            "C. 未解决",
-            "只有 Gate 0 判定为 A（窄澄清）后",
-            "明确、直接提供上一轮缺少的具体",
-            "latest_user_answer 仍不等于缺口自动解决",
-            "State 外的 phase-local clarification evidence",
-            "不是 Official schema、metadata",
-            "不得复制、改写或概括进",
-            "Clarification overlay 只是为已有 Grounding 补充参数的通道",
-            "不是替代新 Grounding 语义的通道",
-            "当前这个包含 latest_user_answer 的 Check turn 绝对禁止 complete",
-            "不得把历史上的 B 类语义扩展当作永久禁止 complete 的理由",
-            "全部已充分 Ground 且其他检查均通过时允许 complete",
-            "out of scope",
-            "不知道",
-            "不确定",
-            "回答模糊、拒绝",
-            "与缺口无关",
-            "不得生成或猜测任何缺失语义",
-            "回答没有解决缺口时必须 incomplete",
-            "next_tool = null 并 terminal",
-            "不得为了满足 Form 重复",
-            "不得伪造新的 gap 或 tool",
+            "ask_user 是高成本 Grounding-cycle boundary",
+            "至少存在两个合理的用户业务解释",
+            "不同解释会实质改变 SQL-relevant Grounding",
+            "Official evidence 无法替用户决定真实意图",
+            "用户回答必须由 runtime 加入 State 外",
+            "必须 status=incomplete、next_tool=null",
+            "不得再次询问已经回答的",
+            "同一 phrase",
+            "clarification 不是 schema、metadata 或 Official business",
+            "本轮 Check 不得一点点修旧 State",
+            "不要在 Check 中一点点重做 Structure / Mapping / Knowledge",
+            "应 fail-closed",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, check_prompt)
-        self.assertIn("“1000 hours”可以解决该缺口", check_prompt)
         self.assertIn(
-            "column_mapping 和 domain_knowledge 必须与 current_state",
+            "column_mapping 和 domain_knowledge 必须返回修正后的完整当前值",
             check_prompt,
-        )
-        self.assertLess(
-            check_prompt.index("0. Clarification Scope Gate"),
-            check_prompt.index("1. 业务规则完整性"),
-        )
-        self.assertLess(
-            check_prompt.index("B. 语义扩展"),
-            check_prompt.index("5. 窄澄清是否直接解决上一轮缺口"),
         )
 
     def test_check_completeness_examples_keep_the_strict_existing_form(self) -> None:
@@ -340,6 +354,7 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             with self.subTest(gap=gap):
                 response = GroundingCheckResponse(
                     status="incomplete",
+                    clarification_route="none",
                     missing_information=gap,
                     next_tool=tool,
                     column_mapping=complete_state().column_mapping or (),
@@ -351,6 +366,7 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         rule = "Use the approved threshold 0.75 in the documented ratio formula."
         complete = GroundingCheckResponse(
             status="complete",
+            clarification_route="none",
             missing_information=None,
             next_tool=None,
             column_mapping=complete_state().column_mapping or (),
@@ -369,7 +385,12 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         )
         self.assertEqual(
             set(SQL_GROUNDING_STAGE_FORM_SCHEMAS["mapping"]["properties"]),
-            {"tables", "join_keys", "column_mapping"},
+            {
+                "tables",
+                "join_keys",
+                "column_mapping",
+                "unresolved_mappings",
+            },
         )
         self.assertEqual(
             set(SQL_GROUNDING_STAGE_FORM_SCHEMAS["knowledge"]["properties"]),
@@ -379,6 +400,7 @@ class SQLGroundingV13FormTests(unittest.TestCase):
             set(SQL_GROUNDING_STAGE_FORM_SCHEMAS["check"]["properties"]),
             {
                 "status",
+                "clarification_route",
                 "missing_information",
                 "next_tool",
                 "column_mapping",
@@ -390,7 +412,7 @@ class SQLGroundingV13FormTests(unittest.TestCase):
         ]
         self.assertEqual(
             set(clarification_schema["properties"]),
-            {"phrase", "kind"},
+            {"phrase", "kind", "requirement_type", "related_mapping_phrases"},
         )
         self.assertFalse(clarification_schema.get("additionalProperties", True))
 
@@ -441,12 +463,14 @@ class SQLGroundingV13FormTests(unittest.TestCase):
     def test_check_requires_complete_or_one_concrete_gap(self) -> None:
         complete = GroundingCheckResponse(
             status="complete",
+            clarification_route="none",
             column_mapping=complete_state().column_mapping or (),
             domain_knowledge=(),
         )
         self.assertIsNone(complete.next_tool)
         terminal = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="The exact maintenance threshold is unresolved.",
             next_tool=None,
             column_mapping=(),
@@ -475,11 +499,66 @@ class SQLGroundingV13FormTests(unittest.TestCase):
                 }
             )
 
+    def test_check_normalizes_blank_gap_only_when_complete(self) -> None:
+        base = {
+            "clarification_route": "none",
+            "next_tool": None,
+            "column_mapping": [],
+            "domain_knowledge": [],
+        }
+        for blank in ("", " \t\n"):
+            with self.subTest(status="complete", blank=repr(blank)):
+                response = GroundingCheckResponse.model_validate(
+                    {
+                        **base,
+                        "status": "complete",
+                        "missing_information": blank,
+                    }
+                )
+                self.assertIsNone(response.missing_information)
+                parsed = grounding_updater.parse_grounding_response(
+                    json.dumps(
+                        {
+                            **base,
+                            "status": "complete",
+                            "missing_information": blank,
+                        }
+                    ),
+                    call_kind="check",
+                )
+                self.assertIsInstance(parsed, GroundingCheckResponse)
+                self.assertIsNone(parsed.missing_information)
+
+            with self.subTest(status="incomplete", blank=repr(blank)):
+                with self.assertRaises(ValidationError):
+                    GroundingCheckResponse.model_validate(
+                        {
+                            **base,
+                            "status": "incomplete",
+                            "missing_information": blank,
+                        }
+                    )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "form_validation_failed",
+                ):
+                    grounding_updater.parse_grounding_response(
+                        json.dumps(
+                            {
+                                **base,
+                                "status": "incomplete",
+                                "missing_information": blank,
+                            }
+                        ),
+                        call_kind="check",
+                    )
+
     def test_check_ask_user_question_is_materialized_from_arguments_once(self) -> None:
         question = "Which maintenance cost meaning do you intend?"
         response = GroundingCheckResponse.model_validate(
             {
                 "status": "incomplete",
+                "clarification_route": "none",
                 "missing_information": "The intended maintenance metric is unknown.",
                 "next_tool": {
                     "tool_name": "ask_user",
@@ -550,7 +629,7 @@ class SQLGroundingV13FormTests(unittest.TestCase):
     def test_column_targets_are_joint_requirements_not_candidates(self) -> None:
         text = "\n".join(SQL_GROUNDING_STAGE_PROMPTS.values())
         self.assertIn("targets 不是候选字段集合", text)
-        self.assertIn("同一计算或判断确实同时需要多个字段", text)
+        self.assertIn("完成同一 Query concept 确实同时需要多个字段", text)
 
     def test_classification_accepts_initial_tool_and_answer_check_only(self) -> None:
         base = {"query": QUERY, "current_state": complete_state().model_dump(mode="json")}
@@ -644,6 +723,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             "query": QUERY,
             "current_state": old.model_dump(mode="json"),
             "knowledge_definitions": [{"id": 32, "definition": rule}],
+            "unresolved_mappings": [],
             "relevant_column_meanings": {
                 "operational_metrics": {
                     "maintcost": "legacy value",
@@ -705,6 +785,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
                 "knowledge_definitions": [{"id": 32, "definition": rule}],
+                "unresolved_mappings": [],
                 "relevant_column_meanings": {},
             },
         )
@@ -751,6 +832,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                     {"id": 32, "definition": rule},
                     {"id": 32, "definition": "Another exact definition."},
                 ],
+                "unresolved_mappings": [],
                 "relevant_column_meanings": {},
             },
         )
@@ -767,6 +849,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="complete",
+            clarification_route="none",
             column_mapping=old.column_mapping or (),
             domain_knowledge=(),
         )
@@ -806,6 +889,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="complete",
+            clarification_route="none",
             column_mapping=(
                 ColumnMapping(
                     phrase="maintenance cost",
@@ -863,6 +947,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="complete",
+            clarification_route="stay_check",
             column_mapping=(
                 ColumnMapping(
                     phrase="maintenance cost",
@@ -892,6 +977,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [
                     {
                         "question": "Which threshold and cost meaning apply?",
@@ -913,16 +999,87 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
             sql_grounding_state_sha256(old),
         )
 
+    async def test_check_materializes_only_exact_latest_official_definition(
+        self,
+    ) -> None:
+        exact_rule = "Use the Official maintenance threshold of 1000 hours."
+        old = complete_state()
+        runtime = GroundingRuntime(
+            grounding_revision=3,
+            stage="INITIAL_GROUNDING",
+            focus_dimension="none",
+            grounding_state=old,
+        )
+        observation = build_sql_grounding_observation(
+            task_id="v31-exact-official-knowledge",
+            phase=1,
+            sequence=7,
+            observation_type="knowledge",
+            content={"name": "Maintenance Threshold", "definition": exact_rule},
+            summary="Official knowledge definition observed",
+            tool_name="get_knowledge_definition",
+            function_call_id="v31-exact-official-knowledge-call",
+        )
+        response = GroundingCheckResponse(
+            status="complete",
+            clarification_route="none",
+            column_mapping=old.column_mapping or (),
+            domain_knowledge=(
+                DomainKnowledge(kind="business_rule", content=exact_rule),
+            ),
+        )
+        bundle = {
+            "query": QUERY,
+            "current_state": old.model_dump(mode="json"),
+            **EMPTY_CHECK_PHASE_CONTEXT,
+            "latest_tool": {
+                "name": "get_knowledge_definition",
+                "arguments": {"knowledge_name": "Maintenance Threshold"},
+                "result": {
+                    "name": "Maintenance Threshold",
+                    "definition": exact_rule,
+                },
+            },
+        }
+        accepted = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context(observation.observation_id, rule=exact_rule),
+            FakeUpdater(response, "check"),
+            grounding_input=bundle,
+        )
+        self.assertEqual(accepted.state_update.status, "accepted")
+        self.assertEqual(
+            accepted.runtime.grounding_state.domain_knowledge,
+            response.domain_knowledge,
+        )
+
+        paraphrase = "Apply roughly one thousand operating hours."
+        rejected_response = response.model_copy(
+            update={
+                "domain_knowledge": (
+                    DomainKnowledge(kind="business_rule", content=paraphrase),
+                )
+            }
+        )
+        rejected = await process_sql_grounding_observation(
+            runtime,
+            observation,
+            context(observation.observation_id, rule=paraphrase),
+            FakeUpdater(rejected_response, "check"),
+            grounding_input=bundle,
+        )
+        self.assertEqual(rejected.state_update.status, "rejected")
+        self.assertEqual(rejected.runtime, runtime)
+
     async def test_unresolved_clarification_answers_keep_gap_and_state(self) -> None:
         gap = "The exact operating-hours threshold is missing."
         old = complete_state()
         unchanged_response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="terminal",
             missing_information=gap,
-            next_tool=GroundingCheckToolRequest(
-                tool_name="get_all_external_knowledge_names",
-                arguments={},
-            ),
+            next_tool=None,
             column_mapping=old.column_mapping or (),
             domain_knowledge=old.domain_knowledge or (),
         )
@@ -959,6 +1116,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                         "query": QUERY,
                         "current_state": old.model_dump(mode="json"),
                         "previous_official_calls": [],
+                        "unresolved_mappings": [],
                         "answered_clarifications": [
                             {
                                 "question": (
@@ -995,6 +1153,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="complete",
+            clarification_route="stay_check",
             missing_information=None,
             next_tool=None,
             column_mapping=old.column_mapping or (),
@@ -1019,6 +1178,7 @@ class SQLGroundingV13ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "query": QUERY,
                 "current_state": old.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [
                     {
                         "question": "What exact operating-hours threshold applies?",
@@ -1065,6 +1225,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         )
         return GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="The exact maintenance cost field is unresolved.",
             next_tool=GroundingCheckToolRequest(
                 tool_name=tool,
@@ -1218,6 +1379,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         state = self.adk_check_state()
         complete = GroundingCheckResponse(
             status="complete",
+            clarification_route="none",
             column_mapping=complete_state().column_mapping or (),
             domain_knowledge=(),
         )
@@ -1260,6 +1422,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         before_trajectory = list(state["tool_trajectory"])
         terminal = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="terminal",
             missing_information=(
                 "The exact operating-hours threshold is still missing."
             ),
@@ -1311,6 +1474,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                             mode="json"
                         ),
                         "previous_official_calls": [],
+                        "unresolved_mappings": [],
                         "answered_clarifications": [
                             {
                                 "question": (
@@ -1404,6 +1568,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         updater = FakeUpdater(
             GroundingCheckResponse(
                 status="complete",
+                clarification_route="none",
                 column_mapping=complete_state().column_mapping or (),
                 domain_knowledge=(),
             ),
@@ -1514,7 +1679,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 1)
         self.assertIsNone(records[0].answer)
 
-    def test_answer_resumes_check_with_phase_context_and_allows_new_question(self) -> None:
+    def test_answered_phrase_cannot_be_requested_again_after_regrounding(self) -> None:
         state = self.state()
         first = self.incomplete_check(tool="ask_user")
         pending = grounding_callbacks._schedule_check_tool(
@@ -1545,9 +1710,11 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             {
                 "query",
                 "current_state",
+                "user_clarifications",
                 "previous_official_calls",
                 "answered_clarifications",
                 "latest_user_answer",
+                "unresolved_mappings",
             },
         )
         self.assertEqual(payload["latest_user_answer"]["answer"], answer)
@@ -1565,6 +1732,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         second_question = "Which maintenance rule should be applied?"
         second = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="The maintenance rule is still unresolved.",
             next_tool=GroundingCheckToolRequest(
                 tool_name="ask_user",
@@ -1577,10 +1745,14 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
             column_mapping=complete_state().column_mapping or (),
             domain_knowledge=(),
         )
-        grounding_callbacks._schedule_check_tool(state, phase=1, response=second)
+        with self.assertRaisesRegex(
+            ValueError,
+            "answered clarification phrase cannot be requested again",
+        ):
+            grounding_callbacks._schedule_check_tool(state, phase=1, response=second)
         self.assertEqual(
             [item.question for item in grounding_callbacks._clarification_records(state)],
-            [first.next_tool.arguments["question"], second_question],
+            [first.next_tool.arguments["question"]],
         )
 
     def test_latest_check_request_has_no_raw_history(self) -> None:
@@ -1607,6 +1779,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                 "previous_official_calls",
                 "answered_clarifications",
                 "latest_tool",
+                "unresolved_mappings",
             },
         )
         self.assertEqual(payload["previous_official_calls"], [])
@@ -1617,6 +1790,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
         state = self.state()
         response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="The applicable knowledge name is unresolved.",
             next_tool=GroundingCheckToolRequest(
                 tool_name="get_all_external_knowledge_names",
@@ -1682,6 +1856,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
 
         next_response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="The exact business rule is unresolved.",
             next_tool=GroundingCheckToolRequest(
                 tool_name="get_knowledge_definition",
@@ -1726,6 +1901,7 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
 
         evidence_response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="The exact cost column meaning is unresolved.",
             next_tool=GroundingCheckToolRequest(
                 tool_name="get_column_meaning",
@@ -1999,6 +2175,18 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                 "不要自行替换、删除或重新解释其中的字段、阈值、公式、过滤条件或业务概念",
                 "不要根据 execute_sql 结果发明新的语义条件",
             ),
+            "answer_contract_is_frozen_before_sql": (
+                "生成第一条 SQL 前",
+                "固定本 phase 的 Answer Contract",
+                "entity / aggregation grain",
+                "predicate 的方向 / 运算符 / 边界",
+                "公式的精确 operands 与 NULL 语义",
+                "无诊断的 submit_sql FAIL 不能授权改变它",
+            ),
+            "null_semantics_are_not_invented": (
+                "NULL 处理属于公式语义",
+                "不要用 COALESCE 等改写公式",
+            ),
             "aggregation_before_comparison": (
                 "公式、阈值、过滤条件、多字段共同计算及聚合语义",
                 "多个 targets 共同参与同一计算或判断时，必须共同使用",
@@ -2030,6 +2218,10 @@ class SQLGroundingV13CallbackContractTests(unittest.IsolatedAsyncioTestCase):
                 "JOIN、aggregation grain、projection / result shape、CAST / NULL、GROUP BY / ORDER BY、latest-row handling",
             ),
             "post_submit_convergence_without_exploration": (
+                "每次 execute_sql 的 SQL 都必须是可以直接 submit 的完整 task-answer candidate",
+                "不得执行诊断查询、数据探针或局部片段",
+                "一次只修正一个能够明确指出的 Answer Contract / implementation mismatch",
+                "下一次 execute 仍必须是完整答案 SQL，不能先发探针",
                 "不得执行只是为了“看看数据”的 SQL",
                 "不得重复执行相同或语义等价的 candidate",
                 "只做必要的 implementation validation，然后尽快 submit_sql",

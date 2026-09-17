@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "evaluation": "BIRD-Interact Full, same 600 tasks, a-interact",
+  "model": "glm-5.2",
+  "execution_profile": "leaderboard",
+  "scores": {
+    "baseline": {
+      "tasks": 600,
+      "p1_pass": 144,
+      "full_pass": 79,
+      "reward": 124.5
+    },
+    "candidate": {
+      "tasks": 600,
+      "p1_pass": 150,
+      "full_pass": 75,
+      "reward": 127.5
+    }
+  },
+  "paired_changes": {
+    "improved": 47,
+    "regressed": 47,
+    "unchanged": 506,
+    "p1_gained": 40,
+    "p1_lost": 34,
+    "full_gained": 24,
+    "full_lost": 28
+  },
+  "status_transitions": [
+    {
+      "baseline": "FAIL",
+      "candidate": "FAIL",
+      "count": 416
+    },
+    {
+      "baseline": "FAIL",
+      "candidate": "Full",
+      "count": 17
+    },
+    {
+      "baseline": "FAIL",
+      "candidate": "P1-only",
+      "count": 23
+    },
+    {
+      "baseline": "Full",
+      "candidate": "FAIL",
+      "count": 15
+    },
+    {
+      "baseline": "Full",
+      "candidate": "Full",
+      "count": 51
+    },
+    {
+      "baseline": "Full",
+      "candidate": "P1-only",
+      "count": 13
+    },
+    {
+      "baseline": "P1-only",
+      "candidate": "FAIL",
+      "count": 19
+    },
+    {
+      "baseline": "P1-only",
+      "candidate": "Full",
+      "count": 7
+    },
+    {
+      "baseline": "P1-only",
+      "candidate": "P1-only",
+      "count": 39
+    }
+  ],
+  "reported_token_usage": {
+    "baseline_all": {
+      "input_tokens": 74548984,
+      "output_tokens": 7723158,
+      "total_tokens": 82272142,
+      "cached_tokens": 49947520,
+      "reasoning_tokens": 6572141
+    },
+    "candidate_all": {
+      "input_tokens": 79026960,
+      "output_tokens": 24231520,
+      "total_tokens": 103258480,
+      "cached_tokens": 32011264,
+      "reasoning_tokens": 22230788
+    },
+    "candidate_grounding": {
+      "input_tokens": 31865394,
+      "output_tokens": 16262272,
+      "total_tokens": 48127666,
+      "cached_tokens": 8835200,
+      "reasoning_tokens": 15292308,
+      "calls": 5884,
+      "attempts": 6100,
+      "unreported_attempts": 20
+    },
+    "candidate_main_and_fallback": {
+      "input_tokens": 43820551,
+      "output_tokens": 7779642,
+      "total_tokens": 51600193,
+      "cached_tokens": 23176064,
+      "reasoning_tokens": 6938480
+    },
+    "candidate_user_simulator": {
+      "input_tokens": 3341015,
+      "output_tokens": 189606,
+      "total_tokens": 3530621,
+      "cached_tokens": 0,
+      "reasoning_tokens": 0
+    }
+  },
+  "mechanism_counts": {
+    "fallback_attempts": 377,
+    "primary_p1_pass": 84,
+    "primary_full_pass": 42,
+    "fallback_new_p1": 66,
+    "fallback_new_full": 33,
+    "atomic_commit_audit_events": 166,
+    "atomic_rollback_audit_events": 262,
+    "phase1_grounding_failed": 344,
+    "phase1_writer_request_present": 256,
+    "phase2_writer_request_present": 62,
+    "phase1_grounding_succeeded": 256,
+    "phase2_grounding_succeeded": 62,
+    "phase2_grounding_failed": 22
+  },
+  "limitations": {
+    "scored_attempts_only": true,
+    "authorized_replacement_task_count": 18,
+    "unreported_grounding_attempts": 20,
+    "excludes_discarded_task_attempts_and_development_experiments": true,
+    "reasoning_tokens_are_included_in_output_tokens": true,
+    "raw_main_reach_is_not_contract_quality": true,
+    "does_not_claim_statistical_significance": true,
+    "reference_sensitive_case_details_not_published": true
+  }
+}

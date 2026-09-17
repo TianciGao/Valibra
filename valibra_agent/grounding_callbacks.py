@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import threading
 from collections.abc import Mapping
@@ -32,11 +33,15 @@ from shared.config import PROJECT_ROOT
 from valibra_agent.runtime_profile import is_leaderboard_profile
 from valibra_agent.sql_grounding.models import (
     SQL_GROUNDING_RUNTIME_KEY,
+    FinalRegroundingGateResponse,
     GroundingCheckResponse,
     GroundingCheckToolRequest,
     GroundingLLMResponse,
     GroundingRuntime,
     KnowledgeGroundingResponse,
+    MappingGroundingResponse,
+    SQLGroundingState,
+    UnresolvedMapping,
     UserClarificationRecord,
     UserClarificationRequest,
     ValidationContext,
@@ -50,6 +55,31 @@ from valibra_agent.sql_grounding.control import (
     tool_directions_for_focus,
     transition_grounding_stage,
 )
+from valibra_agent.sql_grounding.answer_contract_lite import (
+    LiteBuilder as AnswerContractLiteBuilder,
+    LiteVerifier as AnswerContractLiteVerifier,
+)
+from valibra_agent.sql_grounding.main_entry_carrier import (
+    main_execution_envelope_for_phase,
+    render_main_execution_envelope,
+    render_sql_safe_identifier_overlay,
+)
+from valibra_agent.sql_grounding.resolved_literal_carrier_materialization import (
+    ResolvedLiteralCarrierLifecycle,
+    active_resolved_literal_carriers,
+    begin_resolved_literal_carrier_draft,
+    commit_resolved_literal_carrier_draft,
+    materialize_resolved_literal_carrier,
+)
+from valibra_agent.sql_grounding.resolved_literal_main_overlay import (
+    evaluate_resolved_literal_sql_gate,
+    render_resolved_literal_main_overlay,
+)
+from valibra_agent.sql_grounding.resolved_literal_proposal_shadow import (
+    GroundingCheckResolvedLiteralProposalShadowResponse,
+    validate_resolved_literal_proposal_shadow,
+)
+from valibra_agent.sql_grounding.semantic_guard_v0 import evaluate_candidate_sql
 from valibra_agent.sql_grounding.observations import (
     ObservationType,
     SQLGroundingObservation,
@@ -62,13 +92,20 @@ from valibra_agent.sql_grounding.prompt_view import (
     render_grounding_view,
 )
 from valibra_agent.sql_grounding.service import (
+    SQLGroundingDraftStageResult,
+    SQLGroundingDraftRuntime,
     SQLGroundingServiceResult,
+    commit_sql_grounding_draft,
+    process_sql_grounding_draft_stage,
     process_sql_grounding_observation,
 )
 from valibra_agent.sql_grounding.telemetry import GroundingLLMTelemetry
 from valibra_agent.sql_grounding.updater import (
     MAX_CHECK_PHASE_LOCAL_CALLS,
     MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS,
+    MAX_P2_CHECK_CUMULATIVE_EVIDENCE_CHARS,
+    MAX_P2_CHECK_CUMULATIVE_EVIDENCE_ENTRIES,
+    MAX_P2_CHECK_CUMULATIVE_RESULT_CHARS,
     SQL_GROUNDING_CONFIGURATION_SHA256,
     SQL_GROUNDING_FORM_SCHEMA_SHA256,
     SQL_GROUNDING_PROMPT_SHA256,
@@ -78,6 +115,7 @@ from valibra_agent.sql_grounding.updater import (
     classify_grounding_input,
     load_sql_grounding_llm_config,
     requested_sql_grounding_updater_mode,
+    resolved_literal_executable_carrier_enabled,
 )
 
 if TYPE_CHECKING:
@@ -104,6 +142,9 @@ GROUNDING_PROVIDER_CALL_COUNT_KEY = "valibra:sql_grounding_provider_calls"
 GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY = (
     "valibra:sql_grounding_provider_phase_calls"
 )
+GROUNDING_PROVIDER_REPAIR_PHASE_CALL_COUNTS_KEY = (
+    "valibra:sql_grounding_provider_mapping_repair_phase_calls"
+)
 GROUNDING_TOOL_AUDITS_KEY = "valibra:sql_grounding_tool_audits"
 GROUNDING_BLOCKED_SUBMITS_KEY = "valibra:sql_grounding_blocked_submits"
 GROUNDING_GATE_AUDITS_KEY = "valibra:sql_grounding_gate_audits"
@@ -115,6 +156,29 @@ GROUNDING_PHASE_OUTCOMES_KEY = "valibra:sql_grounding_phase_outcomes"
 GROUNDING_FAILED_CLOSED_CALLS_KEY = "valibra:sql_grounding_failed_closed_calls"
 GROUNDING_PENDING_CHECK_KEY = "valibra:sql_grounding_pending_check"
 GROUNDING_CHECK_AUDITS_KEY = "valibra:sql_grounding_check_audits"
+ANSWER_CONTRACT_SHADOW_AUDITS_KEY = "valibra:answer_contract_shadow_audits"
+ANSWER_CONTRACT_GUARD_EPISODES_KEY = "valibra:answer_contract_guard_v0_episodes"
+ANSWER_CONTRACT_GUARD_AUDITS_KEY = "valibra:answer_contract_guard_v0_audits"
+MAIN_FRESH_RECOMPILE_EPISODES_KEY = "valibra:main_fresh_recompile_r1_episodes"
+MAIN_FRESH_RECOMPILE_AUDITS_KEY = "valibra:main_fresh_recompile_r1_audits"
+FINAL_REGROUNDING_GATE_AUDITS_KEY = "valibra:final_regrounding_gate_audits"
+KNOWLEDGE_OMISSION_PROTECTION_AUDITS_KEY = (
+    "valibra:knowledge_omission_protection_audits"
+)
+ATOMIC_REGROUNDING_DRAFT_KEY = "valibra:atomic_regrounding_draft"
+MAPPING_OMISSION_CARRIER_KEY = "valibra:mapping_omission_carrier_o1"
+P2_CHECK_CUMULATIVE_EVIDENCE_KEY = (
+    "valibra:p2_check_cumulative_official_evidence_r1"
+)
+RESOLVED_LITERAL_DRAFT_CARRIER_KEY = (
+    "valibra:resolved_literal_draft_carrier_r1"
+)
+RESOLVED_LITERAL_ACTIVE_CARRIERS_KEY = (
+    "valibra:resolved_literal_active_carriers_r1"
+)
+RESOLVED_LITERAL_CARRIER_AUDITS_KEY = (
+    "valibra:resolved_literal_carrier_audits_r1"
+)
 
 GROUNDING_VIEW_BEGIN = "[VALIBRA GROUNDING VIEW BEGIN]"
 GROUNDING_VIEW_END = "[VALIBRA GROUNDING VIEW END]"
@@ -142,7 +206,15 @@ _MAX_SUPPRESSED_BOOTSTRAP = 64
 _MAX_CLARIFICATION_RECORDS = MAX_CHECK_PHASE_LOCAL_CLARIFICATIONS
 _MAX_PHASE_OUTCOMES = 2
 _MAX_FAILED_CLOSED_CALLS = 64
-_MAX_TOOL_AUDIT_RECORD_BYTES = 8_448
+_MAX_ANSWER_CONTRACT_GUARD_AUDITS = 64
+_MAX_MAIN_FRESH_RECOMPILE_AUDITS = 32
+_MAX_FINAL_REGROUNDING_GATE_AUDITS = 16
+_MAX_KNOWLEDGE_OMISSION_PROTECTION_AUDITS = 32
+_MAX_RESOLVED_LITERAL_CARRIER_AUDITS = 32
+_MAX_ATOMIC_REGROUNDING_OFFICIAL_CALLS = 8
+# Two bounded headers (shadow/control) plus at most four bounded P2 stages.
+_MAX_P2_AUDIT_STAGES = 4
+_MAX_TOOL_AUDIT_RECORD_BYTES = (2 + _MAX_P2_AUDIT_STAGES) * _MAX_AUDIT_BYTES + 256
 _MAX_ACTIVE_TASK_SYNCHRONIZERS = 512
 _MAX_SEQUENCE = 9_223_372_036_854_775_807
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
@@ -164,6 +236,14 @@ _GROUNDING_FAILED_CLOSED_STATUS = "VALIBRA_SQL_GROUNDING_FAILED_CLOSED"
 _GROUNDING_FAILED_CLOSED_GUIDANCE = (
     "A valid SQL Grounding State was not established for this phase. "
     "Main SQL generation and Official tools are disabled without retry or fallback."
+)
+_ANSWER_CONTRACT_GUARD_STATUS = "VALIBRA_SEMANTIC_GUARD_REJECTED"
+_MAIN_FRESH_RECOMPILE_DUPLICATE_STATUS = (
+    "VALIBRA_MAIN_FRESH_RECOMPILE_DUPLICATE_REJECTED"
+)
+_EXACT_GENERIC_SUBMIT_FAILURE_RE = re.compile(
+    r"SQL failed Phase (?P<phase>[12])\. Your SQL is not correct\.\n"
+    r"Budget remaining: -?\d+(?:\.\d+)? bird-coins"
 )
 
 _TOOL_OBSERVATION_TYPES: Mapping[str, ObservationType] = {
@@ -203,6 +283,7 @@ _BOOTSTRAP_ALREADY_VISIBLE_PREFIX = "VALIBRA_BOOTSTRAP_EVIDENCE_ALREADY_STORED"
 _MAX_PROVIDER_CALLS_PER_TASK = 32
 _MIN_BUDGET_AFTER_CHECK_TOOL = 6.0
 _MAX_CHECK_AUDITS = MAX_CHECK_PHASE_LOCAL_CALLS
+_MAX_ANSWER_CONTRACT_SHADOW_AUDITS = 16
 _SQL_WRITER_TOOL_NAMES = ("execute_sql", "submit_sql")
 _SQL_WRITER_EXECUTE_TOOL_DESCRIPTION = """Execute a candidate PostgreSQL task-answer query against the database and return the results.
 
@@ -222,9 +303,15 @@ Final Grounding State 和已回答澄清是语义权威。不要重新研究 sch
 不要自行替换、删除或重新解释其中的字段、阈值、公式、过滤条件或业务概念，也不要根据 execute_sql 结果发明新的语义条件。
 State.tables 是允许使用的候选表范围，不代表每张表都必须出现在最终 SQL。
 
+生成第一条 SQL 前，先从 Query / Follow-up、Final Grounding State 和已回答澄清固定本 phase 的 Answer Contract：
+结果的 entity / aggregation grain、只输出用户要求的列、明确要求的 aggregation / grouping / ordering / rounding、
+predicate 的方向 / 运算符 / 边界，以及公式的精确 operands 与 NULL 语义。后续 candidate 必须保持这份合同；
+无诊断的 submit_sql FAIL 不能授权改变它。NULL 处理属于公式语义，除非合同明确允许，否则不要用 COALESCE 等改写公式。
+
 必须在 SQL 中完整落实 column_mapping 和 domain_knowledge 已给出的公式、阈值、过滤条件、多字段共同计算及聚合语义。
 当一个 mapping 的多个 targets 共同参与同一计算或判断时，必须共同使用；需要按实体或分组键聚合时，先正确聚合，再排序或比较。
 
+每次 execute_sql 的 SQL 都必须是可以直接 submit 的完整 task-answer candidate；不得执行诊断查询、数据探针或局部片段。
 execute_sql 只用于验证和修正 JOIN、JSON path、CAST、NULL、aggregation、GROUP BY、ORDER BY、latest-row 等 SQL 实现问题，
 不能用于新的语义探索。不要重复执行相同 SQL 或语义等价的无效查询；返回 0 rows 不能成为更换冻结阈值或业务规则的理由。
 当 SQL 已与冻结 State 一致、成功 execute 且没有新的实现问题时，应立即 submit_sql，不要为了再次确认而继续 execute_sql。
@@ -237,11 +324,19 @@ submit_sql 失败后的收口合同：
 禁止重新查询 schema、DISTINCT values、枚举 JSON keys、row/data sampling、验证 frozen literals，或寻找新的业务规则和字段含义。
 只有能够指出具体的 SQL implementation hypothesis 时，才可形成 materially different 且与 State 一致的新 candidate；
 允许的假设仅限 JOIN、aggregation grain、projection / result shape、CAST / NULL、GROUP BY / ORDER BY、latest-row handling 等实现问题。
+一次只修正一个能够明确指出的 Answer Contract / implementation mismatch；下一次 execute 仍必须是完整答案 SQL，不能先发探针。
 不得执行只是为了“看看数据”的 SQL，也不得重复执行相同或语义等价的 candidate。
 若形成了有具体实现理由的新 candidate，只做必要的 implementation validation，然后尽快 submit_sql。
 若找不到具体 implementation mismatch，不要返回数据库探索；保持冻结语义，不发明新字段、条件、阈值、公式或业务规则。
 
 不要查询 information_schema / pg_catalog；不要 SELECT *；不要提出新问题；最终用 submit_sql 提交。"""
+_MAIN_FRESH_RECOMPILE_PROMPT = """FRESH RECOMPILE MODE (one bounded episode):
+Official submit_sql 刚返回了无具体诊断的 generic FAIL。之前的 Main reasoning 和 SQL 已有意隐藏；
+不要回忆、还原或局部编辑旧 candidate。只从当前 Original Query、Follow-up、Frozen 4D State
+和 answered clarifications 独立编译一条完整、可直接提交的 SQL。
+generic FAIL 没有提供新的业务语义；不得改写冻结的 predicate、formula、aggregation、grain、
+ordering、requested output 或 clarification。若 execute_sql 返回具体 DB error，只修正该 implementation error。
+本 phase 只有一次 fresh-recompile 窗口，且 Runtime 会拒绝与刚失败 candidate 完全相同的 SQL。"""
 _BULK_KNOWLEDGE_VISIBLE_FIELDS = frozenset(
     {"id", "knowledge", "description", "definition"}
 )
@@ -619,6 +714,9 @@ class _PendingCheckTool:
     tool_name: str
     arguments: dict[str, str]
     request_digest: str
+    origin: Literal["ordinary_check", "atomic_draft"] = "ordinary_check"
+    requirement_type: str | None = None
+    related_mapping_phrases: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -628,6 +726,9 @@ class _PendingCheckTool:
             "tool_name": self.tool_name,
             "arguments": dict(self.arguments),
             "request_digest": self.request_digest,
+            "origin": self.origin,
+            "requirement_type": self.requirement_type,
+            "related_mapping_phrases": list(self.related_mapping_phrases),
         }
 
     @classmethod
@@ -639,6 +740,9 @@ class _PendingCheckTool:
             "tool_name",
             "arguments",
             "request_digest",
+            "origin",
+            "requirement_type",
+            "related_mapping_phrases",
         }
         if not isinstance(payload, dict) or set(payload) != required:
             raise ValueError("invalid pending Check tool")
@@ -673,9 +777,410 @@ class _PendingCheckTool:
             raise ValueError("invalid pending Check gap")
         if not re.fullmatch(r"[0-9a-f]{64}", record.request_digest):
             raise ValueError("invalid pending Check digest")
+        if record.origin not in {"ordinary_check", "atomic_draft"}:
+            raise ValueError("invalid pending Check origin")
+        if record.requirement_type not in {
+            None,
+            "threshold",
+            "category",
+            "literal",
+            "predicate",
+        }:
+            raise ValueError("invalid pending Check requirement type")
+        if not isinstance(record.related_mapping_phrases, (list, tuple)):
+            raise ValueError("invalid pending Check related mapping phrases")
+        related_mapping_phrases = tuple(record.related_mapping_phrases)
+        if any(
+            not isinstance(phrase, str)
+            or not phrase
+            or phrase != phrase.strip()
+            or len(phrase) > 256
+            for phrase in related_mapping_phrases
+        ):
+            raise ValueError("invalid pending Check related mapping phrase")
+        if len(related_mapping_phrases) != len(set(related_mapping_phrases)):
+            raise ValueError("duplicate pending Check related mapping phrase")
+        if (record.requirement_type is None) != (not related_mapping_phrases):
+            raise ValueError("incomplete pending Check requirement event")
+        object.__setattr__(
+            record,
+            "related_mapping_phrases",
+            related_mapping_phrases,
+        )
         return record
 
 
+@dataclass(frozen=True, slots=True)
+class _P2ExactOfficialEvidenceReplay:
+    """One exact immutable P1 Check result reused by ordinary P2 Check."""
+
+    task_id: str
+    source_phase: Literal[1]
+    target_phase: Literal[2]
+    tool_name: Literal["get_column_meaning"]
+    arguments: dict[str, str]
+    request_digest: str
+    result: Any
+    result_sha256: str
+    source_trajectory_index: int
+    source_private_raw_ref: str
+    evidence_context_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _P2CheckCumulativeEvidenceEntry:
+    """One immutable column meaning retained within one ordinary P2 Check cycle."""
+
+    tool_name: Literal["get_column_meaning"]
+    arguments: dict[str, str]
+    request_digest: str
+    result: str
+    result_sha256: str
+    source: Literal["official_call", "p2_exact_p1_replay"]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "arguments": dict(self.arguments),
+            "request_digest": self.request_digest,
+            "result": self.result,
+            "result_sha256": self.result_sha256,
+            "source": self.source,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> _P2CheckCumulativeEvidenceEntry:
+        if not isinstance(payload, dict) or set(payload) != {
+            "tool_name",
+            "arguments",
+            "request_digest",
+            "result",
+            "result_sha256",
+            "source",
+        }:
+            raise ValueError("invalid P2 Check cumulative evidence entry")
+        arguments = payload.get("arguments")
+        if (
+            payload.get("tool_name") != "get_column_meaning"
+            or not isinstance(arguments, dict)
+            or set(arguments) != {"table_name", "column_name"}
+            or not all(
+                isinstance(value, str)
+                and value
+                and value == value.strip()
+                and len(value) <= 256
+                for value in arguments.values()
+            )
+        ):
+            raise ValueError("invalid P2 Check cumulative evidence request")
+        canonical_arguments = {
+            key: arguments[key] for key in ("column_name", "table_name")
+        }
+        request_digest = payload.get("request_digest")
+        expected_request_digest = _sha256_text(
+            "get_column_meaning:" + canonical_json(canonical_arguments)
+        )
+        result = payload.get("result")
+        result_sha256 = payload.get("result_sha256")
+        if (
+            request_digest != expected_request_digest
+            or not isinstance(result, str)
+            or not result
+            or len(result) > MAX_P2_CHECK_CUMULATIVE_RESULT_CHARS
+            or result_sha256 != _sha256_text(canonical_json(result))
+            or payload.get("source")
+            not in {"official_call", "p2_exact_p1_replay"}
+        ):
+            raise ValueError("invalid P2 Check cumulative evidence result")
+        return cls(
+            tool_name="get_column_meaning",
+            arguments=canonical_arguments,
+            request_digest=request_digest,
+            result=result,
+            result_sha256=result_sha256,
+            source=payload["source"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _P2CheckCumulativeEvidence:
+    """Ephemeral immutable evidence for exactly one ordinary Phase-2 Check cycle."""
+
+    task_id: str
+    phase: Literal[2]
+    cycle_id: str
+    grounding_revision: int
+    query_sha256: str
+    follow_up_sha256: str
+    entries: tuple[_P2CheckCumulativeEvidenceEntry, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "phase": self.phase,
+            "cycle_id": self.cycle_id,
+            "grounding_revision": self.grounding_revision,
+            "query_sha256": self.query_sha256,
+            "follow_up_sha256": self.follow_up_sha256,
+            "entries": [item.to_json() for item in self.entries],
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> _P2CheckCumulativeEvidence:
+        if not isinstance(payload, dict) or set(payload) != {
+            "task_id",
+            "phase",
+            "cycle_id",
+            "grounding_revision",
+            "query_sha256",
+            "follow_up_sha256",
+            "entries",
+        }:
+            raise ValueError("invalid P2 Check cumulative evidence carrier")
+        task_id = payload.get("task_id")
+        cycle_id = payload.get("cycle_id")
+        revision = payload.get("grounding_revision")
+        query_sha256 = payload.get("query_sha256")
+        follow_up_sha256 = payload.get("follow_up_sha256")
+        raw_entries = payload.get("entries")
+        if (
+            not isinstance(task_id, str)
+            or not _IDENTIFIER_RE.fullmatch(task_id)
+            or payload.get("phase") != 2
+            or not isinstance(cycle_id, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", cycle_id)
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+            or not isinstance(query_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", query_sha256)
+            or not isinstance(follow_up_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", follow_up_sha256)
+            or not isinstance(raw_entries, list)
+            or len(raw_entries) > MAX_P2_CHECK_CUMULATIVE_EVIDENCE_ENTRIES
+        ):
+            raise ValueError("invalid P2 Check cumulative evidence identity")
+        entries = tuple(
+            _P2CheckCumulativeEvidenceEntry.from_json(item)
+            for item in raw_entries
+        )
+        digests = [item.request_digest for item in entries]
+        if len(digests) != len(set(digests)):
+            raise ValueError("duplicate P2 Check cumulative evidence")
+        if len(canonical_json([item.to_json() for item in entries])) > (
+            MAX_P2_CHECK_CUMULATIVE_EVIDENCE_CHARS
+        ):
+            raise ValueError("P2 Check cumulative evidence exceeds its bound")
+        return cls(
+            task_id=task_id,
+            phase=2,
+            cycle_id=cycle_id,
+            grounding_revision=revision,
+            query_sha256=query_sha256,
+            follow_up_sha256=follow_up_sha256,
+            entries=entries,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MappingOmissionCarrier:
+    """State-external, Mapping-owned omissions bound to their evidence epoch."""
+
+    phase: Literal[1, 2]
+    grounding_revision: int
+    query_sha256: str
+    mapping_evidence_sha256: str
+    unresolved_mappings: tuple[UnresolvedMapping, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "grounding_revision": self.grounding_revision,
+            "query_sha256": self.query_sha256,
+            "mapping_evidence_sha256": self.mapping_evidence_sha256,
+            "unresolved_mappings": [
+                item.model_dump(mode="json") for item in self.unresolved_mappings
+            ],
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_MappingOmissionCarrier":
+        required = {
+            "phase",
+            "grounding_revision",
+            "query_sha256",
+            "mapping_evidence_sha256",
+            "unresolved_mappings",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid Mapping omission carrier")
+        phase = payload["phase"]
+        revision = payload["grounding_revision"]
+        if phase not in (1, 2):
+            raise ValueError("invalid Mapping omission phase")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("invalid Mapping omission revision")
+        for field in ("query_sha256", "mapping_evidence_sha256"):
+            if not isinstance(payload[field], str) or not re.fullmatch(
+                r"[0-9a-f]{64}", payload[field]
+            ):
+                raise ValueError(f"invalid Mapping omission {field}")
+        raw_items = payload["unresolved_mappings"]
+        if not isinstance(raw_items, list):
+            raise ValueError("invalid unresolved_mappings carrier")
+        items = tuple(UnresolvedMapping.model_validate(item) for item in raw_items)
+        if len(items) != len({item.phrase for item in items}):
+            raise ValueError("duplicate unresolved Mapping phrase")
+        return cls(
+            phase=phase,
+            grounding_revision=revision,
+            query_sha256=payload["query_sha256"],
+            mapping_evidence_sha256=payload["mapping_evidence_sha256"],
+            unresolved_mappings=tuple(sorted(items, key=lambda item: item.phrase)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _AtomicRegroundingDraft:
+    """Private transaction state while a re-Grounding Check awaits evidence."""
+
+    phase: Literal[1, 2]
+    decision: Literal["REGROUND_MAPPING", "REGROUND_STRUCTURE"]
+    base_revision: int
+    base_state_sha256: str
+    query: str
+    follow_up: str | None
+    check_gap: str | None
+    draft_runtime: SQLGroundingDraftRuntime
+    draft_unresolved_mappings: tuple[UnresolvedMapping, ...]
+    draft_mapping_evidence_sha256: str
+    draft_audits: tuple[dict[str, Any], ...]
+    official_call_count: int
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "decision": self.decision,
+            "base_revision": self.base_revision,
+            "base_state_sha256": self.base_state_sha256,
+            "query": self.query,
+            "follow_up": self.follow_up,
+            "check_gap": self.check_gap,
+            "draft_runtime": {
+                "grounding_revision": self.draft_runtime.grounding_revision,
+                "stage": self.draft_runtime.stage,
+                "focus_dimension": self.draft_runtime.focus_dimension,
+                "grounding_state": self.draft_runtime.grounding_state.model_dump(
+                    mode="json"
+                ),
+            },
+            "draft_unresolved_mappings": [
+                item.model_dump(mode="json")
+                for item in self.draft_unresolved_mappings
+            ],
+            "draft_mapping_evidence_sha256": (
+                self.draft_mapping_evidence_sha256
+            ),
+            "draft_audits": [dict(item) for item in self.draft_audits],
+            "official_call_count": self.official_call_count,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "_AtomicRegroundingDraft":
+        required = {
+            "phase",
+            "decision",
+            "base_revision",
+            "base_state_sha256",
+            "query",
+            "follow_up",
+            "check_gap",
+            "draft_runtime",
+            "draft_unresolved_mappings",
+            "draft_mapping_evidence_sha256",
+            "draft_audits",
+            "official_call_count",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError("invalid atomic re-Grounding Draft")
+        phase = payload["phase"]
+        decision = payload["decision"]
+        revision = payload["base_revision"]
+        state_sha = payload["base_state_sha256"]
+        query = payload["query"]
+        follow_up = payload["follow_up"]
+        check_gap = payload["check_gap"]
+        official_calls = payload["official_call_count"]
+        mapping_evidence_sha = payload["draft_mapping_evidence_sha256"]
+        if phase not in (1, 2):
+            raise ValueError("invalid atomic re-Grounding phase")
+        if decision not in {"REGROUND_MAPPING", "REGROUND_STRUCTURE"}:
+            raise ValueError("invalid atomic re-Grounding decision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("invalid atomic re-Grounding base revision")
+        if not isinstance(state_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", state_sha):
+            raise ValueError("invalid atomic re-Grounding base State SHA")
+        if not isinstance(query, str) or not query or query != query.strip():
+            raise ValueError("invalid atomic re-Grounding query")
+        if phase == 2:
+            if not isinstance(follow_up, str) or not follow_up:
+                raise ValueError("atomic Phase-2 Draft requires follow-up")
+        elif follow_up is not None:
+            raise ValueError("atomic Phase-1 Draft cannot retain follow-up")
+        if check_gap is not None and (
+            not isinstance(check_gap, str)
+            or not check_gap
+            or len(check_gap) > 4_096
+        ):
+            raise ValueError("invalid atomic re-Grounding Check gap")
+        if (
+            isinstance(official_calls, bool)
+            or not isinstance(official_calls, int)
+            or not 0 <= official_calls <= _MAX_ATOMIC_REGROUNDING_OFFICIAL_CALLS
+        ):
+            raise ValueError("invalid atomic re-Grounding Official call count")
+        if not isinstance(mapping_evidence_sha, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", mapping_evidence_sha
+        ):
+            raise ValueError("invalid atomic Mapping evidence SHA")
+        unresolved_payload = payload["draft_unresolved_mappings"]
+        if not isinstance(unresolved_payload, list):
+            raise ValueError("invalid atomic unresolved Mapping carrier")
+        unresolved = tuple(
+            UnresolvedMapping.model_validate(item) for item in unresolved_payload
+        )
+        if len(unresolved) != len({item.phrase for item in unresolved}):
+            raise ValueError("duplicate atomic unresolved Mapping phrase")
+        unresolved = tuple(sorted(unresolved, key=lambda item: item.phrase))
+        formal_like = GroundingRuntime.model_validate(payload["draft_runtime"])
+        audits = payload["draft_audits"]
+        if not isinstance(audits, list) or len(audits) > 16:
+            raise ValueError("invalid atomic re-Grounding Draft audits")
+        copied_audits: list[dict[str, Any]] = []
+        for audit in audits:
+            if not isinstance(audit, dict):
+                raise ValueError("invalid atomic re-Grounding Draft audit")
+            _require_bounded_audit(audit)
+            copied_audits.append(dict(audit))
+        return cls(
+            phase=phase,
+            decision=decision,
+            base_revision=revision,
+            base_state_sha256=state_sha,
+            query=query,
+            follow_up=follow_up,
+            check_gap=check_gap,
+            draft_runtime=SQLGroundingDraftRuntime(
+                grounding_revision=formal_like.grounding_revision,
+                stage=formal_like.stage,
+                focus_dimension=formal_like.focus_dimension,
+                grounding_state=formal_like.grounding_state,
+            ),
+            draft_unresolved_mappings=unresolved,
+            draft_mapping_evidence_sha256=mapping_evidence_sha,
+            draft_audits=tuple(copied_audits),
+            official_call_count=official_calls,
+        )
 @dataclass(frozen=True, slots=True)
 class _FailedClosedToolCall:
     """Exact ADK pairing for one deterministic tool denial without execution."""
@@ -768,6 +1273,8 @@ async def before_model_callback(
             update_audit = await _consume_bound_user_message(state, runtime)
             runtime, later_degraded = _ensure_runtime(state)
             degraded = degraded or later_degraded
+            if _answer_contract_runtime_enabled():
+                _refresh_answer_contract_shadow_lifecycle(state, runtime)
             phase_failure = _phase_grounding_failure(state)
             if not degraded and phase_failure is None:
                 bootstrap_tool = _next_bootstrap_tool(
@@ -853,23 +1360,76 @@ async def before_model_callback(
                     bound = _ACTIVE_TURN_MESSAGE.get()
                     if bound is None or bound.task_id != _task_id(state):
                         raise ValueError("current bound query is required for SQL Writer")
-                    injection = _inject_sql_writer_context(
-                        llm_request,
-                        phase=_phase(state.get("current_phase", 1)),
-                        original_query=_user_message_query(bound.message),
-                        follow_up=(
+                    fresh_recompile = (
+                        _current_main_fresh_recompile_episode_best_effort(state)
+                        is not None
+                    )
+                    phase = _phase(state.get("current_phase", 1))
+                    execution_envelope_text: str | None = None
+                    sql_safe_identifiers_text: str | None = None
+                    try:
+                        execution_envelope = main_execution_envelope_for_phase(
+                            state,
+                            phase,
+                        )
+                        if execution_envelope is not None:
+                            execution_envelope_text = (
+                                render_main_execution_envelope(
+                                    execution_envelope
+                                ).text
+                            )
+                        identifier_overlay = render_sql_safe_identifier_overlay(
+                            runtime.grounding_state
+                        )
+                        if identifier_overlay is not None:
+                            sql_safe_identifiers_text = identifier_overlay.text
+                    except Exception as exc:
+                        view_audit["main_entry_carrier_error_type"] = type(
+                            exc
+                        ).__name__[:128]
+                    writer_kwargs = {
+                        "phase": phase,
+                        "original_query": _user_message_query(bound.message),
+                        "follow_up": (
                             _official_p2_follow_up(state)
-                            if _phase(state.get("current_phase", 1)) == 2
+                            if phase == 2
                             else None
                         ),
-                        view_text=view.text,
-                        budget_remaining=state.get("budget_remaining"),
-                    )
+                        "view_text": view.text,
+                        "budget_remaining": state.get("budget_remaining"),
+                        "execution_envelope_text": execution_envelope_text,
+                        "sql_safe_identifiers_text": sql_safe_identifiers_text,
+                    }
+                    try:
+                        injection = _inject_sql_writer_context(
+                            llm_request,
+                            **writer_kwargs,
+                            fresh_recompile=fresh_recompile,
+                        )
+                    except Exception as exc:
+                        if not fresh_recompile:
+                            raise
+                        _append_main_fresh_recompile_audit_best_effort(
+                            state,
+                            {
+                                "status": "FRESH_CONTEXT_FILTER_ERROR_PASS_THROUGH",
+                                "error_type": type(exc).__name__[:128],
+                            },
+                        )
+                        fresh_recompile = False
+                        injection = _inject_sql_writer_context(
+                            llm_request,
+                            **writer_kwargs,
+                            fresh_recompile=False,
+                        )
+                    if fresh_recompile:
+                        _mark_main_fresh_recompile_request_injected(state)
                     control_audit.update(
                         {
                             "mode": "sql_writer",
                             "control_hint_injected": False,
                             "writer_tools": list(_SQL_WRITER_TOOL_NAMES),
+                            "fresh_recompile": fresh_recompile,
                         }
                     )
                 else:
@@ -889,6 +1449,12 @@ async def before_model_callback(
                             "grounding_view_block_sha256"
                         ],
                         "request_changed_only_system_instruction": not phase_ready,
+                        "main_execution_envelope_sha256": injection.get(
+                            "main_execution_envelope_sha256"
+                        ),
+                        "sql_safe_identifier_overlay_sha256": injection.get(
+                            "sql_safe_identifier_overlay_sha256"
+                        ),
                     }
                 )
                 control_audit.update(
@@ -1032,6 +1598,146 @@ async def before_tool_callback(
     state = getattr(tool_context, "state", None)
     tool_name = _safe_tool_name(tool)
     control_gate_audit: dict[str, Any] | None = None
+    if (
+        state is not None
+        and _answer_contract_guard_v0_enabled()
+        and tool_name in {"execute_sql", "submit_sql"}
+        and not _is_exact_pending_check_dispatch(
+            state,
+            tool_context=tool_context,
+            tool_name=tool_name,
+        )
+    ):
+        try:
+            guard_decision = _evaluate_answer_contract_guard_v0(
+                state,
+                tool_name=tool_name,
+                args=args,
+            )
+        except Exception as exc:
+            guard_decision = None
+            _append_answer_contract_guard_audit_best_effort(
+                state,
+                {
+                    "status": "GUARD_ERROR_PASS_THROUGH",
+                    "tool_name": tool_name,
+                    "error_type": type(exc).__name__[:128],
+                },
+            )
+        if guard_decision is not None:
+            response = guard_decision["response"]
+            function_call_id = _valid_context_identifier(tool_context)
+            try:
+                function_call_id = _require_function_call_id(tool_context)
+                record = _FailedClosedToolCall(
+                    function_call_id=function_call_id,
+                    tool_name=tool_name,
+                    phase=_phase(state.get("current_phase", 1)),
+                    response_sha256=_sha256_text(canonical_json(response)),
+                )
+                _add_failed_closed_call(state, record)
+                _upsert_tool_callback_audit(
+                    state,
+                    function_call_id,
+                    shadow_audit={
+                        "service_status": "semantic_guard_rejected_no_charge",
+                        "function_call_id": function_call_id,
+                        "tool_name": tool_name,
+                        "phase_before": record.phase,
+                        "episode_id": guard_decision["episode_id"],
+                        "contract_sha256": guard_decision["contract_sha256"],
+                        "invariant_id": guard_decision["invariant_id"],
+                        "invariant_kind": guard_decision["invariant_kind"],
+                        "provider_attempted": False,
+                        "official_tool_executed": False,
+                        "bird_coin_charged": False,
+                    },
+                    control_audit=None,
+                )
+            except Exception as exc:
+                if function_call_id is not None:
+                    state[GROUNDING_FAILED_CLOSED_CALLS_KEY] = {
+                        function_call_id: _FailedClosedToolCall(
+                            function_call_id=function_call_id,
+                            tool_name=tool_name,
+                            phase=_phase(state.get("current_phase", 1)),
+                            response_sha256=_sha256_text(canonical_json(response)),
+                        ).to_json()
+                    }
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit(
+                        "before_tool_semantic_guard",
+                        exc,
+                        function_call_id=function_call_id,
+                    ),
+                )
+            return response
+    if (
+        state is not None
+        and _main_fresh_recompile_r1_enabled()
+        and tool_name in _SQL_WRITER_TOOL_NAMES
+        and not _is_exact_pending_check_dispatch(
+            state,
+            tool_context=tool_context,
+            tool_name=tool_name,
+        )
+    ):
+        try:
+            duplicate_response = _observe_main_fresh_recompile_candidate(
+                state,
+                tool_name=tool_name,
+                args=args,
+            )
+        except Exception as exc:
+            duplicate_response = None
+            _append_main_fresh_recompile_audit_best_effort(
+                state,
+                {
+                    "status": "FRESH_CANDIDATE_OBSERVE_ERROR_PASS_THROUGH",
+                    "tool_name": tool_name,
+                    "error_type": type(exc).__name__[:128],
+                },
+            )
+        if duplicate_response is not None:
+            function_call_id = _valid_context_identifier(tool_context)
+            try:
+                function_call_id = _require_function_call_id(tool_context)
+                record = _FailedClosedToolCall(
+                    function_call_id=function_call_id,
+                    tool_name=tool_name,
+                    phase=_phase(state.get("current_phase", 1)),
+                    response_sha256=_sha256_text(
+                        canonical_json(duplicate_response)
+                    ),
+                )
+                _add_failed_closed_call(state, record)
+                _upsert_tool_callback_audit(
+                    state,
+                    function_call_id,
+                    shadow_audit={
+                        "service_status": (
+                            "main_fresh_recompile_duplicate_rejected_no_charge"
+                        ),
+                        "function_call_id": function_call_id,
+                        "tool_name": tool_name,
+                        "phase_before": record.phase,
+                        "provider_attempted": False,
+                        "official_tool_executed": False,
+                        "bird_coin_charged": False,
+                    },
+                    control_audit=None,
+                )
+            except Exception as exc:
+                _append_error_audit(
+                    state,
+                    _bounded_error_audit(
+                        "before_tool_main_fresh_recompile_duplicate",
+                        exc,
+                        function_call_id=function_call_id,
+                    ),
+                )
+            return duplicate_response
     if state is not None and not leaderboard_profile:
         failure = _phase_grounding_failure(state)
         if failure is not None:
@@ -1380,8 +2086,7 @@ async def after_tool_callback(
     state = getattr(tool_context, "state", None)
     function_call_id = _valid_context_identifier(tool_context)
     if (
-        not leaderboard_profile
-        and state is not None
+        state is not None
         and function_call_id is not None
         and _failed_closed_call_present(state, function_call_id)
     ):
@@ -1544,6 +2249,9 @@ async def after_tool_callback(
     bootstrap_tool_result = False
     bootstrap_tool_succeeded = False
     grounding_clarification_answered = False
+    clarification_route_audit: dict[str, Any] | None = None
+    clarification_regrounding_audits: list[dict[str, Any]] | None = None
+    atomic_regrounding_continued = False
     pending_check = consumed_check
     phase_grounding_observation: SQLGroundingObservation | None = None
     grounding_input: Mapping[str, Any] | None = None
@@ -1583,6 +2291,7 @@ async def after_tool_callback(
                         question=question,
                         answer=tool_response,
                     )
+                    _refresh_answer_contract_shadow_lifecycle_from_state(state)
                     grounding_clarification_answered = True
             phase_after = _phase(
                 state.get("current_phase", pending.phase_before)
@@ -1749,51 +2458,120 @@ async def after_tool_callback(
                     grounding_input = None
                     if pending_check is not None:
                         phase_grounding_observation = observation
-                        bound = _ACTIVE_TURN_MESSAGE.get()
-                        if bound is None or bound.task_id != _task_id(state):
-                            raise ValueError(
-                                "current bound query is required for Check"
+                        if _atomic_regrounding_draft(state) is not None:
+                            if grounding_clarification_answered:
+                                if pending_check.origin == "atomic_draft":
+                                    raise ValueError(
+                                        "rolled-back atomic Draft cannot be resumed"
+                                    )
+                                raise ValueError(
+                                    "atomic re-Grounding cannot schedule ask_user"
+                                )
+                            result = (
+                                await _continue_atomic_regrounding_draft_after_official(
+                                    state,
+                                    pending_check=pending_check,
+                                    observation=observation,
+                                    latest_tool_arguments=args,
+                                    latest_tool_result=raw_content,
+                                )
                             )
-                        follow_up = (
-                            _official_p2_follow_up(state)
-                            if pending.phase_before == 2
-                            else None
-                        )
-                        patch_runtime = _ensure_runtime(state)[0]
-                        grounding_input = _build_check_grounding_request(
-                            state,
-                            query=_user_message_query(bound.message),
-                            runtime=patch_runtime,
-                            phase=pending.phase_before,
-                            follow_up=follow_up,
-                            latest_tool_name=(
-                                None if grounding_clarification_answered else tool_name
-                            ),
-                            latest_tool_arguments=(
-                                None if grounding_clarification_answered else args
-                            ),
-                            latest_tool_result=(
-                                None
-                                if grounding_clarification_answered
-                                else raw_content
-                            ),
-                            latest_user_answer=(
-                                tool_response
-                                if tool_name == "ask_user"
-                                and grounding_clarification_answered
+                            atomic_regrounding_continued = True
+                        else:
+                            bound = _ACTIVE_TURN_MESSAGE.get()
+                            if bound is None or bound.task_id != _task_id(state):
+                                raise ValueError(
+                                    "current bound query is required for Check"
+                                )
+                            follow_up = (
+                                _official_p2_follow_up(state)
+                                if pending.phase_before == 2
                                 else None
-                            ),
-                            paired_check_tool=pending_check,
+                            )
+                            patch_runtime = _ensure_runtime(state)[0]
+                            if grounding_clarification_answered:
+                                grounding_input = _build_check_grounding_request(
+                                    state,
+                                    query=_user_message_query(bound.message),
+                                    runtime=patch_runtime,
+                                    phase=pending.phase_before,
+                                    follow_up=follow_up,
+                                    latest_user_answer=raw_content,
+                                    paired_check_tool=pending_check,
+                                )
+                                result = await _handle_observation(
+                                    state,
+                                    observation,
+                                    grounding_input=grounding_input,
+                                )
+                                clarification_route_audit = _observation_audit(
+                                    result
+                                )
+                                route = _accepted_clarification_route(result)
+                                if route == "restart_grounding":
+                                    (
+                                        result,
+                                        clarification_regrounding_audits,
+                                    ) = await _run_clarification_regrounding(
+                                        state,
+                                        answer_observation=observation,
+                                        query=_user_message_query(bound.message),
+                                        runtime=result.runtime,
+                                        phase=pending.phase_before,
+                                        follow_up=follow_up,
+                                    )
+                                    phase_grounding_observation = result.observation
+                            else:
+                                if (
+                                    pending.phase_before == 2
+                                    and pending_check.origin == "ordinary_check"
+                                    and observation_type != "tool_error"
+                                ):
+                                    _append_p2_check_cumulative_evidence(
+                                        state,
+                                        tool_name=tool_name,
+                                        arguments=args,
+                                        result=raw_content,
+                                        source="official_call",
+                                    )
+                                grounding_input = _build_check_grounding_request(
+                                    state,
+                                    query=_user_message_query(bound.message),
+                                    runtime=patch_runtime,
+                                    phase=pending.phase_before,
+                                    follow_up=follow_up,
+                                    latest_tool_name=tool_name,
+                                    latest_tool_arguments=args,
+                                    latest_tool_result=raw_content,
+                                )
+                                result = await _handle_observation(
+                                    state,
+                                    observation,
+                                    grounding_input=grounding_input,
+                                )
+                    else:
+                        result = await _handle_observation(
+                            state,
+                            observation,
+                            grounding_input=grounding_input,
                         )
-                    result = await _handle_observation(
-                        state,
-                        observation,
-                        grounding_input=grounding_input,
-                    )
                     follow_up_audit = None
                 runtime = result.runtime
                 audit = _observation_audit(result)
-                if grounding_input is not None:
+                if clarification_regrounding_audits is not None:
+                    audit["staged_grounding_kind"] = "clarification_regrounding"
+                    audit["clarification_regrounding"] = (
+                        clarification_regrounding_audits
+                    )
+                    audit["clarification_router"] = clarification_route_audit
+                elif clarification_route_audit is not None:
+                    audit["staged_grounding_kind"] = "clarification_router"
+                    audit["clarification_router"] = clarification_route_audit
+                elif atomic_regrounding_continued:
+                    audit["staged_grounding_kind"] = (
+                        "atomic_regrounding_check_loop"
+                    )
+                elif grounding_input is not None:
                     audit["staged_grounding_kind"] = "check"
                 audit.update(
                     {
@@ -1821,6 +2599,8 @@ async def after_tool_callback(
             # audit failure.  Never allow either the consumed action or a
             # partially finalized successor to be dispatched after failure.
             _store_pending_check_tool(state, None)
+            if _atomic_regrounding_draft(state) is not None:
+                _store_atomic_regrounding_draft(state, None)
         if (
             phase_grounding_observation is not None
             and _is_real_provider_mode()
@@ -2108,6 +2888,20 @@ async def _handle_submit_observation(
             None,
         )
 
+    _update_answer_contract_guard_episode_after_submit(
+        state,
+        phase=pending.phase_before,
+        event=event,
+        tool_response=tool_response,
+    )
+    _update_main_fresh_recompile_after_submit(
+        state,
+        phase=pending.phase_before,
+        event=event,
+        tool_response=tool_response,
+        pending=pending,
+    )
+
     liveness_bypass = bool(
         isinstance(attempt_gate, dict)
         and attempt_gate.get("effective_gate_action")
@@ -2190,6 +2984,12 @@ async def _handle_submit_observation(
                     summary="initial Phase-2 unified Grounding Check",
                     private_raw_ref=private_ref,
                 )
+                _start_p2_check_cumulative_evidence(
+                    state,
+                    runtime=final_runtime,
+                    query=_user_message_query(bound.message),
+                    follow_up=follow_up,
+                )
                 check_input = _build_check_grounding_request(
                     state,
                     query=_user_message_query(bound.message),
@@ -2250,6 +3050,7 @@ async def _handle_observation(
     runtime: GroundingRuntime | None = None,
     *,
     grounding_input: Mapping[str, Any] | None = None,
+    clarification_regrounding_kind: GroundingCallKind | None = None,
 ) -> _ObservationResult:
     async with _serialized_task_grounding(state) as synchronization:
         # Ordinary sibling callbacks must re-read after waiting.  An explicit
@@ -2262,9 +3063,1944 @@ async def _handle_observation(
             active_runtime,
             synchronization,
             grounding_input=grounding_input,
+            clarification_regrounding_kind=clarification_regrounding_kind,
         )
+        if result.service_status == "final_regrounding_gate_pending":
+            result = await _resolve_final_regrounding_gate(
+                state,
+                result=result,
+                synchronization=synchronization,
+                grounding_input=grounding_input,
+            )
         _store_runtime(state, result.runtime)
         return result
+
+
+def _final_regrounding_gate_enabled() -> bool:
+    return os.environ.get("VALIBRA_FINAL_REGROUNDING_GATE") == "1"
+
+
+def _final_regrounding_gate_audits(state: Any) -> tuple[dict[str, Any], ...]:
+    payload = state.get(FINAL_REGROUNDING_GATE_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) > _MAX_FINAL_REGROUNDING_GATE_AUDITS:
+        raise ValueError("invalid Final re-Grounding Gate audit ledger")
+    records: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("invalid Final re-Grounding Gate audit record")
+        _require_bounded_audit(item)
+        records.append(dict(item))
+    return tuple(records)
+
+
+def _append_final_regrounding_gate_audit(
+    state: Any,
+    audit: dict[str, Any],
+) -> None:
+    _require_bounded_audit(audit)
+    records = list(_final_regrounding_gate_audits(state))
+    if len(records) >= _MAX_FINAL_REGROUNDING_GATE_AUDITS:
+        raise ValueError("Final re-Grounding Gate audit ledger is full")
+    records.append(dict(audit))
+    state[FINAL_REGROUNDING_GATE_AUDITS_KEY] = records
+
+
+def _mapping_omission_query_sha256(
+    query: str,
+    follow_up: str | None,
+) -> str:
+    payload = {"query": query, "follow_up": follow_up}
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _mapping_actionable_evidence_sha256(
+    grounding_input: Mapping[str, Any],
+) -> str:
+    """Hash only evidence that can legitimately change a Mapping omission."""
+
+    regrounding_context = grounding_input.get("regrounding_context")
+    if not isinstance(regrounding_context, Mapping):
+        regrounding_context = {}
+    payload = {
+        "column_meanings": grounding_input.get("column_meanings"),
+        "user_clarifications": grounding_input.get("user_clarifications", []),
+        "official_knowledge": regrounding_context.get("official_knowledge"),
+        "answered_clarifications": regrounding_context.get(
+            "answered_clarifications", []
+        ),
+    }
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _mapping_owner_transition_sha256(
+    grounding_input: Mapping[str, Any],
+    *,
+    phase: Literal[1, 2],
+) -> str | None:
+    """Identify one bounded Mapping-owner transition without Check prose."""
+
+    final_gate_context = grounding_input.get("final_gate_context")
+    if not isinstance(final_gate_context, Mapping):
+        return None
+    transition = final_gate_context.get("mapping_owner_transition")
+    if not isinstance(transition, Mapping):
+        return None
+    eligible = transition.get("eligible_owner_transition_omissions")
+    if (
+        not isinstance(eligible, list)
+        or not eligible
+        or transition.get("mapping_is_only_owner") is not True
+        or transition.get("actionable_evidence_changed_since_mapping") is not True
+    ):
+        return None
+    payload = {
+        "phase": phase,
+        "query": grounding_input.get("query"),
+        "follow_up": grounding_input.get("follow_up"),
+        "current_state": grounding_input.get("current_state"),
+        "user_clarifications": grounding_input.get("user_clarifications", []),
+        "schema": final_gate_context.get("schema"),
+        "column_meanings": final_gate_context.get("column_meanings"),
+        "unresolved_mappings": transition.get("unresolved_mappings"),
+        "eligible_owner_transition_omissions": eligible,
+    }
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _mapping_owner_transition_was_attempted(
+    state: Any,
+    transition_sha256: str,
+) -> bool:
+    """Return whether this exact owner transition already started once."""
+
+    return any(
+        item.get("decision") == "REGROUND_MAPPING"
+        and item.get("mapping_owner_transition_sha256") == transition_sha256
+        for item in _final_regrounding_gate_audits(state)
+    )
+
+
+def _mapping_omission_carrier(state: Any) -> _MappingOmissionCarrier | None:
+    payload = state.get(MAPPING_OMISSION_CARRIER_KEY)
+    if payload is None:
+        return None
+    return _MappingOmissionCarrier.from_json(payload)
+
+
+def _active_mapping_omission_carrier(
+    state: Any,
+    *,
+    runtime: GroundingRuntime | SQLGroundingDraftRuntime,
+    phase: Literal[1, 2],
+    query: str,
+    follow_up: str | None,
+) -> _MappingOmissionCarrier | None:
+    carrier = _mapping_omission_carrier(state)
+    if carrier is None:
+        return None
+    if (
+        carrier.phase != phase
+        or carrier.query_sha256
+        != _mapping_omission_query_sha256(query, follow_up)
+        or carrier.grounding_revision > runtime.grounding_revision
+    ):
+        return None
+    mapped_phrases = {
+        item.phrase
+        for item in (runtime.grounding_state.column_mapping or ())
+    }
+    if mapped_phrases & {
+        item.phrase for item in carrier.unresolved_mappings
+    }:
+        raise ValueError("Mapping omission carrier conflicts with current State")
+    return carrier
+
+
+def _store_mapping_omission_carrier(
+    state: Any,
+    record: _MappingOmissionCarrier | None,
+) -> None:
+    state[MAPPING_OMISSION_CARRIER_KEY] = (
+        None if record is None else record.to_json()
+    )
+
+
+def _validate_mapping_omission_transition(
+    *,
+    previous: _MappingOmissionCarrier | None,
+    response: MappingGroundingResponse,
+    mapping_evidence_sha256: str,
+    legal_regrounding: bool,
+) -> None:
+    if previous is None:
+        return
+    previous_phrases = {
+        item.phrase for item in previous.unresolved_mappings
+    }
+    unresolved_phrases = {
+        item.phrase for item in response.unresolved_mappings
+    }
+    mapped_phrases = {item.phrase for item in response.column_mapping}
+    silently_dropped = previous_phrases - unresolved_phrases - mapped_phrases
+    if silently_dropped:
+        raise ValueError("Mapping silently dropped an unresolved phrase")
+    resolved = previous_phrases & mapped_phrases
+    if resolved and (
+        not legal_regrounding
+        or mapping_evidence_sha256 == previous.mapping_evidence_sha256
+    ):
+        raise ValueError(
+            "Mapping cleared an omission without new actionable evidence"
+        )
+
+
+def _validate_non_mapping_does_not_fill_omissions(
+    carrier: _MappingOmissionCarrier | None,
+    runtime: GroundingRuntime | SQLGroundingDraftRuntime,
+) -> None:
+    if carrier is None:
+        return
+    mapped_phrases = {
+        item.phrase
+        for item in (runtime.grounding_state.column_mapping or ())
+    }
+    if mapped_phrases & {
+        item.phrase for item in carrier.unresolved_mappings
+    }:
+        raise ValueError("only Mapping may resolve an unresolved mapping")
+
+
+def _atomic_regrounding_draft(
+    state: Any,
+) -> _AtomicRegroundingDraft | None:
+    payload = state.get(ATOMIC_REGROUNDING_DRAFT_KEY)
+    if payload is None:
+        return None
+    return _AtomicRegroundingDraft.from_json(payload)
+
+
+def _store_atomic_regrounding_draft(
+    state: Any,
+    record: _AtomicRegroundingDraft | None,
+) -> None:
+    state[ATOMIC_REGROUNDING_DRAFT_KEY] = (
+        None if record is None else record.to_json()
+    )
+
+
+def _resolved_literal_draft_lifecycle(
+    state: Any,
+) -> ResolvedLiteralCarrierLifecycle | None:
+    payload = state.get(RESOLVED_LITERAL_DRAFT_CARRIER_KEY)
+    if payload is None:
+        return None
+    lifecycle = ResolvedLiteralCarrierLifecycle.model_validate(payload)
+    if lifecycle.status != "DRAFT":
+        raise ValueError("resolved literal Draft store contains non-Draft lifecycle")
+    return lifecycle
+
+
+def _store_resolved_literal_draft_lifecycle(
+    state: Any,
+    lifecycle: ResolvedLiteralCarrierLifecycle | None,
+) -> None:
+    if lifecycle is not None and lifecycle.status != "DRAFT":
+        raise ValueError("resolved literal Draft store accepts only Draft lifecycle")
+    state[RESOLVED_LITERAL_DRAFT_CARRIER_KEY] = (
+        None if lifecycle is None else lifecycle.model_dump(mode="json")
+    )
+
+
+def _resolved_literal_active_lifecycles(
+    state: Any,
+) -> dict[str, ResolvedLiteralCarrierLifecycle]:
+    payload = state.get(RESOLVED_LITERAL_ACTIVE_CARRIERS_KEY, {})
+    if not isinstance(payload, dict) or set(payload) - {"1", "2"}:
+        raise ValueError("invalid resolved literal active carrier store")
+    result: dict[str, ResolvedLiteralCarrierLifecycle] = {}
+    for key, value in payload.items():
+        lifecycle = ResolvedLiteralCarrierLifecycle.model_validate(value)
+        if lifecycle.status != "COMMITTED" or str(lifecycle.phase) != key:
+            raise ValueError("invalid committed resolved literal lifecycle")
+        result[key] = lifecycle
+    return result
+
+
+def _store_resolved_literal_active_lifecycle(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    lifecycle: ResolvedLiteralCarrierLifecycle | None,
+) -> None:
+    records = _resolved_literal_active_lifecycles(state)
+    key = str(phase)
+    if lifecycle is None:
+        if key in records:
+            del records[key]
+    else:
+        if lifecycle.status != "COMMITTED" or lifecycle.phase != phase:
+            raise ValueError("active resolved literal lifecycle is invalid")
+        records[key] = lifecycle
+    state[RESOLVED_LITERAL_ACTIVE_CARRIERS_KEY] = {
+        item: records[item].model_dump(mode="json") for item in sorted(records)
+    }
+
+
+def _append_resolved_literal_carrier_audit(
+    state: Any,
+    record: Mapping[str, Any],
+) -> None:
+    payload = state.get(RESOLVED_LITERAL_CARRIER_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) >= (
+        _MAX_RESOLVED_LITERAL_CARRIER_AUDITS
+    ):
+        raise ValueError("invalid resolved literal carrier audit ledger")
+    audit = dict(record)
+    _require_bounded_audit(audit)
+    state[RESOLVED_LITERAL_CARRIER_AUDITS_KEY] = payload + [audit]
+
+
+def _resolved_literal_atomic_draft_id(
+    state: Any,
+    record: _AtomicRegroundingDraft,
+) -> str:
+    identity = {
+        "base_revision": record.base_revision,
+        "base_state_sha256": record.base_state_sha256,
+        "decision": record.decision,
+        "phase": record.phase,
+        "task_id": _task_id(state),
+    }
+    return f"resolved-literal-{_sha256_text(canonical_json(identity))}"
+
+
+def _materialize_check_resolved_literal(
+    state: Any,
+    *,
+    response: GroundingCheckResponse,
+    grounding_input: Mapping[str, Any],
+    runtime: GroundingRuntime | SQLGroundingDraftRuntime,
+    phase: Literal[1, 2],
+    atomic_draft_id: str,
+):
+    if not resolved_literal_executable_carrier_enabled():
+        return None
+    if not isinstance(
+        response,
+        GroundingCheckResolvedLiteralProposalShadowResponse,
+    ):
+        raise ValueError("enabled resolved literal Check returned legacy Form")
+    validation = validate_resolved_literal_proposal_shadow(
+        response,
+        grounding_input=grounding_input,
+        task_id=_task_id(state),
+        phase=phase,
+        grounding_revision=runtime.grounding_revision,
+    )
+    if validation.verdict == "REJECTED":
+        raise ValueError(f"resolved literal proposal rejected: {validation.reason}")
+    return materialize_resolved_literal_carrier(
+        validation,
+        grounding_input=grounding_input,
+        atomic_draft_id=atomic_draft_id,
+        task_id=_task_id(state),
+        phase=phase,
+        state_revision=runtime.grounding_revision,
+    )
+
+
+def _activate_formal_check_resolved_literal(
+    state: Any,
+    *,
+    response: GroundingCheckResponse,
+    grounding_input: Mapping[str, Any] | None,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    observation_id: str,
+) -> None:
+    if not resolved_literal_executable_carrier_enabled():
+        return
+    if grounding_input is None:
+        raise ValueError("resolved literal activation requires Check input")
+    carrier = _materialize_check_resolved_literal(
+        state,
+        response=response,
+        grounding_input=grounding_input,
+        runtime=runtime,
+        phase=phase,
+        atomic_draft_id=f"formal-check-{observation_id}",
+    )
+    if carrier is None:
+        _store_resolved_literal_active_lifecycle(
+            state,
+            phase=phase,
+            lifecycle=None,
+        )
+        return
+    state_sha = sql_grounding_state_sha256(runtime.grounding_state)
+    lifecycle = ResolvedLiteralCarrierLifecycle(
+        status="COMMITTED",
+        atomic_draft_id=carrier.atomic_draft_id,
+        task_id=carrier.task_id,
+        phase=phase,
+        base_revision=runtime.grounding_revision,
+        base_state_sha256=state_sha,
+        draft_revision=runtime.grounding_revision,
+        draft_state_sha256=state_sha,
+        committed_revision=runtime.grounding_revision,
+        active_carriers=(carrier,),
+    )
+    _store_resolved_literal_active_lifecycle(
+        state,
+        phase=phase,
+        lifecycle=lifecycle,
+    )
+    _append_resolved_literal_carrier_audit(
+        state,
+        {
+            "phase": phase,
+            "outcome": "FORMAL_CHECK_CARRIER_ACTIVATED",
+            "grounding_revision": runtime.grounding_revision,
+            "state_sha256": state_sha,
+            "carrier_sha256": _sha256_text(canonical_json(carrier)),
+        },
+    )
+
+
+def _stage_atomic_check_resolved_literal(
+    state: Any,
+    *,
+    record: _AtomicRegroundingDraft,
+    response: GroundingCheckResponse,
+    grounding_input: Mapping[str, Any],
+    runtime: SQLGroundingDraftRuntime,
+) -> None:
+    if not resolved_literal_executable_carrier_enabled():
+        return
+    carrier = _materialize_check_resolved_literal(
+        state,
+        response=response,
+        grounding_input=grounding_input,
+        runtime=runtime,
+        phase=record.phase,
+        atomic_draft_id=_resolved_literal_atomic_draft_id(state, record),
+    )
+    lifecycle = (
+        None
+        if carrier is None
+        else begin_resolved_literal_carrier_draft(
+            carrier,
+            base_revision=record.base_revision,
+            base_state_sha256=record.base_state_sha256,
+        )
+    )
+    _store_resolved_literal_draft_lifecycle(state, lifecycle)
+    if lifecycle is not None:
+        _append_resolved_literal_carrier_audit(
+            state,
+            {
+                "phase": record.phase,
+                "outcome": "ATOMIC_DRAFT_CARRIER_STAGED",
+                "base_revision": record.base_revision,
+                "draft_revision": runtime.grounding_revision,
+                "state_sha256": lifecycle.draft_state_sha256,
+                "carrier_sha256": _sha256_text(
+                    canonical_json(lifecycle.staged_carriers[0])
+                ),
+            },
+        )
+
+
+def _commit_atomic_check_resolved_literal(
+    state: Any,
+    *,
+    record: _AtomicRegroundingDraft,
+    formal_runtime: GroundingRuntime,
+    committed: GroundingRuntime,
+) -> None:
+    if not resolved_literal_executable_carrier_enabled():
+        return
+    lifecycle = _resolved_literal_draft_lifecycle(state)
+    if lifecycle is None:
+        _store_resolved_literal_active_lifecycle(
+            state,
+            phase=record.phase,
+            lifecycle=None,
+        )
+        return
+    activated = commit_resolved_literal_carrier_draft(
+        lifecycle,
+        task_id=_task_id(state),
+        phase=record.phase,
+        formal_revision_before_commit=formal_runtime.grounding_revision,
+        formal_state_before_commit=formal_runtime.grounding_state,
+        committed_revision=committed.grounding_revision,
+        committed_state=committed.grounding_state,
+    )
+    _store_resolved_literal_active_lifecycle(
+        state,
+        phase=record.phase,
+        lifecycle=activated,
+    )
+    _store_resolved_literal_draft_lifecycle(state, None)
+    _append_resolved_literal_carrier_audit(
+        state,
+        {
+            "phase": record.phase,
+            "outcome": "ATOMIC_DRAFT_CARRIER_ACTIVATED",
+            "grounding_revision": committed.grounding_revision,
+            "state_sha256": sql_grounding_state_sha256(
+                committed.grounding_state
+            ),
+            "carrier_sha256": _sha256_text(
+                canonical_json(activated.active_carriers[0])
+            ),
+        },
+    )
+
+
+def _discard_atomic_check_resolved_literal(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+) -> None:
+    if not resolved_literal_executable_carrier_enabled():
+        return
+    lifecycle = _resolved_literal_draft_lifecycle(state)
+    if lifecycle is not None:
+        _append_resolved_literal_carrier_audit(
+            state,
+            {
+                "phase": phase,
+                "outcome": "ATOMIC_DRAFT_CARRIER_ROLLED_BACK",
+                "base_revision": lifecycle.base_revision,
+                "state_sha256": lifecycle.base_state_sha256,
+                "carrier_sha256": _sha256_text(
+                    canonical_json(lifecycle.staged_carriers[0])
+                ),
+            },
+        )
+    _store_resolved_literal_draft_lifecycle(state, None)
+    _store_resolved_literal_active_lifecycle(
+        state,
+        phase=phase,
+        lifecycle=None,
+    )
+
+
+def _active_resolved_literals_for_runtime(
+    state: Any,
+    *,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+):
+    if not resolved_literal_executable_carrier_enabled():
+        return ()
+    lifecycle = _resolved_literal_active_lifecycles(state).get(str(phase))
+    if lifecycle is None:
+        return ()
+    return active_resolved_literal_carriers(
+        lifecycle,
+        task_id=_task_id(state),
+        phase=phase,
+        state_revision=runtime.grounding_revision,
+        state=runtime.grounding_state,
+    )
+
+
+def _with_atomic_regrounding_context(
+    grounding_input: Mapping[str, Any],
+    *,
+    decision: Literal["REGROUND_MAPPING", "REGROUND_STRUCTURE"],
+    check_gap: str | None,
+) -> dict[str, Any]:
+    """Attach only authoritative information already present this round."""
+
+    payload = dict(grounding_input)
+    current_state = payload.get("current_state")
+    if not isinstance(current_state, dict):
+        raise ValueError("atomic re-Grounding requires a current State")
+    payload["regrounding_context"] = {
+        "decision": decision,
+        "check_gap": check_gap,
+        "answered_clarifications": payload.get("user_clarifications", []),
+        # Official definitions already materialized by the Service remain the
+        # authority.  This explicit projection prevents a restart from losing
+        # the new knowledge while never creating a fifth State dimension.
+        "official_knowledge": current_state.get("domain_knowledge"),
+    }
+    return payload
+
+
+def _atomic_draft_stage_audit(
+    call_kind: GroundingCallKind,
+    result: SQLGroundingDraftStageResult,
+) -> dict[str, Any]:
+    return {
+        "stage": call_kind,
+        "status": result.state_update.status,
+        "changed_dimensions": list(result.state_update.changed_dimensions),
+        "private_revision_before": result.state_update.revision_before,
+        "private_revision_after": result.state_update.revision_after,
+        "error_type": result.state_update.error_type,
+        "state_sha256": sql_grounding_state_sha256(
+            result.runtime.grounding_state
+        ),
+        "knowledge_omission_mapping_ignored": list(
+            result.knowledge_omission_mapping_ignored
+        ),
+        "knowledge_preserved_by_default_refs": list(
+            result.knowledge_preserved_by_default_refs
+        ),
+        "knowledge_retirement_audit_sidecar": (
+            None
+            if result.knowledge_retirement_audit_sidecar is None
+            else result.knowledge_retirement_audit_sidecar.model_dump(mode="json")
+        ),
+    }
+
+
+def _knowledge_omission_protection_audits(
+    state: Any,
+) -> tuple[dict[str, Any], ...]:
+    payload = state.get(KNOWLEDGE_OMISSION_PROTECTION_AUDITS_KEY, [])
+    if (
+        not isinstance(payload, list)
+        or len(payload) > _MAX_KNOWLEDGE_OMISSION_PROTECTION_AUDITS
+    ):
+        raise ValueError("invalid Knowledge omission-protection audit ledger")
+    records: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("invalid Knowledge omission-protection audit record")
+        _require_bounded_audit(item)
+        records.append(dict(item))
+    return tuple(records)
+
+
+def _record_knowledge_omission_protection(
+    state: Any,
+    *,
+    phase: int,
+    phrases: tuple[str, ...],
+    atomic_draft: bool,
+) -> None:
+    if not phrases:
+        return
+    records = list(_knowledge_omission_protection_audits(state))
+    if len(records) >= _MAX_KNOWLEDGE_OMISSION_PROTECTION_AUDITS:
+        raise ValueError("Knowledge omission-protection audit ledger is full")
+    record = {
+        "phase": phase,
+        "stage": "knowledge",
+        "outcome": "knowledge_unauthorized_omission_mapping_ignored",
+        "phrases": list(phrases),
+        "atomic_draft": atomic_draft,
+    }
+    _require_bounded_audit(record)
+    records.append(record)
+    state[KNOWLEDGE_OMISSION_PROTECTION_AUDITS_KEY] = records
+
+
+def _atomic_draft_base_runtime(
+    state: Any,
+    record: _AtomicRegroundingDraft,
+) -> GroundingRuntime:
+    formal_runtime, degraded = _ensure_runtime(state)
+    if degraded:
+        raise ValueError("formal Runtime degraded during atomic re-Grounding")
+    if (
+        formal_runtime.grounding_revision != record.base_revision
+        or sql_grounding_state_sha256(formal_runtime.grounding_state)
+        != record.base_state_sha256
+    ):
+        raise ValueError("formal State changed during atomic re-Grounding")
+    return formal_runtime
+
+
+def _build_final_regrounding_gate_request(
+    state: Any,
+    *,
+    query: str,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    follow_up: str | None,
+    final_check: GroundingCheckResponse,
+) -> dict[str, Any]:
+    events = _bootstrap_evidence_prefix(state)
+    by_tool = {event["tool_name"]: event["content"] for event in events}
+    schema = by_tool.get("get_schema")
+    _, canonical_columns = _parse_schema_projection(schema)
+    meanings = by_tool.get("get_all_column_meanings")
+    if runtime.grounding_state.tables is None:
+        raise ValueError("Final Gate requires evaluated tables")
+    column_meanings = _project_mapping_column_meanings(
+        meanings,
+        tables=runtime.grounding_state.tables,
+        canonical_columns=canonical_columns,
+    )
+    answered_clarifications = [
+        item.model_dump(mode="json")
+        for item in _clarification_records(state)
+        if item.phase <= phase and item.answer is not None
+    ]
+    base = _phase_request_common(
+        state,
+        query=query,
+        runtime=runtime,
+        phase=phase,
+        follow_up=follow_up,
+    )
+    carrier = _active_mapping_omission_carrier(
+        state,
+        runtime=runtime,
+        phase=phase,
+        query=query,
+        follow_up=follow_up,
+    )
+    unresolved_mappings = (
+        () if carrier is None else carrier.unresolved_mappings
+    )
+    eligible_owner_transition_omissions = (
+        tuple(
+            item
+            for item in unresolved_mappings
+            if item.reason == "derived_rule_required"
+        )
+        if phase == 2
+        and final_check.status == "incomplete"
+        and final_check.clarification_route == "none"
+        and final_check.next_tool is None
+        else ()
+    )
+    prospective_mapping_evidence_sha256 = _mapping_actionable_evidence_sha256(
+        {
+            "column_meanings": column_meanings,
+            "user_clarifications": base.get("user_clarifications", []),
+            "regrounding_context": {
+                "official_knowledge": base["current_state"].get(
+                    "domain_knowledge"
+                ),
+                "answered_clarifications": answered_clarifications,
+            },
+        }
+    )
+    return {
+        **base,
+        "final_gate_context": {
+            "schema": schema,
+            "column_meanings": column_meanings,
+            "answered_clarifications": answered_clarifications,
+            "previous_official_calls": _previous_check_official_calls(
+                state,
+                phase=phase,
+            ),
+            "final_check": final_check.model_dump(mode="json"),
+            "mapping_owner_transition": {
+                "unresolved_mappings": [
+                    item.model_dump(mode="json")
+                    for item in unresolved_mappings
+                ],
+                "eligible_owner_transition_omissions": [
+                    item.model_dump(mode="json")
+                    for item in eligible_owner_transition_omissions
+                ],
+                "mapping_is_only_owner": True,
+                "actionable_evidence_changed_since_mapping": (
+                    bool(eligible_owner_transition_omissions)
+                    and carrier is not None
+                    and prospective_mapping_evidence_sha256
+                    != carrier.mapping_evidence_sha256
+                ),
+            },
+        },
+    }
+
+
+async def _propose_final_regrounding_gate(
+    state: Any,
+    *,
+    runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+    synchronization: _TaskGroundingSynchronization,
+    query: str,
+    follow_up: str | None,
+    grounding_input: Mapping[str, Any],
+) -> GroundingUpdaterResult:
+    updater = _resolve_sql_grounding_updater()
+    if _is_real_provider_mode():
+        llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
+        if _provider_call_count(state) >= llm_config.max_calls_per_task:
+            raise ValueError("Final Gate exceeds Provider safety limit")
+        if synchronization.provider_slot_reserved:
+            raise RuntimeError("duplicate same-task Provider reservation")
+        synchronization.provider_slot_reserved = True
+    try:
+        result = await updater.propose(
+            runtime,
+            observation,
+            original_query=query,
+            follow_up_query=follow_up,
+            grounding_input=grounding_input,
+        )
+    finally:
+        synchronization.provider_slot_reserved = False
+    if result.telemetry.attempted and _is_real_provider_mode():
+        _record_provider_call(state, observation.phase)
+    if not isinstance(result.response, FinalRegroundingGateResponse):
+        raise ValueError("Final Gate returned the wrong typed response")
+    return result
+
+
+def _finalize_complete_check_after_gate(
+    state: Any,
+    *,
+    result: _ObservationResult,
+    runtime: GroundingRuntime,
+    grounding_input: Mapping[str, Any] | None,
+) -> _ObservationResult:
+    service_result = result.service_result
+    if service_result is None or not isinstance(
+        service_result.response,
+        GroundingCheckResponse,
+    ):
+        raise ValueError("Final Gate completion requires one typed Check")
+    check = service_result.response
+    if check.status != "complete":
+        return _failed_phase_grounding_result(
+            state,
+            runtime=runtime,
+            observation=result.observation,
+            service_status="terminal_incomplete",
+            error_type="CheckTerminalIncomplete",
+            provider_attempted=service_result.llm_telemetry.attempted,
+            service_result=service_result,
+        )
+    budget = _finite_budget(state)
+    _append_check_audit(
+        state,
+        {
+            "phase": result.observation.phase,
+            "status": "complete",
+            "missing_information": None,
+            "tool_name": None,
+            "budget_before": budget,
+            "tool_cost": 0.0,
+            "budget_after": budget,
+            "blocked_reason": None,
+        },
+    )
+    candidate, events = _advance_ready_control_stage(state, runtime)
+    if _is_real_provider_mode():
+        _record_phase_grounding_outcome(
+            state,
+            observation=result.observation,
+            runtime=candidate,
+            status="succeeded",
+            provider_attempted=service_result.llm_telemetry.attempted,
+        )
+    if _answer_contract_runtime_enabled():
+        _emit_answer_contract_shadow(
+            state,
+            runtime=candidate,
+            phase=result.observation.phase,
+            grounding_input=grounding_input,
+        )
+    return _ObservationResult(
+        runtime=candidate,
+        service_status=service_result.state_update.status,
+        observation=result.observation,
+        service_result=service_result,
+        control_events=events,
+        control_status="succeeded",
+    )
+
+
+async def _process_atomic_draft_stage(
+    state: Any,
+    *,
+    runtime: SQLGroundingDraftRuntime,
+    observation: SQLGroundingObservation,
+    grounding_input: Mapping[str, Any],
+    synchronization: _TaskGroundingSynchronization,
+) -> SQLGroundingDraftStageResult:
+    updater = _resolve_sql_grounding_updater()
+    if _is_real_provider_mode():
+        llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
+        if _provider_call_count(state) >= llm_config.max_calls_per_task:
+            raise ValueError("atomic Draft exceeds Provider safety limit")
+        if synchronization.provider_slot_reserved:
+            raise RuntimeError("duplicate same-task Provider reservation")
+        synchronization.provider_slot_reserved = True
+    try:
+        result = await process_sql_grounding_draft_stage(
+            runtime,
+            observation,
+            _build_validation_context(state, observation),
+            updater,
+            grounding_input=grounding_input,
+        )
+    finally:
+        synchronization.provider_slot_reserved = False
+    if result.llm_telemetry.attempted and _is_real_provider_mode():
+        _record_provider_call(state, observation.phase)
+    _record_knowledge_omission_protection(
+        state,
+        phase=observation.phase,
+        phrases=result.knowledge_omission_mapping_ignored,
+        atomic_draft=True,
+    )
+    return result
+
+
+def _discard_atomic_regrounding_draft(
+    state: Any,
+    *,
+    record: _AtomicRegroundingDraft,
+    formal_runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+    failed_stage: str,
+    error_type: str,
+    provider_attempted: bool,
+) -> _ObservationResult:
+    _store_atomic_regrounding_draft(state, None)
+    _append_final_regrounding_gate_audit(
+        state,
+        {
+            "phase": record.phase,
+            "decision": record.decision,
+            "base_revision": record.base_revision,
+            "committed": False,
+            "rolled_back": True,
+            "formal_state_unchanged": True,
+            "failed_stage": failed_stage,
+            "error_type": error_type,
+            "official_call_count": record.official_call_count,
+            "draft_stages": list(record.draft_audits),
+        },
+    )
+    return _failed_phase_grounding_result(
+        state,
+        runtime=formal_runtime,
+        observation=observation,
+        service_status="atomic_regrounding_terminal",
+        error_type=error_type,
+        provider_attempted=provider_attempted,
+    )
+
+
+def _commit_atomic_regrounding_draft(
+    state: Any,
+    *,
+    record: _AtomicRegroundingDraft,
+    formal_runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+    check_result: SQLGroundingDraftStageResult,
+    grounding_input: Mapping[str, Any],
+) -> _ObservationResult:
+    assert isinstance(check_result.response, GroundingCheckResponse)
+    committed = commit_sql_grounding_draft(
+        formal_runtime,
+        check_result.runtime,
+        context=_build_validation_context(state, observation),
+        final_check=check_result.response,
+    )
+    _store_atomic_regrounding_draft(state, None)
+    budget = _finite_budget(state)
+    _append_check_audit(
+        state,
+        {
+            "phase": record.phase,
+            "status": "complete",
+            "missing_information": None,
+            "tool_name": None,
+            "budget_before": budget,
+            "tool_cost": 0.0,
+            "budget_after": budget,
+            "blocked_reason": "atomic_regrounding_committed",
+        },
+    )
+    committed, events = _advance_ready_control_stage(state, committed)
+    if _is_real_provider_mode():
+        _record_phase_grounding_outcome(
+            state,
+            observation=observation,
+            runtime=committed,
+            status="succeeded",
+            provider_attempted=check_result.llm_telemetry.attempted,
+        )
+    if _answer_contract_runtime_enabled():
+        _emit_answer_contract_shadow(
+            state,
+            runtime=committed,
+            phase=record.phase,
+            grounding_input=grounding_input,
+        )
+    _append_final_regrounding_gate_audit(
+        state,
+        {
+            "phase": record.phase,
+            "decision": record.decision,
+            "base_revision": record.base_revision,
+            "committed_revision": committed.grounding_revision,
+            "formal_revision_delta": committed.grounding_revision
+            - record.base_revision,
+            "committed": True,
+            "rolled_back": False,
+            "formal_state_unchanged_before_commit": True,
+            "official_call_count": record.official_call_count,
+            "draft_stages": list(record.draft_audits),
+        },
+    )
+    _store_mapping_omission_carrier(
+        state,
+        _MappingOmissionCarrier(
+            phase=record.phase,
+            grounding_revision=committed.grounding_revision,
+            query_sha256=_mapping_omission_query_sha256(
+                record.query, record.follow_up
+            ),
+            mapping_evidence_sha256=(
+                record.draft_mapping_evidence_sha256
+            ),
+            unresolved_mappings=record.draft_unresolved_mappings,
+        ),
+    )
+    return _ObservationResult(
+        runtime=committed,
+        service_status="atomic_regrounding_committed",
+        observation=observation,
+        control_events=events,
+        control_status="succeeded",
+    )
+
+
+def _finish_or_pause_atomic_draft_check(
+    state: Any,
+    *,
+    record: _AtomicRegroundingDraft,
+    formal_runtime: GroundingRuntime,
+    observation: SQLGroundingObservation,
+    check_result: SQLGroundingDraftStageResult,
+    grounding_input: Mapping[str, Any],
+) -> _ObservationResult:
+    response = check_result.response
+    if not isinstance(response, GroundingCheckResponse):
+        return _discard_atomic_regrounding_draft(
+            state,
+            record=record,
+            formal_runtime=formal_runtime,
+            observation=observation,
+            failed_stage="check",
+            error_type="AtomicDraftCheckTypeError",
+            provider_attempted=check_result.llm_telemetry.attempted,
+        )
+    if check_result.state_update.status not in {"accepted", "noop"}:
+        return _discard_atomic_regrounding_draft(
+            state,
+            record=record,
+            formal_runtime=formal_runtime,
+            observation=observation,
+            failed_stage="check",
+            error_type=(
+                check_result.state_update.error_type
+                or "AtomicDraftCheckRejected"
+            ),
+            provider_attempted=check_result.llm_telemetry.attempted,
+        )
+    if response.status == "complete":
+        try:
+            return _commit_atomic_regrounding_draft(
+                state,
+                record=record,
+                formal_runtime=formal_runtime,
+                observation=observation,
+                check_result=check_result,
+                grounding_input=grounding_input,
+            )
+        except Exception as exc:
+            return _discard_atomic_regrounding_draft(
+                state,
+                record=record,
+                formal_runtime=formal_runtime,
+                observation=observation,
+                failed_stage="commit_validation",
+                error_type=type(exc).__name__[:128],
+                provider_attempted=check_result.llm_telemetry.attempted,
+            )
+
+    request = response.next_tool
+    if request is not None and request.tool_name == "ask_user":
+        clarification = request.materialize_user_clarification_request()
+        if clarification is None:
+            return _discard_atomic_regrounding_draft(
+                state,
+                record=record,
+                formal_runtime=formal_runtime,
+                observation=observation,
+                failed_stage="check_clarification_handoff",
+                error_type="AtomicDraftClarificationInvalid",
+                provider_attempted=check_result.llm_telemetry.attempted,
+            )
+        draft_omission_phrases = {
+            item.phrase for item in record.draft_unresolved_mappings
+        }
+        proposal = request.user_clarification_request
+        assert proposal is not None
+        requirement_type: str | None = None
+        related_mapping_phrases: tuple[str, ...] = ()
+        if clarification.phrase in draft_omission_phrases:
+            if (
+                proposal.requirement_type is not None
+                or proposal.related_mapping_phrases
+            ):
+                return _discard_atomic_regrounding_draft(
+                    state,
+                    record=record,
+                    formal_runtime=formal_runtime,
+                    observation=observation,
+                    failed_stage="check_clarification_handoff",
+                    error_type="AtomicDraftMappingClarificationHasRequirementEvent",
+                    provider_attempted=check_result.llm_telemetry.attempted,
+                )
+        else:
+            if (
+                proposal.requirement_type is None
+                or not proposal.related_mapping_phrases
+            ):
+                return _discard_atomic_regrounding_draft(
+                    state,
+                    record=record,
+                    formal_runtime=formal_runtime,
+                    observation=observation,
+                    failed_stage="check_clarification_handoff",
+                    error_type="AtomicDraftClarificationNotUnresolved",
+                    provider_attempted=check_result.llm_telemetry.attempted,
+                )
+            if record.draft_unresolved_mappings:
+                return _discard_atomic_regrounding_draft(
+                    state,
+                    record=record,
+                    formal_runtime=formal_runtime,
+                    observation=observation,
+                    failed_stage="check_clarification_handoff",
+                    error_type="AtomicDraftCheckRequirementBlockedByMappingOmission",
+                    provider_attempted=check_result.llm_telemetry.attempted,
+                )
+            query_sources = (record.query,) + (
+                () if record.follow_up is None else (record.follow_up,)
+            )
+            if not any(
+                clarification.phrase in source for source in query_sources
+            ):
+                return _discard_atomic_regrounding_draft(
+                    state,
+                    record=record,
+                    formal_runtime=formal_runtime,
+                    observation=observation,
+                    failed_stage="check_clarification_handoff",
+                    error_type="AtomicDraftCheckRequirementPhraseNotVerbatim",
+                    provider_attempted=check_result.llm_telemetry.attempted,
+                )
+            mapped_phrases = {
+                item.phrase
+                for item in (
+                    record.draft_runtime.grounding_state.column_mapping or ()
+                )
+            }
+            if not set(proposal.related_mapping_phrases).issubset(
+                mapped_phrases
+            ):
+                return _discard_atomic_regrounding_draft(
+                    state,
+                    record=record,
+                    formal_runtime=formal_runtime,
+                    observation=observation,
+                    failed_stage="check_clarification_handoff",
+                    error_type="AtomicDraftCheckRequirementRelationInvalid",
+                    provider_attempted=check_result.llm_telemetry.attempted,
+                )
+            requirement_type = proposal.requirement_type
+            related_mapping_phrases = proposal.related_mapping_phrases
+        if any(
+            item.phrase == clarification.phrase
+            for item in _clarification_records(state)
+        ):
+            return _discard_atomic_regrounding_draft(
+                state,
+                record=record,
+                formal_runtime=formal_runtime,
+                observation=observation,
+                failed_stage="check_clarification_handoff",
+                error_type="AtomicDraftClarificationPhraseNotNew",
+                provider_attempted=check_result.llm_telemetry.attempted,
+            )
+        # The private Draft must be dead before its clarification becomes an
+        # outer Official action.  The eventual answer may start a new Gate /
+        # Draft cycle, but this Draft can never be resumed.
+        _store_atomic_regrounding_draft(state, None)
+        try:
+            pending = _schedule_check_tool(
+                state,
+                phase=record.phase,
+                response=response,
+                allow_repeated_gap=True,
+                origin="atomic_draft",
+                requirement_type=requirement_type,
+                related_mapping_phrases=related_mapping_phrases,
+            )
+        except Exception as exc:
+            _store_pending_check_tool(state, None)
+            return _discard_atomic_regrounding_draft(
+                state,
+                record=record,
+                formal_runtime=formal_runtime,
+                observation=observation,
+                failed_stage="check_clarification_handoff",
+                error_type=_grounding_control_error_type(exc),
+                provider_attempted=check_result.llm_telemetry.attempted,
+            )
+        _append_final_regrounding_gate_audit(
+            state,
+            {
+                "phase": record.phase,
+                "decision": record.decision,
+                "base_revision": record.base_revision,
+                "committed": False,
+                "rolled_back": True,
+                "formal_state_unchanged": True,
+                "outcome": "ATOMIC_DRAFT_NEEDS_CLARIFICATION",
+                "clarification_phrase": clarification.phrase,
+                "clarification_request_digest": pending.request_digest,
+                "clarification_event_origin": pending.origin,
+                "clarification_requirement_type": pending.requirement_type,
+                "clarification_related_mapping_phrases": list(
+                    pending.related_mapping_phrases
+                ),
+                "official_call_count": record.official_call_count,
+                "draft_stages": list(record.draft_audits),
+            },
+        )
+        return _ObservationResult(
+            runtime=formal_runtime,
+            service_status="atomic_draft_needs_clarification",
+            observation=observation,
+            control_status="succeeded",
+        )
+    if (
+        request is None
+        or request.tool_name
+        not in {
+            "get_column_meaning",
+            "get_all_external_knowledge_names",
+            "get_knowledge_definition",
+        }
+        or record.official_call_count >= _MAX_ATOMIC_REGROUNDING_OFFICIAL_CALLS
+    ):
+        return _discard_atomic_regrounding_draft(
+            state,
+            record=record,
+            formal_runtime=formal_runtime,
+            observation=observation,
+            failed_stage="check_terminal",
+            error_type="AtomicDraftCheckTerminalIncomplete",
+            provider_attempted=check_result.llm_telemetry.attempted,
+        )
+    updated_record = _AtomicRegroundingDraft(
+        phase=record.phase,
+        decision=record.decision,
+        base_revision=record.base_revision,
+        base_state_sha256=record.base_state_sha256,
+        query=record.query,
+        follow_up=record.follow_up,
+        check_gap=record.check_gap,
+        draft_runtime=check_result.runtime,
+        draft_unresolved_mappings=record.draft_unresolved_mappings,
+        draft_mapping_evidence_sha256=(
+            record.draft_mapping_evidence_sha256
+        ),
+        draft_audits=record.draft_audits,
+        official_call_count=record.official_call_count + 1,
+    )
+    try:
+        _schedule_check_tool(
+            state,
+            phase=record.phase,
+            response=response,
+            allow_repeated_gap=True,
+        )
+        _store_atomic_regrounding_draft(state, updated_record)
+    except Exception as exc:
+        _store_pending_check_tool(state, None)
+        return _discard_atomic_regrounding_draft(
+            state,
+            record=updated_record,
+            formal_runtime=formal_runtime,
+            observation=observation,
+            failed_stage="check_schedule",
+            error_type=_grounding_control_error_type(exc),
+            provider_attempted=check_result.llm_telemetry.attempted,
+        )
+    return _ObservationResult(
+        runtime=formal_runtime,
+        service_status="atomic_regrounding_waiting_official",
+        observation=observation,
+        control_status="succeeded",
+    )
+
+
+async def _run_atomic_regrounding_draft(
+    state: Any,
+    *,
+    formal_result: _ObservationResult,
+    decision: Literal["REGROUND_MAPPING", "REGROUND_STRUCTURE"],
+    synchronization: _TaskGroundingSynchronization,
+    query: str,
+    follow_up: str | None,
+) -> _ObservationResult:
+    formal_runtime = formal_result.runtime
+    phase = formal_result.observation.phase
+    final_check = (
+        formal_result.service_result.response
+        if formal_result.service_result is not None
+        and isinstance(
+            formal_result.service_result.response,
+            GroundingCheckResponse,
+        )
+        else None
+    )
+    check_gap = final_check.missing_information if final_check is not None else None
+    call_kinds: tuple[GroundingCallKind, ...] = (
+        ("structure", "mapping", "knowledge", "check")
+        if decision == "REGROUND_STRUCTURE"
+        else ("mapping", "knowledge", "check")
+    )
+    draft_runtime = SQLGroundingDraftRuntime(
+        grounding_revision=formal_runtime.grounding_revision,
+        stage=formal_runtime.stage,
+        focus_dimension="none",
+        grounding_state=formal_runtime.grounding_state,
+    )
+    base_carrier = _active_mapping_omission_carrier(
+        state,
+        runtime=formal_runtime,
+        phase=phase,
+        query=query,
+        follow_up=follow_up,
+    )
+    record = _AtomicRegroundingDraft(
+        phase=phase,
+        decision=decision,
+        base_revision=formal_runtime.grounding_revision,
+        base_state_sha256=sql_grounding_state_sha256(
+            formal_runtime.grounding_state
+        ),
+        query=query,
+        follow_up=follow_up,
+        check_gap=check_gap,
+        draft_runtime=draft_runtime,
+        draft_unresolved_mappings=(
+            () if base_carrier is None else base_carrier.unresolved_mappings
+        ),
+        draft_mapping_evidence_sha256=(
+            "0" * 64
+            if base_carrier is None
+            else base_carrier.mapping_evidence_sha256
+        ),
+        draft_audits=(),
+        official_call_count=0,
+    )
+    last_observation = formal_result.observation
+    last_result: SQLGroundingDraftStageResult | None = None
+    last_input: Mapping[str, Any] | None = None
+    for call_kind in call_kinds:
+        # Request builders must see the Draft-owned omission revision, not the
+        # formal carrier that remains intentionally frozen until atomic commit.
+        draft_request_state = _snapshot_state_for_atomic_draft_request(
+            state, record
+        )
+        last_observation = build_sql_grounding_observation(
+            task_id=formal_result.observation.task_id,
+            phase=phase,
+            sequence=_next_sequence(state),
+            observation_type=formal_result.observation.observation_type,
+            content=formal_result.observation.content,
+            summary=f"Final Gate triggered private {call_kind} Draft stage",
+            tool_name=formal_result.observation.tool_name,
+            function_call_id=formal_result.observation.function_call_id,
+            private_raw_ref=formal_result.observation.private_raw_ref,
+        )
+        if call_kind == "check":
+            stage_input = _build_check_grounding_request(
+                draft_request_state,
+                query=query,
+                runtime=draft_runtime,
+                phase=phase,
+                follow_up=follow_up,
+                initial=True,
+                include_p2_cumulative_evidence=False,
+            )
+            stage_input["unresolved_mappings"] = [
+                item.model_dump(mode="json")
+                for item in record.draft_unresolved_mappings
+            ]
+        else:
+            stage_input = _build_staged_grounding_request(
+                draft_request_state,
+                call_kind=call_kind,
+                query=query,
+                runtime=draft_runtime,
+                phase=phase,
+                follow_up=follow_up,
+            )
+            if call_kind in {"mapping", "knowledge"}:
+                stage_input["unresolved_mappings"] = [
+                    item.model_dump(mode="json")
+                    for item in record.draft_unresolved_mappings
+                ]
+        last_input = _with_atomic_regrounding_context(
+            stage_input,
+            decision=decision,
+            check_gap=check_gap,
+        )
+        last_result = await _process_atomic_draft_stage(
+            state,
+            runtime=draft_runtime,
+            observation=last_observation,
+            grounding_input=last_input,
+            synchronization=synchronization,
+        )
+        next_unresolved = record.draft_unresolved_mappings
+        next_mapping_evidence_sha = record.draft_mapping_evidence_sha256
+        if last_result.state_update.status in {"accepted", "noop"}:
+            if call_kind == "mapping":
+                if not isinstance(last_result.response, MappingGroundingResponse):
+                    return _discard_atomic_regrounding_draft(
+                        state,
+                        record=record,
+                        formal_runtime=formal_runtime,
+                        observation=last_observation,
+                        failed_stage=call_kind,
+                        error_type="AtomicDraftMappingTypeError",
+                        provider_attempted=last_result.llm_telemetry.attempted,
+                    )
+                next_mapping_evidence_sha = (
+                    _mapping_actionable_evidence_sha256(last_input)
+                )
+                try:
+                    _validate_mapping_omission_transition(
+                        previous=_MappingOmissionCarrier(
+                            phase=phase,
+                            grounding_revision=record.base_revision,
+                            query_sha256=_mapping_omission_query_sha256(
+                                query, follow_up
+                            ),
+                            mapping_evidence_sha256=(
+                                record.draft_mapping_evidence_sha256
+                            ),
+                            unresolved_mappings=(
+                                record.draft_unresolved_mappings
+                            ),
+                        ),
+                        response=last_result.response,
+                        mapping_evidence_sha256=next_mapping_evidence_sha,
+                        legal_regrounding=True,
+                    )
+                except Exception as exc:
+                    return _discard_atomic_regrounding_draft(
+                        state,
+                        record=record,
+                        formal_runtime=formal_runtime,
+                        observation=last_observation,
+                        failed_stage=call_kind,
+                        error_type=type(exc).__name__[:128],
+                        provider_attempted=last_result.llm_telemetry.attempted,
+                    )
+                next_unresolved = last_result.response.unresolved_mappings
+            else:
+                try:
+                    _validate_non_mapping_does_not_fill_omissions(
+                        _MappingOmissionCarrier(
+                            phase=phase,
+                            grounding_revision=record.base_revision,
+                            query_sha256=_mapping_omission_query_sha256(
+                                query, follow_up
+                            ),
+                            mapping_evidence_sha256=(
+                                record.draft_mapping_evidence_sha256
+                            ),
+                            unresolved_mappings=(
+                                record.draft_unresolved_mappings
+                            ),
+                        ),
+                        last_result.runtime,
+                    )
+                except Exception as exc:
+                    return _discard_atomic_regrounding_draft(
+                        state,
+                        record=record,
+                        formal_runtime=formal_runtime,
+                        observation=last_observation,
+                        failed_stage=call_kind,
+                        error_type=type(exc).__name__[:128],
+                        provider_attempted=last_result.llm_telemetry.attempted,
+                    )
+        record = _AtomicRegroundingDraft(
+            phase=record.phase,
+            decision=record.decision,
+            base_revision=record.base_revision,
+            base_state_sha256=record.base_state_sha256,
+            query=record.query,
+            follow_up=record.follow_up,
+            check_gap=record.check_gap,
+            draft_runtime=last_result.runtime,
+            draft_unresolved_mappings=next_unresolved,
+            draft_mapping_evidence_sha256=next_mapping_evidence_sha,
+            draft_audits=record.draft_audits
+            + (_atomic_draft_stage_audit(call_kind, last_result),),
+            official_call_count=record.official_call_count,
+        )
+        if last_result.state_update.status not in {"accepted", "noop"}:
+            return _discard_atomic_regrounding_draft(
+                state,
+                record=record,
+                formal_runtime=formal_runtime,
+                observation=last_observation,
+                failed_stage=call_kind,
+                error_type=(
+                    last_result.state_update.error_type
+                    or "AtomicDraftStageRejected"
+                ),
+                provider_attempted=last_result.llm_telemetry.attempted,
+            )
+        draft_runtime = last_result.runtime
+
+    if last_result is None or last_input is None:
+        raise RuntimeError("atomic Draft did not reach Check")
+    return _finish_or_pause_atomic_draft_check(
+        state,
+        record=record,
+        formal_runtime=formal_runtime,
+        observation=last_observation,
+        check_result=last_result,
+        grounding_input=last_input,
+    )
+
+
+def _snapshot_state_for_atomic_draft(state: Any) -> dict[str, Any]:
+    """Return a deeply isolated mapping snapshot for private Draft requests."""
+
+    to_dict = getattr(state, "to_dict", None)
+    raw_snapshot = to_dict() if callable(to_dict) else dict(state)
+    if not isinstance(raw_snapshot, Mapping):
+        raise TypeError("atomic Draft State snapshot must be a mapping")
+    return copy.deepcopy(dict(raw_snapshot))
+
+
+def _snapshot_state_for_atomic_draft_request(
+    state: Any,
+    record: _AtomicRegroundingDraft,
+) -> dict[str, Any]:
+    """Project current external evidence with only Draft-owned State carriers."""
+
+    snapshot = _snapshot_state_for_atomic_draft(state)
+    _store_mapping_omission_carrier(
+        snapshot,
+        _MappingOmissionCarrier(
+            phase=record.phase,
+            grounding_revision=record.draft_runtime.grounding_revision,
+            query_sha256=_mapping_omission_query_sha256(
+                record.query, record.follow_up
+            ),
+            mapping_evidence_sha256=record.draft_mapping_evidence_sha256,
+            unresolved_mappings=record.draft_unresolved_mappings,
+        ),
+    )
+    return snapshot
+
+
+async def _continue_atomic_regrounding_draft_after_official(
+    state: Any,
+    *,
+    pending_check: _PendingCheckTool,
+    observation: SQLGroundingObservation,
+    latest_tool_arguments: Any,
+    latest_tool_result: Any,
+) -> _ObservationResult:
+    async with _serialized_task_grounding(state) as synchronization:
+        record = _atomic_regrounding_draft(state)
+        if record is None or pending_check.phase != record.phase:
+            raise ValueError("missing atomic re-Grounding Draft transaction")
+        formal_runtime = _atomic_draft_base_runtime(state, record)
+        draft_request_state = _snapshot_state_for_atomic_draft_request(
+            state, record
+        )
+        check_input = _build_check_grounding_request(
+            draft_request_state,
+            query=record.query,
+            runtime=record.draft_runtime,
+            phase=record.phase,
+            follow_up=record.follow_up,
+            latest_tool_name=pending_check.tool_name,
+            latest_tool_arguments=latest_tool_arguments,
+            latest_tool_result=latest_tool_result,
+            include_p2_cumulative_evidence=False,
+        )
+        check_input["unresolved_mappings"] = [
+            item.model_dump(mode="json")
+            for item in record.draft_unresolved_mappings
+        ]
+        check_input = _with_atomic_regrounding_context(
+            check_input,
+            decision=record.decision,
+            check_gap=record.check_gap,
+        )
+        check_result = await _process_atomic_draft_stage(
+            state,
+            runtime=record.draft_runtime,
+            observation=observation,
+            grounding_input=check_input,
+            synchronization=synchronization,
+        )
+        updated = _AtomicRegroundingDraft(
+            phase=record.phase,
+            decision=record.decision,
+            base_revision=record.base_revision,
+            base_state_sha256=record.base_state_sha256,
+            query=record.query,
+            follow_up=record.follow_up,
+            check_gap=record.check_gap,
+            draft_runtime=check_result.runtime,
+            draft_unresolved_mappings=record.draft_unresolved_mappings,
+            draft_mapping_evidence_sha256=(
+                record.draft_mapping_evidence_sha256
+            ),
+            draft_audits=record.draft_audits
+            + (_atomic_draft_stage_audit("check", check_result),),
+            official_call_count=record.official_call_count,
+        )
+        return _finish_or_pause_atomic_draft_check(
+            state,
+            record=updated,
+            formal_runtime=formal_runtime,
+            observation=observation,
+            check_result=check_result,
+            grounding_input=check_input,
+        )
+
+
+async def _resolve_final_regrounding_gate(
+    state: Any,
+    *,
+    result: _ObservationResult,
+    synchronization: _TaskGroundingSynchronization,
+    grounding_input: Mapping[str, Any] | None,
+) -> _ObservationResult:
+    service_result = result.service_result
+    if service_result is None or not isinstance(
+        service_result.response,
+        GroundingCheckResponse,
+    ):
+        raise ValueError("Final Gate requires one accepted Check response")
+    bound = _ACTIVE_TURN_MESSAGE.get()
+    if bound is None or bound.task_id != _task_id(state):
+        raise ValueError("current bound query is required for Final Gate")
+    query = _user_message_query(bound.message)
+    phase = result.observation.phase
+    follow_up = _official_p2_follow_up(state) if phase == 2 else None
+    gate_input = _build_final_regrounding_gate_request(
+        state,
+        query=query,
+        runtime=result.runtime,
+        phase=phase,
+        follow_up=follow_up,
+        final_check=service_result.response,
+    )
+    owner_transition_sha256 = _mapping_owner_transition_sha256(
+        gate_input,
+        phase=phase,
+    )
+    if (
+        owner_transition_sha256 is not None
+        and _mapping_owner_transition_was_attempted(
+            state,
+            owner_transition_sha256,
+        )
+    ):
+        reason = (
+            "The same Mapping-owned omission was already re-Grounded with "
+            "the same actionable evidence and Mapping input."
+        )
+        _append_final_regrounding_gate_audit(
+            state,
+            {
+                "phase": phase,
+                "decision": "TERMINAL",
+                "reason": reason,
+                "provider_status": "not_attempted",
+                "base_revision": result.runtime.grounding_revision,
+                "committed": False,
+                "rolled_back": False,
+                "blocked_reason": "mapping_owner_transition_exhausted",
+                "mapping_owner_transition_sha256": owner_transition_sha256,
+            },
+        )
+        budget = _finite_budget(state)
+        _append_check_audit(
+            state,
+            {
+                "phase": phase,
+                "status": "incomplete",
+                "missing_information": (
+                    service_result.response.missing_information or reason
+                ),
+                "tool_name": None,
+                "request_digest": None,
+                "budget_before": budget,
+                "tool_cost": 0.0,
+                "budget_after": budget,
+                "blocked_reason": "mapping_owner_transition_exhausted",
+            },
+        )
+        return _failed_phase_grounding_result(
+            state,
+            runtime=result.runtime,
+            observation=result.observation,
+            service_status="final_regrounding_gate_terminal",
+            error_type="MappingOwnerTransitionExhausted",
+            provider_attempted=False,
+            service_result=service_result,
+        )
+    try:
+        gate_result = await _propose_final_regrounding_gate(
+            state,
+            runtime=result.runtime,
+            observation=result.observation,
+            synchronization=synchronization,
+            query=query,
+            follow_up=follow_up,
+            grounding_input=gate_input,
+        )
+        gate_response = gate_result.response
+        assert isinstance(gate_response, FinalRegroundingGateResponse)
+    except Exception as exc:
+        _append_final_regrounding_gate_audit(
+            state,
+            {
+                "phase": phase,
+                "decision": "TERMINAL",
+                "provider_status": "failed",
+                "error_type": type(exc).__name__[:128],
+                "base_revision": result.runtime.grounding_revision,
+                "committed": False,
+                "rolled_back": False,
+            },
+        )
+        return _failed_phase_grounding_result(
+            state,
+            runtime=result.runtime,
+            observation=result.observation,
+            service_status="final_regrounding_gate_failed",
+            error_type=type(exc).__name__[:128],
+            provider_attempted=True,
+            service_result=service_result,
+        )
+
+    gate_audit = {
+        "phase": phase,
+        "decision": gate_response.decision,
+        "reason": gate_response.reason,
+        "provider_status": "succeeded",
+        "base_revision": result.runtime.grounding_revision,
+        "committed": False,
+        "rolled_back": False,
+    }
+    if (
+        gate_response.decision == "REGROUND_MAPPING"
+        and owner_transition_sha256 is not None
+    ):
+        gate_audit["mapping_owner_transition_sha256"] = (
+            owner_transition_sha256
+        )
+    _append_final_regrounding_gate_audit(state, gate_audit)
+    if gate_response.decision == "NO_REGROUND":
+        return _finalize_complete_check_after_gate(
+            state,
+            result=result,
+            runtime=result.runtime,
+            grounding_input=grounding_input,
+        )
+    if gate_response.decision == "TERMINAL":
+        budget = _finite_budget(state)
+        _append_check_audit(
+            state,
+            {
+                "phase": phase,
+                "status": "incomplete",
+                "missing_information": (
+                    service_result.response.missing_information
+                    or gate_response.reason
+                ),
+                "tool_name": None,
+                "request_digest": None,
+                "budget_before": budget,
+                "tool_cost": 0.0,
+                "budget_after": budget,
+                "blocked_reason": "final_regrounding_gate_terminal",
+            },
+        )
+        return _failed_phase_grounding_result(
+            state,
+            runtime=result.runtime,
+            observation=result.observation,
+            service_status="final_regrounding_gate_terminal",
+            error_type="FinalRegroundingTerminal",
+            provider_attempted=gate_result.telemetry.attempted,
+            service_result=service_result,
+        )
+    return await _run_atomic_regrounding_draft(
+        state,
+        formal_result=result,
+        decision=gate_response.decision,
+        synchronization=synchronization,
+        query=query,
+        follow_up=follow_up,
+    )
+
+
+def _accepted_clarification_route(
+    result: _ObservationResult,
+) -> Literal["none", "stay_check", "restart_grounding", "terminal"] | None:
+    """Read a clarification route only from an accepted typed Check result."""
+
+    if result.service_status not in {
+        "accepted",
+        "noop",
+        "clarification_restart_grounding",
+    }:
+        return None
+    service_result = result.service_result
+    if service_result is None or not isinstance(
+        service_result.response,
+        GroundingCheckResponse,
+    ):
+        return None
+    return service_result.response.clarification_route
+
+
+async def _run_clarification_regrounding(
+    state: Any,
+    *,
+    answer_observation: SQLGroundingObservation,
+    query: str,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    follow_up: str | None,
+) -> tuple[_ObservationResult, list[dict[str, Any]]]:
+    """Re-run all four stages after one answered Check clarification.
+
+    This is a new Grounding cycle inside the current Official phase.  It does
+    not manufacture an Official P2 follow-up, mutate the clarification overlay
+    into the 4D State, or execute another Official tool.  Each stage starts
+    from the previously accepted cumulative State and remains subject to the
+    existing Form, Service, State, Provider-fuse, and fail-closed boundaries.
+    """
+
+    if (
+        answer_observation.phase != phase
+        or answer_observation.observation_type != "user_answer"
+        or answer_observation.tool_name != "ask_user"
+    ):
+        raise ValueError("clarification re-Grounding requires one user answer")
+    records = tuple(
+        item
+        for item in _clarification_records(state)
+        if item.phase <= phase and item.answer is not None
+    )
+    if not records or not any(
+        item.phase == phase and item.answer == answer_observation.content
+        for item in records
+    ):
+        raise ValueError("clarification answer is absent from the Session overlay")
+
+    # Re-open only the ordinary four-stage focus cursor.  The cumulative State,
+    # official phase, stage, and revision are unchanged until a validated stage
+    # response is accepted.
+    active_runtime = (
+        runtime
+        if runtime.stage == "INITIAL_GROUNDING"
+        else GroundingRuntime(
+            grounding_revision=runtime.grounding_revision,
+            stage=runtime.stage,
+            focus_dimension="tables",
+            grounding_state=runtime.grounding_state,
+        )
+    )
+    _store_runtime(state, active_runtime)
+    audits: list[dict[str, Any]] = []
+    result: _ObservationResult | None = None
+    for index, call_kind in enumerate(
+        ("structure", "mapping", "knowledge", "check")
+    ):
+        observation = (
+            answer_observation
+            if index == 0
+            else build_sql_grounding_observation(
+                task_id=answer_observation.task_id,
+                phase=phase,
+                sequence=_next_sequence(state),
+                observation_type="user_answer",
+                content=answer_observation.content,
+                summary=(
+                    f"answered clarification triggered {call_kind} re-Grounding"
+                ),
+                tool_name="ask_user",
+                function_call_id=answer_observation.function_call_id,
+                private_raw_ref=answer_observation.private_raw_ref,
+            )
+        )
+        if call_kind == "check":
+            if phase == 2:
+                _start_p2_check_cumulative_evidence(
+                    state,
+                    runtime=active_runtime,
+                    query=query,
+                    follow_up=follow_up,
+                )
+            grounding_input = _build_check_grounding_request(
+                state,
+                query=query,
+                runtime=active_runtime,
+                phase=phase,
+                follow_up=follow_up,
+                initial=True,
+            )
+        else:
+            grounding_input = _build_staged_grounding_request(
+                state,
+                call_kind=call_kind,
+                query=query,
+                runtime=active_runtime,
+                phase=phase,
+                follow_up=follow_up,
+            )
+        result = await _handle_observation(
+            state,
+            observation,
+            active_runtime,
+            grounding_input=grounding_input,
+            clarification_regrounding_kind=call_kind,
+        )
+        active_runtime = result.runtime
+        stage_audit = _observation_audit(result)
+        stage_audit["staged_grounding_kind"] = call_kind
+        audits.append(stage_audit)
+        if result.service_status not in {"accepted", "noop"}:
+            break
+
+    if result is None:
+        raise RuntimeError("clarification re-Grounding produced no stage result")
+    return result, audits
 
 
 def _failed_phase_grounding_result(
@@ -2277,6 +5013,8 @@ def _failed_phase_grounding_result(
     provider_attempted: bool,
     service_result: SQLGroundingServiceResult | None = None,
 ) -> _ObservationResult:
+    if observation.phase == 2:
+        _clear_p2_check_cumulative_evidence(state)
     if _is_real_provider_mode():
         _record_phase_grounding_outcome(
             state,
@@ -2303,6 +5041,7 @@ async def _handle_observation_serialized(
     synchronization: _TaskGroundingSynchronization,
     *,
     grounding_input: Mapping[str, Any] | None = None,
+    clarification_regrounding_kind: GroundingCallKind | None = None,
 ) -> _ObservationResult:
     if (
         observation.observation_type == "p2_follow_up"
@@ -2357,6 +5096,19 @@ async def _handle_observation_serialized(
             error_type=type(exc).__name__[:128],
             provider_attempted=False,
         )
+    if clarification_regrounding_kind is not None and (
+        call_kind != clarification_regrounding_kind
+        or observation.observation_type != "user_answer"
+        or observation.tool_name != "ask_user"
+    ):
+        return _failed_phase_grounding_result(
+            state,
+            runtime=active_runtime,
+            observation=observation,
+            service_status="rejected_clarification_regrounding_sequence",
+            error_type="ClarificationRegroundingSequenceError",
+            provider_attempted=False,
+        )
     provider_mode = _is_real_provider_mode()
     if provider_mode:
         existing_outcome = _phase_grounding_outcomes(state).get(
@@ -2382,8 +5134,10 @@ async def _handle_observation_serialized(
         if provider_mode:
             llm_config = load_sql_grounding_llm_config(PROJECT_ROOT)
             calls = _provider_call_count(state)
-            phase_calls = _provider_phase_call_count(state, observation.phase)
-            sequence_ok = (
+            phase_calls = _provider_phase_stage_call_count(
+                state, observation.phase
+            )
+            sequence_ok = clarification_regrounding_kind is not None or (
                 (call_kind == "structure" and phase_calls == 0)
                 or (call_kind == "mapping" and phase_calls == 1)
                 or (call_kind == "knowledge" and phase_calls == 2)
@@ -2431,6 +5185,11 @@ async def _handle_observation_serialized(
                 context,
                 updater,
                 grounding_input=grounding_input,
+                allow_mapping_validation_repair=(
+                    not provider_mode
+                    or _provider_call_count(state) + 1
+                    < llm_config.max_calls_per_task
+                ),
             )
         finally:
             synchronization.provider_slot_reserved = False
@@ -2443,8 +5202,29 @@ async def _handle_observation_serialized(
             error_type=type(exc).__name__[:128],
             provider_attempted=False,
         )
-    if service_result.llm_telemetry.attempted and provider_mode:
-        _record_provider_call(state, observation.phase)
+    if provider_mode:
+        repair = service_result.mapping_validation_repair
+        if repair is None:
+            if service_result.llm_telemetry.attempted:
+                _record_provider_call(state, observation.phase)
+        else:
+            if repair.initial_llm_telemetry.attempted:
+                _record_provider_call(state, observation.phase)
+            if (
+                repair.repair_llm_telemetry is not None
+                and repair.repair_llm_telemetry.attempted
+            ):
+                _record_provider_call(
+                    state,
+                    observation.phase,
+                    mapping_validation_repair=True,
+                )
+    _record_knowledge_omission_protection(
+        state,
+        phase=observation.phase,
+        phrases=service_result.knowledge_omission_mapping_ignored,
+        atomic_draft=False,
+    )
     candidate = service_result.runtime
     control_events: tuple[dict[str, str], ...] = ()
     control_status: Literal[
@@ -2454,9 +5234,177 @@ async def _handle_observation_serialized(
     if service_result.state_update.status in {"accepted", "noop"}:
         control_status = "succeeded"
         try:
+            query = grounding_input.get("query")
+            follow_up = grounding_input.get("follow_up")
+            if not isinstance(query, str):
+                raise ValueError("staged Grounding query is missing")
+            previous_omissions = _active_mapping_omission_carrier(
+                state,
+                runtime=active_runtime,
+                phase=observation.phase,
+                query=query,
+                follow_up=follow_up,
+            )
+            if call_kind == "mapping":
+                if not isinstance(
+                    service_result.response, MappingGroundingResponse
+                ):
+                    raise ValueError("Mapping returned the wrong typed response")
+                evidence_sha = _mapping_actionable_evidence_sha256(
+                    grounding_input
+                )
+                _validate_mapping_omission_transition(
+                    previous=previous_omissions,
+                    response=service_result.response,
+                    mapping_evidence_sha256=evidence_sha,
+                    legal_regrounding=(
+                        clarification_regrounding_kind == "mapping"
+                        or isinstance(
+                            grounding_input.get("regrounding_context"),
+                            Mapping,
+                        )
+                    ),
+                )
+                _store_mapping_omission_carrier(
+                    state,
+                    _MappingOmissionCarrier(
+                        phase=observation.phase,
+                        grounding_revision=candidate.grounding_revision,
+                        query_sha256=_mapping_omission_query_sha256(
+                            query, follow_up
+                        ),
+                        mapping_evidence_sha256=evidence_sha,
+                        unresolved_mappings=(
+                            service_result.response.unresolved_mappings
+                        ),
+                    ),
+                )
+            else:
+                _validate_non_mapping_does_not_fill_omissions(
+                    previous_omissions,
+                    candidate,
+                )
             if call_kind == "check":
                 if not isinstance(service_result.response, GroundingCheckResponse):
                     raise ValueError("Check returned the wrong typed response")
+                latest_answer = grounding_input.get("latest_user_answer")
+                clarification_event = (
+                    latest_answer.get("clarification_event")
+                    if isinstance(latest_answer, Mapping)
+                    else None
+                )
+                atomic_draft_answer = (
+                    isinstance(clarification_event, Mapping)
+                    and clarification_event.get("origin") == "atomic_draft"
+                )
+                if (
+                    atomic_draft_answer
+                    and service_result.response.clarification_route != "terminal"
+                ):
+                    # The originating private Draft was destroyed before the
+                    # outer ask_user call.  Even if Check calls the answer a
+                    # narrow stay_check parameter, continuing on formal S0
+                    # would lose the Draft mappings that made the question
+                    # legal.  Convert only the control disposition to a fresh
+                    # Gate handoff; preserve Provider output in its raw audit.
+                    phrase = None
+                    pending_question = latest_answer.get("question")
+                    if isinstance(pending_question, str):
+                        phrase = next(
+                            (
+                                item.phrase
+                                for item in _clarification_records(state)
+                                if item.phase == observation.phase
+                                and item.question == pending_question
+                            ),
+                            None,
+                        )
+                    gap = (
+                        "An Atomic Draft clarification was answered after the "
+                        "originating Draft had been rolled back. The formal "
+                        "State must be re-Grounded in a fresh Draft"
+                        + (f" for '{phrase}'." if phrase else ".")
+                    )
+                    forced_response = service_result.response.model_copy(
+                        update={
+                            "status": "incomplete",
+                            "clarification_route": "restart_grounding",
+                            "missing_information": gap,
+                            "next_tool": None,
+                        }
+                    )
+                    service_result = service_result.model_copy(
+                        update={"response": forced_response}
+                    )
+                    budget = _finite_budget(state)
+                    _append_check_audit(
+                        state,
+                        {
+                            "phase": observation.phase,
+                            "status": "incomplete",
+                            "missing_information": gap,
+                            "tool_name": None,
+                            "request_digest": None,
+                            "budget_before": budget,
+                            "tool_cost": 0.0,
+                            "budget_after": budget,
+                            "blocked_reason": (
+                                "atomic_draft_clarification_fresh_gate"
+                            ),
+                        },
+                    )
+                    if observation.phase == 2:
+                        _clear_p2_check_cumulative_evidence(state)
+                    return _ObservationResult(
+                        runtime=candidate,
+                        service_status="final_regrounding_gate_pending",
+                        observation=observation,
+                        service_result=service_result,
+                        control_status="succeeded",
+                    )
+                if _final_regrounding_gate_enabled() and (
+                    service_result.response.status == "complete"
+                    or service_result.response.next_tool is None
+                ):
+                    if observation.phase == 2:
+                        _clear_p2_check_cumulative_evidence(state)
+                    return _ObservationResult(
+                        runtime=candidate,
+                        service_status="final_regrounding_gate_pending",
+                        observation=observation,
+                        service_result=service_result,
+                        control_status="succeeded",
+                    )
+                if (
+                    service_result.response.clarification_route
+                    == "restart_grounding"
+                ):
+                    budget = _finite_budget(state)
+                    _append_check_audit(
+                        state,
+                        {
+                            "phase": observation.phase,
+                            "status": "incomplete",
+                            "missing_information": (
+                                service_result.response.missing_information
+                            ),
+                            "tool_name": None,
+                            "request_digest": None,
+                            "budget_before": budget,
+                            "tool_cost": 0.0,
+                            "budget_after": budget,
+                            "blocked_reason": "clarification_restart_grounding",
+                        },
+                    )
+                    if observation.phase == 2:
+                        _clear_p2_check_cumulative_evidence(state)
+                    return _ObservationResult(
+                        runtime=candidate,
+                        service_status="clarification_restart_grounding",
+                        observation=observation,
+                        service_result=service_result,
+                        control_status="succeeded",
+                    )
                 if service_result.response.status == "complete":
                     _append_check_audit(
                         state,
@@ -2482,6 +5430,13 @@ async def _handle_observation_serialized(
                             runtime=candidate,
                             status="succeeded",
                             provider_attempted=service_result.llm_telemetry.attempted,
+                        )
+                    if _answer_contract_runtime_enabled():
+                        _emit_answer_contract_shadow(
+                            state,
+                            runtime=candidate,
+                            phase=observation.phase,
+                            grounding_input=grounding_input,
                         )
                 else:
                     if service_result.response.next_tool is None:
@@ -2512,6 +5467,22 @@ async def _handle_observation_serialized(
                                 service_result.llm_telemetry.attempted
                             ),
                             service_result=service_result,
+                        )
+                    replay = _resolve_p2_exact_official_evidence_replay(
+                        state,
+                        phase=observation.phase,
+                        response=service_result.response,
+                        allow_repeated_gap=False,
+                    )
+                    if replay is not None:
+                        return await _continue_check_with_p2_exact_replay(
+                            state,
+                            synchronization=synchronization,
+                            runtime=candidate,
+                            query=query,
+                            follow_up=follow_up,
+                            check_response=service_result.response,
+                            replay=replay,
                         )
                     _schedule_check_tool(
                         state,
@@ -2587,11 +5558,401 @@ def _finite_budget(state: Any) -> float:
     return float(value)
 
 
+def _p2_exact_official_evidence_reuse_enabled() -> bool:
+    return os.environ.get("VALIBRA_P2_EXACT_OFFICIAL_EVIDENCE_REUSE") == "1"
+
+
+def _p2_check_cumulative_official_evidence_enabled() -> bool:
+    return (
+        os.environ.get("VALIBRA_P2_CHECK_CUMULATIVE_OFFICIAL_EVIDENCE")
+        == "1"
+    )
+
+
+def _store_p2_check_cumulative_evidence(
+    state: Any,
+    record: _P2CheckCumulativeEvidence | None,
+) -> None:
+    state[P2_CHECK_CUMULATIVE_EVIDENCE_KEY] = (
+        None if record is None else record.to_json()
+    )
+
+
+def _p2_check_cumulative_evidence(
+    state: Any,
+) -> _P2CheckCumulativeEvidence | None:
+    payload = state.get(P2_CHECK_CUMULATIVE_EVIDENCE_KEY)
+    if payload is None:
+        return None
+    return _P2CheckCumulativeEvidence.from_json(payload)
+
+
+def _start_p2_check_cumulative_evidence(
+    state: Any,
+    *,
+    runtime: GroundingRuntime,
+    query: str,
+    follow_up: str | None,
+) -> None:
+    """Replace any prior carrier at one ordinary Phase-2 Check boundary."""
+
+    if not _p2_check_cumulative_official_evidence_enabled():
+        return
+    sequence = state.get(GROUNDING_SEQUENCE_KEY, 0)
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise ValueError("invalid sequence for P2 Check evidence cycle")
+    task_id = _task_id(state)
+    query_sha256 = _sha256_text(query)
+    follow_up_sha256 = _sha256_text(follow_up or "")
+    cycle_id = _sha256_text(
+        canonical_json(
+            {
+                "task_id": task_id,
+                "phase": 2,
+                "grounding_revision": runtime.grounding_revision,
+                "query_sha256": query_sha256,
+                "follow_up_sha256": follow_up_sha256,
+                "starting_sequence": sequence,
+            }
+        )
+    )
+    _store_p2_check_cumulative_evidence(
+        state,
+        _P2CheckCumulativeEvidence(
+            task_id=task_id,
+            phase=2,
+            cycle_id=cycle_id,
+            grounding_revision=runtime.grounding_revision,
+            query_sha256=query_sha256,
+            follow_up_sha256=follow_up_sha256,
+            entries=(),
+        ),
+    )
+
+
+def _clear_p2_check_cumulative_evidence(state: Any) -> None:
+    if state.get(P2_CHECK_CUMULATIVE_EVIDENCE_KEY) is not None:
+        _store_p2_check_cumulative_evidence(state, None)
+
+
+def _append_p2_check_cumulative_evidence(
+    state: Any,
+    *,
+    tool_name: str,
+    arguments: Any,
+    result: Any,
+    source: Literal["official_call", "p2_exact_p1_replay"],
+) -> bool:
+    """Retain one small immutable result; return false on a safe capacity miss."""
+
+    if (
+        not _p2_check_cumulative_official_evidence_enabled()
+        or tool_name != "get_column_meaning"
+    ):
+        return False
+    record = _p2_check_cumulative_evidence(state)
+    if record is None:
+        return False
+    normalized_arguments = to_jsonable(arguments)
+    normalized_result = to_jsonable(result)
+    if (
+        not isinstance(normalized_arguments, dict)
+        or set(normalized_arguments) != {"table_name", "column_name"}
+        or not isinstance(normalized_result, str)
+        or not normalized_result
+        or len(normalized_result) > MAX_P2_CHECK_CUMULATIVE_RESULT_CHARS
+    ):
+        return False
+    canonical_arguments = {
+        key: normalized_arguments[key]
+        for key in ("column_name", "table_name")
+    }
+    request_digest = _sha256_text(
+        "get_column_meaning:" + canonical_json(canonical_arguments)
+    )
+    result_sha256 = _sha256_text(canonical_json(normalized_result))
+    existing = next(
+        (
+            item
+            for item in record.entries
+            if item.request_digest == request_digest
+        ),
+        None,
+    )
+    if existing is not None:
+        if existing.result_sha256 != result_sha256:
+            raise ValueError("conflicting P2 Check cumulative evidence result")
+        return False
+    candidate = _P2CheckCumulativeEvidenceEntry.from_json(
+        {
+            "tool_name": "get_column_meaning",
+            "arguments": canonical_arguments,
+            "request_digest": request_digest,
+            "result": normalized_result,
+            "result_sha256": result_sha256,
+            "source": source,
+        }
+    )
+    if len(record.entries) >= MAX_P2_CHECK_CUMULATIVE_EVIDENCE_ENTRIES:
+        return False
+    next_entries = record.entries + (candidate,)
+    if len(canonical_json([item.to_json() for item in next_entries])) > (
+        MAX_P2_CHECK_CUMULATIVE_EVIDENCE_CHARS
+    ):
+        return False
+    _store_p2_check_cumulative_evidence(
+        state,
+        _P2CheckCumulativeEvidence(
+            task_id=record.task_id,
+            phase=record.phase,
+            cycle_id=record.cycle_id,
+            grounding_revision=record.grounding_revision,
+            query_sha256=record.query_sha256,
+            follow_up_sha256=record.follow_up_sha256,
+            entries=next_entries,
+        ),
+    )
+    return True
+
+
+def _project_p2_check_cumulative_evidence(
+    state: Any,
+    *,
+    query: str,
+    follow_up: str | None,
+    exclude_tool_name: str | None = None,
+    exclude_arguments: Any = None,
+) -> list[dict[str, Any]] | None:
+    """Return prior results for the active cycle, excluding the current latest tool."""
+
+    if not _p2_check_cumulative_official_evidence_enabled():
+        return None
+    record = _p2_check_cumulative_evidence(state)
+    if record is None:
+        return None
+    if (
+        record.task_id != _task_id(state)
+        or record.query_sha256 != _sha256_text(query)
+        or record.follow_up_sha256 != _sha256_text(follow_up or "")
+    ):
+        raise ValueError("P2 Check cumulative evidence epoch mismatch")
+    excluded_digest: str | None = None
+    normalized_arguments = to_jsonable(exclude_arguments)
+    if exclude_tool_name == "get_column_meaning" and isinstance(
+        normalized_arguments, dict
+    ):
+        excluded_digest = _sha256_text(
+            "get_column_meaning:" + canonical_json(normalized_arguments)
+        )
+    return [
+        item.to_json()
+        for item in record.entries
+        if item.request_digest != excluded_digest
+    ]
+
+
+def _resolve_p2_exact_official_evidence_replay(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    response: GroundingCheckResponse,
+    allow_repeated_gap: bool,
+) -> _P2ExactOfficialEvidenceReplay | None:
+    """Return one exact successful P1 column-meaning result, or miss closed."""
+
+    if (
+        not _p2_exact_official_evidence_reuse_enabled()
+        or phase != 2
+        or allow_repeated_gap
+        or response.status != "incomplete"
+        or response.next_tool is None
+        or response.next_tool.tool_name != "get_column_meaning"
+    ):
+        return None
+    arguments = to_jsonable(response.next_tool.arguments)
+    if not isinstance(arguments, dict) or set(arguments) != {
+        "table_name",
+        "column_name",
+    }:
+        return None
+    if not all(isinstance(value, str) and value for value in arguments.values()):
+        return None
+    arguments_json = canonical_json(arguments)
+    request_digest = _sha256_text(
+        f"{response.next_tool.tool_name}:{arguments_json}"
+    )
+    source_was_scheduled_by_p1_check = any(
+        item.get("phase") == 1
+        and item.get("tool_name") == "get_column_meaning"
+        and item.get("request_digest") == request_digest
+        and item.get("blocked_reason") is None
+        for item in _check_audits(state)
+    )
+    if not source_was_scheduled_by_p1_check:
+        return None
+    if any(
+        item.get("phase") == 2
+        and item.get("request_digest") == request_digest
+        and item.get("evidence_replay") == "p2_exact_p1_get_column_meaning"
+        for item in _check_audits(state)
+    ):
+        return None
+
+    candidates = [
+        event
+        for event in _completed_sql_grounding_trajectory(state)
+        if event.get("phase") == 1
+        and event.get("tool_name") == "get_column_meaning"
+        and event.get("observation_type") != "tool_error"
+        and canonical_json(to_jsonable(event.get("args"))) == arguments_json
+    ]
+    if not candidates:
+        return None
+    result_digests = {event.get("raw_digest") for event in candidates}
+    if (
+        len(result_digests) != 1
+        or not all(
+            isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+            for digest in result_digests
+        )
+    ):
+        # Conflicting historical results are not one exact immutable replay.
+        return None
+    source = candidates[-1]
+    task_id = _task_id(state)
+    result_sha256 = source["raw_digest"]
+    source_index = source.get("trajectory_index")
+    source_ref = source.get("private_raw_ref")
+    if (
+        isinstance(source_index, bool)
+        or not isinstance(source_index, int)
+        or source_index < 0
+        or not isinstance(source_ref, str)
+        or not source_ref
+    ):
+        return None
+    evidence_context_sha256 = _sha256_text(
+        canonical_json(
+            {
+                "task_id": task_id,
+                "selected_database": state.get("selected_database"),
+                "source_phase": 1,
+                "target_phase": 2,
+                "tool_name": "get_column_meaning",
+                "arguments": arguments,
+                "result_sha256": result_sha256,
+                "source_trajectory_index": source_index,
+            }
+        )
+    )
+    return _P2ExactOfficialEvidenceReplay(
+        task_id=task_id,
+        source_phase=1,
+        target_phase=2,
+        tool_name="get_column_meaning",
+        arguments=arguments,
+        request_digest=request_digest,
+        result=source.get("content"),
+        result_sha256=result_sha256,
+        source_trajectory_index=source_index,
+        source_private_raw_ref=source_ref,
+        evidence_context_sha256=evidence_context_sha256,
+    )
+
+
+async def _continue_check_with_p2_exact_replay(
+    state: Any,
+    *,
+    synchronization: _TaskGroundingSynchronization,
+    runtime: GroundingRuntime,
+    query: str,
+    follow_up: str | None,
+    check_response: GroundingCheckResponse,
+    replay: _P2ExactOfficialEvidenceReplay,
+) -> _ObservationResult:
+    """Consume a replay without dispatching or charging an Official tool."""
+
+    budget = _finite_budget(state)
+    arguments_json = canonical_json(replay.arguments)
+    _append_check_audit(
+        state,
+        {
+            "phase": 2,
+            "status": "incomplete",
+            "missing_information": check_response.missing_information,
+            "tool_name": replay.tool_name,
+            "arguments": dict(replay.arguments),
+            "arguments_sha256": _sha256_text(arguments_json),
+            "request_digest": replay.request_digest,
+            "budget_before": budget,
+            "tool_cost": 0.0,
+            "budget_after": budget,
+            "blocked_reason": None,
+            "evidence_replay": "p2_exact_p1_get_column_meaning",
+            "task_id": replay.task_id,
+            "source_phase": replay.source_phase,
+            "target_phase": replay.target_phase,
+            "source_trajectory_index": replay.source_trajectory_index,
+            "source_result_sha256": replay.result_sha256,
+            "source_private_raw_ref": replay.source_private_raw_ref,
+            "evidence_context_sha256": replay.evidence_context_sha256,
+        },
+    )
+    replay_observation = build_sql_grounding_observation(
+        task_id=replay.task_id,
+        phase=2,
+        sequence=_next_sequence(state),
+        observation_type="metadata",
+        content=to_jsonable(replay.result),
+        summary="exact successful P1 column meaning replayed into P2 Check",
+        tool_name=replay.tool_name,
+        function_call_id=f"valibra-p2-replay-{replay.request_digest[:16]}",
+        private_raw_ref=replay.source_private_raw_ref,
+    )
+    _append_p2_check_cumulative_evidence(
+        state,
+        tool_name=replay.tool_name,
+        arguments=replay.arguments,
+        result=replay.result,
+        source="p2_exact_p1_replay",
+    )
+    check_input = _build_check_grounding_request(
+        state,
+        query=query,
+        follow_up=follow_up,
+        runtime=runtime,
+        phase=2,
+        latest_tool_name=replay.tool_name,
+        latest_tool_arguments=replay.arguments,
+        latest_tool_result=to_jsonable(replay.result),
+    )
+    result = await _handle_observation_serialized(
+        state,
+        replay_observation,
+        runtime,
+        synchronization,
+        grounding_input=check_input,
+    )
+    if result.service_status == "final_regrounding_gate_pending":
+        result = await _resolve_final_regrounding_gate(
+            state,
+            result=result,
+            synchronization=synchronization,
+            grounding_input=check_input,
+        )
+    return result
+
+
 def _schedule_check_tool(
     state: Any,
     *,
     phase: Literal[1, 2],
     response: GroundingCheckResponse,
+    allow_repeated_gap: bool = False,
+    origin: Literal["ordinary_check", "atomic_draft"] = "ordinary_check",
+    requirement_type: str | None = None,
+    related_mapping_phrases: tuple[str, ...] = (),
 ) -> _PendingCheckTool:
     """Apply duplicate/gap/budget guardrails before any Official tool call."""
 
@@ -2604,7 +5965,9 @@ def _schedule_check_tool(
     phase_audits = [
         item for item in _check_audits(state) if item.get("phase") == phase
     ]
-    if any(item.get("missing_information") == gap for item in phase_audits):
+    if not allow_repeated_gap and any(
+        item.get("missing_information") == gap for item in phase_audits
+    ):
         raise ValueError("Check did not identify a new concrete gap")
     args_json = canonical_json(request.arguments)
     request_digest = _sha256_text(f"{request.tool_name}:{args_json}")
@@ -2667,6 +6030,9 @@ def _schedule_check_tool(
         tool_name=request.tool_name,
         arguments=dict(request.arguments),
         request_digest=request_digest,
+        origin=origin,
+        requirement_type=requirement_type,
+        related_mapping_phrases=related_mapping_phrases,
     )
     _store_pending_check_tool(state, pending)
     _append_check_audit(
@@ -2912,8 +6278,42 @@ def _provider_phase_call_count(state: Any, phase: Literal[1, 2]) -> int:
     return _provider_phase_call_counts(state)[str(phase)]
 
 
-def _record_provider_call(state: Any, phase: Literal[1, 2]) -> None:
+def _provider_repair_phase_call_counts(state: Any) -> dict[str, int]:
+    payload = state.get(GROUNDING_PROVIDER_REPAIR_PHASE_CALL_COUNTS_KEY)
+    if payload is None:
+        return {"1": 0, "2": 0}
+    if not isinstance(payload, dict) or set(payload) != {"1", "2"}:
+        raise ValueError("invalid Mapping repair Provider call counters")
+    phase_counts = _provider_phase_call_counts(state)
+    counts: dict[str, int] = {}
+    for key in ("1", "2"):
+        value = payload.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= phase_counts[key]
+        ):
+            raise ValueError("invalid Mapping repair Provider call counter")
+        counts[key] = value
+    return counts
+
+
+def _provider_phase_stage_call_count(state: Any, phase: Literal[1, 2]) -> int:
+    key = str(phase)
+    return (
+        _provider_phase_call_counts(state)[key]
+        - _provider_repair_phase_call_counts(state)[key]
+    )
+
+
+def _record_provider_call(
+    state: Any,
+    phase: Literal[1, 2],
+    *,
+    mapping_validation_repair: bool = False,
+) -> None:
     counts = _provider_phase_call_counts(state)
+    repair_counts = _provider_repair_phase_call_counts(state)
     total = _provider_call_count(state)
     key = str(phase)
     if (
@@ -2921,7 +6321,10 @@ def _record_provider_call(state: Any, phase: Literal[1, 2]) -> None:
     ):
         raise ValueError("SQL Grounding Provider call limit exceeded")
     counts[key] += 1
+    if mapping_validation_repair:
+        repair_counts[key] += 1
     state[GROUNDING_PROVIDER_PHASE_CALL_COUNTS_KEY] = counts
+    state[GROUNDING_PROVIDER_REPAIR_PHASE_CALL_COUNTS_KEY] = repair_counts
     state[GROUNDING_PROVIDER_CALL_COUNT_KEY] = total + 1
 
 
@@ -2958,7 +6361,7 @@ def _next_bootstrap_tool(
         raise ValueError("Official bootstrap trajectory is duplicate or out of order")
     if len(observed) == len(_BOOTSTRAP_TOOL_SEQUENCE):
         return None
-    if _provider_phase_call_count(state, 1) != len(observed):
+    if _provider_phase_stage_call_count(state, 1) != len(observed):
         raise ValueError("bootstrap evidence and staged Grounding calls differ")
     return _BOOTSTRAP_TOOL_SEQUENCE[len(observed)]
 
@@ -3088,6 +6491,8 @@ def _fail_closed_consumed_check(
     """Terminate a phase after its one-shot Official Check action was consumed."""
 
     runtime, _ = _ensure_runtime(state)
+    if _atomic_regrounding_draft(state) is not None:
+        _store_atomic_regrounding_draft(state, None)
     error_type = type(error).__name__[:128]
     observation = build_sql_grounding_observation(
         task_id=_task_id(state),
@@ -3205,6 +6610,14 @@ def _register_clarification_requests(
     }
     if existing_questions.intersection(proposed_questions):
         raise ValueError("clarification question already exists in this phase")
+    answered_phrases = {
+        item.phrase for item in records if item.answer is not None
+    }
+    repeated_phrases = answered_phrases.intersection(
+        item.phrase for item in proposed
+    )
+    if repeated_phrases:
+        raise ValueError("answered clarification phrase cannot be requested again")
     _store_clarification_records(state, (*records, *proposed))
 
 
@@ -3325,6 +6738,8 @@ def _record_phase_grounding_outcome(
     error_type: str | None = None,
     provider_attempted: bool,
 ) -> _PhaseGroundingOutcome:
+    if observation.phase == 2:
+        _clear_p2_check_cumulative_evidence(state)
     if status == "succeeded" and (
         not runtime.grounding_state.all_dimensions_evaluated
         or runtime.focus_dimension != "none"
@@ -3616,6 +7031,11 @@ def _phase_request_common(
         "query": query,
         "current_state": runtime.grounding_state.model_dump(mode="json"),
     }
+    answered_clarifications = [
+        item.model_dump(mode="json")
+        for item in _clarification_records(state)
+        if item.phase <= phase and item.answer is not None
+    ]
     if phase == 2:
         if (
             runtime.stage != "P2_INCREMENTAL"
@@ -3627,15 +7047,13 @@ def _phase_request_common(
         result.update(
             {
                 "follow_up": follow_up,
-                "user_clarifications": [
-                    item.model_dump(mode="json")
-                    for item in _clarification_records(state)
-                    if item.phase == 1 and item.answer is not None
-                ],
+                "user_clarifications": answered_clarifications,
             }
         )
     elif phase != 1:
         raise ValueError("Grounding phase must be 1 or 2")
+    elif answered_clarifications:
+        result["user_clarifications"] = answered_clarifications
     return result
 
 
@@ -3667,24 +7085,54 @@ def _build_staged_grounding_request(
         meanings = by_tool.get("get_all_column_meanings")
         if runtime.grounding_state.tables is None:
             raise ValueError("Mapping Grounding requires evaluated candidate tables")
+        _, canonical_columns = _parse_schema_projection(by_tool.get("get_schema"))
+        carrier = _active_mapping_omission_carrier(
+            state,
+            runtime=runtime,
+            phase=phase,
+            query=query,
+            follow_up=follow_up,
+        )
         return {
             **base,
-            "column_meanings": _project_column_meanings(
+            "column_meanings": _project_mapping_column_meanings(
                 meanings,
                 tables=runtime.grounding_state.tables,
+                canonical_columns=canonical_columns,
             ),
+            "unresolved_mappings": [
+                item.model_dump(mode="json")
+                for item in (
+                    () if carrier is None else carrier.unresolved_mappings
+                )
+            ],
         }
     if call_kind == "knowledge":
         definitions = by_tool.get("get_all_knowledge_definitions")
         if definitions is None:
             raise ValueError("Knowledge Grounding requires bootstrap knowledge")
+        _, canonical_columns = _parse_schema_projection(by_tool.get("get_schema"))
+        carrier = _active_mapping_omission_carrier(
+            state,
+            runtime=runtime,
+            phase=phase,
+            query=query,
+            follow_up=follow_up,
+        )
         return {
             **base,
             "knowledge_definitions": _normalized_knowledge_definitions(definitions),
             "relevant_column_meanings": _relevant_mapping_column_meanings(
                 by_tool.get("get_all_column_meanings"),
                 runtime,
+                canonical_columns=canonical_columns,
             ),
+            "unresolved_mappings": [
+                item.model_dump(mode="json")
+                for item in (
+                    () if carrier is None else carrier.unresolved_mappings
+                )
+            ],
         }
     raise ValueError("unsupported staged Grounding call kind")
 
@@ -3702,6 +7150,7 @@ def _build_check_grounding_request(
     latest_tool_result: Any = None,
     latest_user_answer: Any = None,
     paired_check_tool: _PendingCheckTool | None = None,
+    include_p2_cumulative_evidence: bool = True,
 ) -> dict[str, Any]:
     """Build one Check request with bounded, result-free phase-local history."""
 
@@ -3712,7 +7161,20 @@ def _build_check_grounding_request(
         phase=phase,
         follow_up=follow_up,
     )
+    carrier = _active_mapping_omission_carrier(
+        state,
+        runtime=runtime,
+        phase=phase,
+        query=query,
+        follow_up=follow_up,
+    )
     phase_context = {
+        "unresolved_mappings": [
+            item.model_dump(mode="json")
+            for item in (
+                () if carrier is None else carrier.unresolved_mappings
+            )
+        ],
         "previous_official_calls": _previous_check_official_calls(
             state,
             phase=phase,
@@ -3723,6 +7185,16 @@ def _build_check_grounding_request(
             if item.phase == phase and item.answer is not None
         ],
     }
+    if phase == 2 and include_p2_cumulative_evidence:
+        cumulative_evidence = _project_p2_check_cumulative_evidence(
+            state,
+            query=query,
+            follow_up=follow_up,
+            exclude_tool_name=latest_tool_name,
+            exclude_arguments=latest_tool_arguments,
+        )
+        if cumulative_evidence is not None:
+            phase_context["check_evidence_context"] = cumulative_evidence
     modes = sum((initial, latest_tool_name is not None, latest_user_answer is not None))
     if modes != 1:
         raise ValueError("Check requires exactly one bounded latest-input mode")
@@ -3732,13 +7204,26 @@ def _build_check_grounding_request(
         pending = paired_check_tool or _pending_check_tool(state)
         if pending is None or pending.tool_name != "ask_user":
             raise ValueError("latest user answer has no paired Check request")
+        latest_answer = {
+            "question": pending.arguments["question"],
+            "answer": latest_user_answer,
+        }
+        if pending.origin == "atomic_draft":
+            # Runtime provenance, not Provider-authored semantics.  The Draft
+            # that raised this question was rolled back before ask_user ran,
+            # so a non-terminal answer must be applied through a fresh Gate /
+            # Draft cycle and can never stay in or resume the discarded Draft.
+            latest_answer["clarification_event"] = {
+                "origin": "atomic_draft",
+                "requirement_type": pending.requirement_type,
+                "related_mapping_phrases": list(
+                    pending.related_mapping_phrases
+                ),
+            }
         return {
             **base,
             **phase_context,
-            "latest_user_answer": {
-                "question": pending.arguments["question"],
-                "answer": latest_user_answer,
-            },
+            "latest_user_answer": latest_answer,
         }
     if latest_tool_name not in {
         "ask_user",
@@ -3776,6 +7261,29 @@ def _previous_check_official_calls(
     }
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
+    for item in _check_audits(state):
+        request_digest = item.get("request_digest")
+        arguments = item.get("arguments")
+        tool_name = item.get("tool_name")
+        if (
+            item.get("phase") != phase
+            or item.get("blocked_reason") is not None
+            or item.get("evidence_replay")
+            != "p2_exact_p1_get_column_meaning"
+            or not isinstance(request_digest, str)
+            or request_digest in seen
+            or tool_name != "get_column_meaning"
+            or not isinstance(arguments, dict)
+        ):
+            continue
+        result.append(
+            {
+                "tool_name": tool_name,
+                "arguments": json.loads(canonical_json(arguments)),
+                "request_digest": request_digest,
+            }
+        )
+        seen.add(request_digest)
     for event in _completed_sql_grounding_trajectory(state):
         if event.get("phase") != phase:
             continue
@@ -3831,6 +7339,933 @@ def _completed_sql_grounding_trajectory(state: Any) -> tuple[dict[str, Any], ...
             }
         )
     return tuple(result[-512:])
+
+
+def _answer_contract_shadow_enabled() -> bool:
+    """Enable research-only contract logging without changing Main behavior."""
+
+    return os.environ.get("VALIBRA_ANSWER_CONTRACT_SHADOW") == "1"
+
+
+def _answer_contract_guard_v0_enabled() -> bool:
+    """Enable the bounded post-submit contradiction detector exactly."""
+
+    return os.environ.get("VALIBRA_ANSWER_CONTRACT_GUARD_V0") == "1"
+
+
+def _main_fresh_recompile_r1_enabled() -> bool:
+    """Enable one context-reset recompile after an exact generic submit FAIL."""
+
+    return os.environ.get("VALIBRA_MAIN_FRESH_RECOMPILE_R1") == "1"
+
+
+def _answer_contract_runtime_enabled() -> bool:
+    return _answer_contract_shadow_enabled() or _answer_contract_guard_v0_enabled()
+
+
+def _refresh_answer_contract_shadow_lifecycle_from_state(state: Any) -> None:
+    """Invalidate shadow-only artifacts immediately after external state changes."""
+
+    if not _answer_contract_runtime_enabled():
+        return
+    try:
+        runtime = GroundingRuntime.model_validate(state.get(GROUNDING_RUNTIME_KEY))
+        _refresh_answer_contract_shadow_lifecycle(state, runtime)
+    except Exception:
+        # Shadow lifecycle bookkeeping can never affect production control flow.
+        return
+
+
+def _answer_contract_shadow_clarifications(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+) -> list[dict[str, Any]]:
+    return [
+        item.model_dump(mode="json")
+        for item in _clarification_records(state)
+        if item.phase <= phase and item.answer is not None
+    ]
+
+
+def _answer_contract_shadow_clarification_sha256(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+) -> str:
+    return _sha256_text(
+        canonical_json(
+            _answer_contract_shadow_clarifications(state, phase=phase)
+        )
+    )
+
+
+def _answer_contract_shadow_official_definitions(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+) -> list[dict[str, Any]]:
+    """Project only exact task-visible Official definitions with provenance."""
+
+    result: list[dict[str, Any]] = []
+    for event in _completed_sql_grounding_trajectory(state):
+        event_phase = event.get("phase")
+        if (
+            event.get("tool_name") != "get_all_knowledge_definitions"
+            or isinstance(event_phase, bool)
+            or not isinstance(event_phase, int)
+            or event_phase > phase
+        ):
+            continue
+        definitions = _normalized_knowledge_definitions(event.get("content"))
+        for item_index, item in enumerate(definitions):
+            knowledge_id = item.get("id")
+            name = item.get("knowledge")
+            definition = item.get("definition")
+            if (
+                isinstance(knowledge_id, bool)
+                or not isinstance(knowledge_id, int)
+                or not isinstance(name, str)
+                or not name
+                or not isinstance(definition, str)
+                or not definition
+            ):
+                continue
+            result.append(
+                {
+                    "id": knowledge_id,
+                    "name": name,
+                    "definition": definition,
+                    "source_ref": (
+                        f"{event['private_raw_ref']}/item/{item_index}"
+                    ),
+                    "source_digest": event["raw_digest"],
+                }
+            )
+    return json.loads(canonical_json(result))
+
+
+def _build_answer_contract_shadow_snapshot(
+    state: Any,
+    *,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    grounding_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    query = grounding_input.get("query")
+    follow_up = grounding_input.get("follow_up")
+    if not isinstance(query, str) or not query or query != query.strip():
+        raise ValueError("AnswerContract Shadow requires the bounded Query")
+    if phase == 1:
+        if follow_up is not None:
+            raise ValueError("P1 AnswerContract Shadow cannot carry a follow-up")
+    elif not isinstance(follow_up, str) or not follow_up or follow_up != follow_up.strip():
+        raise ValueError("P2 AnswerContract Shadow requires the bounded follow-up")
+    clarifications = _answer_contract_shadow_clarifications(state, phase=phase)
+    official_definitions = _answer_contract_shadow_official_definitions(
+        state,
+        phase=phase,
+    )
+    state_payload = runtime.grounding_state.model_dump(mode="json")
+    source_identity = {
+        "task_id": _task_id(state),
+        "phase": phase,
+        "grounding_revision": runtime.grounding_revision,
+        "state_sha256": sql_grounding_state_sha256(runtime.grounding_state),
+        "query_sha256": _sha256_text(query),
+        "follow_up_sha256": (
+            _sha256_text(follow_up) if isinstance(follow_up, str) else None
+        ),
+        "clarification_sha256": _sha256_text(canonical_json(clarifications)),
+        "official_definitions_sha256": _sha256_text(
+            canonical_json(official_definitions)
+        ),
+    }
+    source_path = (
+        f"session://answer_contract/{_task_id(state)}/phase/{phase}/"
+        f"revision/{runtime.grounding_revision}"
+    )
+    return {
+        "query": query,
+        "follow_up": follow_up,
+        "phase": phase,
+        "grounding_revision": runtime.grounding_revision,
+        "state": state_payload,
+        "clarifications": clarifications,
+        "official_definitions": official_definitions,
+        "source_path": source_path,
+        "source_sha256": _sha256_text(canonical_json(source_identity)),
+    }
+
+
+def _answer_contract_shadow_audits(state: Any) -> list[dict[str, Any]]:
+    payload = state.get(ANSWER_CONTRACT_SHADOW_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) > _MAX_ANSWER_CONTRACT_SHADOW_AUDITS:
+        raise ValueError("invalid AnswerContract Shadow audit store")
+    result = json.loads(canonical_json(payload))
+    if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+        raise ValueError("invalid AnswerContract Shadow audit record")
+    return result
+
+
+def _store_answer_contract_shadow_audits(
+    state: Any,
+    audits: list[dict[str, Any]],
+) -> None:
+    if len(audits) > _MAX_ANSWER_CONTRACT_SHADOW_AUDITS:
+        audits = audits[-_MAX_ANSWER_CONTRACT_SHADOW_AUDITS:]
+    payload = json.loads(canonical_json(audits))
+    if not isinstance(payload, list):
+        raise ValueError("invalid AnswerContract Shadow audit payload")
+    state[ANSWER_CONTRACT_SHADOW_AUDITS_KEY] = payload
+
+
+def _append_answer_contract_shadow_audit(
+    state: Any,
+    record: dict[str, Any],
+) -> None:
+    audits = _answer_contract_shadow_audits(state)
+    audits.append(json.loads(canonical_json(record)))
+    _store_answer_contract_shadow_audits(state, audits)
+
+
+def _refresh_answer_contract_shadow_lifecycle(
+    state: Any,
+    runtime: GroundingRuntime,
+) -> None:
+    """Mark mismatched shadow contracts stale; never affect control flow."""
+
+    try:
+        phase = _phase(state.get("current_phase", 1))
+        clarification_sha = _answer_contract_shadow_clarification_sha256(
+            state,
+            phase=phase,
+        )
+        state_sha = sql_grounding_state_sha256(runtime.grounding_state)
+        audits = _answer_contract_shadow_audits(state)
+        changed = False
+        for index, record in enumerate(audits):
+            if record.get("lifecycle_status") != "ACTIVE":
+                continue
+            reasons: list[str] = []
+            if record.get("phase") != phase:
+                reasons.append("PHASE_CHANGED")
+            if record.get("grounding_revision") != runtime.grounding_revision:
+                reasons.append("GROUNDING_REVISION_CHANGED")
+            if record.get("state_sha256") != state_sha:
+                reasons.append("STATE_DIGEST_CHANGED")
+            if record.get("clarification_sha256") != clarification_sha:
+                reasons.append("CLARIFICATION_DIGEST_CHANGED")
+            if reasons:
+                updated = dict(record)
+                updated["lifecycle_status"] = "STALE"
+                updated["stale_reasons"] = reasons
+                updated["stale_against_phase"] = phase
+                updated["stale_against_grounding_revision"] = (
+                    runtime.grounding_revision
+                )
+                updated["stale_against_state_sha256"] = state_sha
+                updated["stale_against_clarification_sha256"] = clarification_sha
+                audits[index] = updated
+                changed = True
+        if changed:
+            _store_answer_contract_shadow_audits(state, audits)
+    except Exception:
+        # Research Shadow is strictly observational.  Corrupt or unavailable
+        # audit state cannot delay or alter Main.
+        return
+
+
+def _emit_answer_contract_shadow(
+    state: Any,
+    *,
+    runtime: GroundingRuntime,
+    phase: Literal[1, 2],
+    grounding_input: Mapping[str, Any] | None,
+) -> None:
+    """Build and verify one shadow contract, fail-open on every error."""
+
+    if not _answer_contract_runtime_enabled():
+        return
+    try:
+        if not isinstance(grounding_input, Mapping):
+            raise ValueError("AnswerContract Shadow requires Check input")
+        _refresh_answer_contract_shadow_lifecycle(state, runtime)
+        snapshot = _build_answer_contract_shadow_snapshot(
+            state,
+            runtime=runtime,
+            phase=phase,
+            grounding_input=grounding_input,
+        )
+        contract = AnswerContractLiteBuilder().build(snapshot)
+        verified, verify_reason = AnswerContractLiteVerifier().verify(
+            snapshot,
+            contract,
+        )
+        if not verified:
+            raise ValueError(f"AnswerContract Shadow verifier: {verify_reason}")
+        clarification_sha = _sha256_text(
+            canonical_json(snapshot["clarifications"])
+        )
+        state_sha = sql_grounding_state_sha256(runtime.grounding_state)
+        audits = _answer_contract_shadow_audits(state)
+        for record in audits:
+            if (
+                record.get("lifecycle_status") == "ACTIVE"
+                and record.get("contract_sha256") == contract["contract_sha256"]
+                and record.get("phase") == phase
+                and record.get("grounding_revision") == runtime.grounding_revision
+                and record.get("state_sha256") == state_sha
+                and record.get("clarification_sha256") == clarification_sha
+            ):
+                return
+        invariants = contract["verified_invariants"]
+        _append_answer_contract_shadow_audit(
+            state,
+            {
+                "status": "EMITTED" if invariants else "OMITTED",
+                "lifecycle_status": "ACTIVE",
+                "phase": phase,
+                "grounding_revision": runtime.grounding_revision,
+                "state_sha256": state_sha,
+                "clarification_sha256": clarification_sha,
+                "source_snapshot_sha256": contract["source_snapshot_sha256"],
+                "contract_sha256": contract["contract_sha256"],
+                "invariant_count": len(invariants),
+                "invariant_kinds": sorted(
+                    {item["kind"] for item in invariants}
+                ),
+                "verifier": verify_reason,
+                "contract": contract,
+            },
+        )
+    except Exception as exc:
+        try:
+            _append_answer_contract_shadow_audit(
+                state,
+                {
+                    "status": "SHADOW_ERROR",
+                    "lifecycle_status": "ERROR",
+                    "phase": phase,
+                    "grounding_revision": runtime.grounding_revision,
+                    "state_sha256": sql_grounding_state_sha256(
+                        runtime.grounding_state
+                    ),
+                    "error_type": type(exc).__name__[:128],
+                },
+            )
+        except Exception:
+            pass
+
+
+def _answer_contract_guard_audits(state: Any) -> list[dict[str, Any]]:
+    payload = state.get(ANSWER_CONTRACT_GUARD_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) > _MAX_ANSWER_CONTRACT_GUARD_AUDITS:
+        raise ValueError("invalid AnswerContract Guard audit store")
+    result = json.loads(canonical_json(payload))
+    if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+        raise ValueError("invalid AnswerContract Guard audit record")
+    return result
+
+
+def _store_answer_contract_guard_audits(
+    state: Any,
+    audits: list[dict[str, Any]],
+) -> None:
+    payload = audits[-_MAX_ANSWER_CONTRACT_GUARD_AUDITS:]
+    normalized = json.loads(canonical_json(payload))
+    if not isinstance(normalized, list):
+        raise ValueError("invalid AnswerContract Guard audit payload")
+    state[ANSWER_CONTRACT_GUARD_AUDITS_KEY] = normalized
+
+
+def _append_answer_contract_guard_audit_best_effort(
+    state: Any,
+    record: dict[str, Any],
+) -> None:
+    """Bound Guard telemetry; audit failure can never change Main behavior."""
+
+    try:
+        normalized = json.loads(canonical_json(record))
+        if not isinstance(normalized, dict):
+            raise ValueError("invalid AnswerContract Guard audit")
+        _require_bounded_audit(normalized)
+        audits = _answer_contract_guard_audits(state)
+        audits.append(normalized)
+        _store_answer_contract_guard_audits(state, audits)
+    except Exception:
+        try:
+            fallback = {
+                "status": "GUARD_AUDIT_ERROR",
+                "error_type": "GuardAuditValidationError",
+            }
+            state[ANSWER_CONTRACT_GUARD_AUDITS_KEY] = [fallback]
+        except Exception:
+            pass
+
+
+def _answer_contract_guard_episodes(state: Any) -> dict[str, dict[str, Any]]:
+    payload = state.get(ANSWER_CONTRACT_GUARD_EPISODES_KEY, {})
+    if not isinstance(payload, dict) or not set(payload).issubset({"1", "2"}):
+        raise ValueError("invalid AnswerContract Guard episode store")
+    result = json.loads(canonical_json(payload))
+    if not isinstance(result, dict) or any(not isinstance(item, dict) for item in result.values()):
+        raise ValueError("invalid AnswerContract Guard episode")
+    return result
+
+
+def _store_answer_contract_guard_episodes(
+    state: Any,
+    episodes: dict[str, dict[str, Any]],
+) -> None:
+    if not set(episodes).issubset({"1", "2"}):
+        raise ValueError("invalid AnswerContract Guard episode phase")
+    normalized = json.loads(canonical_json(episodes))
+    if not isinstance(normalized, dict):
+        raise ValueError("invalid AnswerContract Guard episode payload")
+    state[ANSWER_CONTRACT_GUARD_EPISODES_KEY] = normalized
+
+
+def _exact_generic_submit_failure_phase(value: Any) -> Literal[1, 2] | None:
+    if not isinstance(value, str):
+        return None
+    match = _EXACT_GENERIC_SUBMIT_FAILURE_RE.fullmatch(value)
+    if match is None:
+        return None
+    return _phase(int(match.group("phase")))
+
+
+def _main_fresh_recompile_episodes(state: Any) -> dict[str, dict[str, Any]]:
+    payload = state.get(MAIN_FRESH_RECOMPILE_EPISODES_KEY, {})
+    if not isinstance(payload, dict) or not set(payload).issubset({"1", "2"}):
+        raise ValueError("invalid Main fresh-recompile episode store")
+    normalized = json.loads(canonical_json(payload))
+    if not isinstance(normalized, dict) or any(
+        not isinstance(item, dict) for item in normalized.values()
+    ):
+        raise ValueError("invalid Main fresh-recompile episode")
+    return normalized
+
+
+def _store_main_fresh_recompile_episodes(
+    state: Any,
+    episodes: dict[str, dict[str, Any]],
+) -> None:
+    if not set(episodes).issubset({"1", "2"}):
+        raise ValueError("invalid Main fresh-recompile episode phase")
+    normalized = json.loads(canonical_json(episodes))
+    if not isinstance(normalized, dict):
+        raise ValueError("invalid Main fresh-recompile episode payload")
+    state[MAIN_FRESH_RECOMPILE_EPISODES_KEY] = normalized
+
+
+def _main_fresh_recompile_audits(state: Any) -> list[dict[str, Any]]:
+    payload = state.get(MAIN_FRESH_RECOMPILE_AUDITS_KEY, [])
+    if not isinstance(payload, list) or len(payload) > _MAX_MAIN_FRESH_RECOMPILE_AUDITS:
+        raise ValueError("invalid Main fresh-recompile audit store")
+    normalized = json.loads(canonical_json(payload))
+    if not isinstance(normalized, list) or any(
+        not isinstance(item, dict) for item in normalized
+    ):
+        raise ValueError("invalid Main fresh-recompile audit")
+    return normalized
+
+
+def _append_main_fresh_recompile_audit_best_effort(
+    state: Any,
+    record: dict[str, Any],
+) -> None:
+    try:
+        normalized = json.loads(canonical_json(record))
+        if not isinstance(normalized, dict):
+            raise ValueError("invalid Main fresh-recompile audit")
+        _require_bounded_audit(normalized)
+        audits = _main_fresh_recompile_audits(state)
+        audits.append(normalized)
+        state[MAIN_FRESH_RECOMPILE_AUDITS_KEY] = audits[
+            -_MAX_MAIN_FRESH_RECOMPILE_AUDITS:
+        ]
+    except Exception:
+        try:
+            state[MAIN_FRESH_RECOMPILE_AUDITS_KEY] = [
+                {
+                    "status": "FRESH_RECOMPILE_AUDIT_ERROR",
+                    "error_type": "FreshRecompileAuditValidationError",
+                }
+            ]
+        except Exception:
+            pass
+
+
+def _main_fresh_recompile_identity(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+) -> dict[str, Any]:
+    runtime = GroundingRuntime.model_validate(state.get(GROUNDING_RUNTIME_KEY))
+    return {
+        "task_id": _task_id(state),
+        "phase": phase,
+        "grounding_revision": runtime.grounding_revision,
+        "state_sha256": sql_grounding_state_sha256(runtime.grounding_state),
+        "clarification_sha256": _answer_contract_shadow_clarification_sha256(
+            state,
+            phase=phase,
+        ),
+    }
+
+
+def _current_main_fresh_recompile_episode(state: Any) -> dict[str, Any] | None:
+    if not _main_fresh_recompile_r1_enabled():
+        return None
+    phase = _phase(state.get("current_phase", 1))
+    episode = _main_fresh_recompile_episodes(state).get(str(phase))
+    if episode is None or episode.get("status") not in {"ARMED", "ACTIVE"}:
+        return None
+    identity = _main_fresh_recompile_identity(state, phase=phase)
+    if any(
+        episode.get(key) != identity[key]
+        for key in (
+            "phase",
+            "grounding_revision",
+            "state_sha256",
+            "clarification_sha256",
+        )
+    ):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", str(episode.get("episode_id", ""))):
+        return None
+    if not re.fullmatch(
+        r"[0-9a-f]{64}", str(episode.get("source_args_sha256", ""))
+    ):
+        return None
+    return episode
+
+
+def _current_main_fresh_recompile_episode_best_effort(
+    state: Any,
+) -> dict[str, Any] | None:
+    try:
+        return _current_main_fresh_recompile_episode(state)
+    except Exception as exc:
+        _append_main_fresh_recompile_audit_best_effort(
+            state,
+            {
+                "status": "FRESH_RECOMPILE_STATE_ERROR_PASS_THROUGH",
+                "error_type": type(exc).__name__[:128],
+            },
+        )
+        return None
+
+
+def _update_main_fresh_recompile_after_submit(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    event: StageEvent,
+    tool_response: Any,
+    pending: _PendingToolCall,
+) -> None:
+    """Arm once per phase; a submit from the fresh window always exhausts it."""
+
+    if not _main_fresh_recompile_r1_enabled():
+        return
+    try:
+        episodes = _main_fresh_recompile_episodes(state)
+        existing = episodes.get(str(phase))
+        if existing is not None:
+            if existing.get("status") in {"ARMED", "ACTIVE"}:
+                updated = dict(existing)
+                updated["status"] = "COMPLETED"
+                updated["fresh_submit_outcome"] = (
+                    "EXACT_GENERIC_FAIL"
+                    if _exact_generic_submit_failure_phase(tool_response) == phase
+                    else event
+                )
+                updated["fresh_submit_response_sha256"] = _sha256_text(
+                    canonical_json(to_jsonable(tool_response))
+                )
+                episodes[str(phase)] = updated
+                _store_main_fresh_recompile_episodes(state, episodes)
+                _append_main_fresh_recompile_audit_best_effort(
+                    state,
+                    {
+                        "status": "FRESH_RECOMPILE_EPISODE_COMPLETED",
+                        "episode_id": updated["episode_id"],
+                        "phase": phase,
+                        "outcome": updated["fresh_submit_outcome"],
+                    },
+                )
+            return
+        response_phase = _exact_generic_submit_failure_phase(tool_response)
+        if event != "official_submit_failed" or response_phase != phase:
+            return
+        identity = _main_fresh_recompile_identity(state, phase=phase)
+        episode_identity = {
+            **identity,
+            "source_args_sha256": pending.args_digest,
+            "submit_response_sha256": _sha256_text(tool_response),
+        }
+        episode = {
+            **identity,
+            "episode_id": _sha256_text(canonical_json(episode_identity)),
+            "source_args_sha256": pending.args_digest,
+            "submit_response_sha256": episode_identity[
+                "submit_response_sha256"
+            ],
+            "status": "ARMED",
+            "request_injection_count": 0,
+            "candidate_count": 0,
+        }
+        episodes[str(phase)] = episode
+        _store_main_fresh_recompile_episodes(state, episodes)
+        _append_main_fresh_recompile_audit_best_effort(
+            state,
+            {
+                "status": "FRESH_RECOMPILE_EPISODE_ARMED",
+                "episode_id": episode["episode_id"],
+                "phase": phase,
+                "grounding_revision": identity["grounding_revision"],
+                "state_sha256": identity["state_sha256"],
+            },
+        )
+    except Exception as exc:
+        _append_main_fresh_recompile_audit_best_effort(
+            state,
+            {
+                "status": "FRESH_RECOMPILE_ARM_ERROR_PASS_THROUGH",
+                "phase": phase,
+                "error_type": type(exc).__name__[:128],
+            },
+        )
+
+
+def _observe_main_fresh_recompile_candidate(
+    state: Any,
+    *,
+    tool_name: str,
+    args: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Record a fresh candidate and reject only an exact old-SQL duplicate."""
+
+    episode = _current_main_fresh_recompile_episode(state)
+    if episode is None or tool_name not in _SQL_WRITER_TOOL_NAMES:
+        return None
+    sql = args.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        return None
+    phase = _phase(state.get("current_phase", 1))
+    args_sha = _sha256_text(canonical_json(to_jsonable(args)))
+    sql_sha = _sha256_text(sql.strip())
+    episodes = _main_fresh_recompile_episodes(state)
+    updated = dict(episode)
+    updated["status"] = "ACTIVE"
+    updated["candidate_count"] = int(updated.get("candidate_count", 0)) + 1
+    updated["latest_candidate_sql_sha256"] = sql_sha
+    updated["latest_candidate_tool"] = tool_name
+    if args_sha == episode["source_args_sha256"]:
+        updated["status"] = "DUPLICATE_REJECTED"
+        episodes[str(phase)] = updated
+        _store_main_fresh_recompile_episodes(state, episodes)
+        _append_main_fresh_recompile_audit_best_effort(
+            state,
+            {
+                "status": "EXACT_SOURCE_SQL_DUPLICATE_REJECTED_NO_CHARGE",
+                "episode_id": episode["episode_id"],
+                "phase": phase,
+                "tool_name": tool_name,
+            },
+        )
+        return {
+            "status": _MAIN_FRESH_RECOMPILE_DUPLICATE_STATUS,
+            "guidance": (
+                "The one fresh recompile exactly repeated the previously failed SQL. "
+                "No DB or submit call was made, and this phase's fresh-recompile "
+                "window is now exhausted."
+            ),
+        }
+    episodes[str(phase)] = updated
+    _store_main_fresh_recompile_episodes(state, episodes)
+    _append_main_fresh_recompile_audit_best_effort(
+        state,
+        {
+            "status": "FRESH_CANDIDATE_OBSERVED",
+            "episode_id": episode["episode_id"],
+            "phase": phase,
+            "tool_name": tool_name,
+            "candidate_count": updated["candidate_count"],
+        },
+    )
+    return None
+
+
+def _update_answer_contract_guard_episode_after_submit(
+    state: Any,
+    *,
+    phase: Literal[1, 2],
+    event: StageEvent,
+    tool_response: Any,
+) -> None:
+    """Arm only on one exact Official generic failure; every other submit clears."""
+
+    if not _answer_contract_guard_v0_enabled():
+        return
+    try:
+        episodes = _answer_contract_guard_episodes(state)
+        response_phase = _exact_generic_submit_failure_phase(tool_response)
+        if event != "official_submit_failed" or response_phase != phase:
+            episodes.pop(str(phase), None)
+            _store_answer_contract_guard_episodes(state, episodes)
+            return
+        runtime = GroundingRuntime.model_validate(state.get(GROUNDING_RUNTIME_KEY))
+        clarification_sha = _answer_contract_shadow_clarification_sha256(
+            state,
+            phase=phase,
+        )
+        response_sha = _sha256_text(tool_response)
+        identity = {
+            "task_id": _task_id(state),
+            "phase": phase,
+            "grounding_revision": runtime.grounding_revision,
+            "state_sha256": sql_grounding_state_sha256(runtime.grounding_state),
+            "clarification_sha256": clarification_sha,
+            "response_sha256": response_sha,
+        }
+        episode = {
+            "episode_id": _sha256_text(canonical_json(identity)),
+            "phase": phase,
+            "grounding_revision": runtime.grounding_revision,
+            "state_sha256": identity["state_sha256"],
+            "clarification_sha256": clarification_sha,
+            "response_sha256": response_sha,
+            "rejection_count": 0,
+        }
+        episodes[str(phase)] = episode
+        _store_answer_contract_guard_episodes(state, episodes)
+        _append_answer_contract_guard_audit_best_effort(
+            state,
+            {
+                "status": "EPISODE_ARMED",
+                "episode_id": episode["episode_id"],
+                "phase": phase,
+                "grounding_revision": runtime.grounding_revision,
+                "response_sha256": response_sha,
+            },
+        )
+    except Exception as exc:
+        _append_answer_contract_guard_audit_best_effort(
+            state,
+            {
+                "status": "EPISODE_ERROR_PASS_THROUGH",
+                "phase": phase,
+                "error_type": type(exc).__name__[:128],
+            },
+        )
+
+
+def _current_answer_contract_guard_episode(
+    state: Any,
+) -> dict[str, Any] | None:
+    runtime = GroundingRuntime.model_validate(state.get(GROUNDING_RUNTIME_KEY))
+    phase = _phase(state.get("current_phase", 1))
+    episode = _answer_contract_guard_episodes(state).get(str(phase))
+    if episode is None:
+        return None
+    rejection_count = episode.get("rejection_count")
+    if (
+        episode.get("phase") != phase
+        or episode.get("grounding_revision") != runtime.grounding_revision
+        or episode.get("state_sha256")
+        != sql_grounding_state_sha256(runtime.grounding_state)
+        or episode.get("clarification_sha256")
+        != _answer_contract_shadow_clarification_sha256(state, phase=phase)
+        or isinstance(rejection_count, bool)
+        or not isinstance(rejection_count, int)
+        or rejection_count not in (0, 1)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(episode.get("episode_id", "")))
+    ):
+        return None
+    return episode
+
+
+def _active_verified_answer_contract_for_guard(
+    state: Any,
+) -> tuple[dict[str, Any] | None, str, str | None]:
+    """Return one exact current verified contract, otherwise an omission reason."""
+
+    runtime = GroundingRuntime.model_validate(state.get(GROUNDING_RUNTIME_KEY))
+    phase = _phase(state.get("current_phase", 1))
+    _refresh_answer_contract_shadow_lifecycle(state, runtime)
+    state_sha = sql_grounding_state_sha256(runtime.grounding_state)
+    clarification_sha = _answer_contract_shadow_clarification_sha256(
+        state,
+        phase=phase,
+    )
+    active = [
+        record
+        for record in _answer_contract_shadow_audits(state)
+        if record.get("status") == "EMITTED"
+        and record.get("lifecycle_status") == "ACTIVE"
+        and record.get("verifier") == "VERIFIED"
+        and record.get("phase") == phase
+        and record.get("grounding_revision") == runtime.grounding_revision
+        and record.get("state_sha256") == state_sha
+        and record.get("clarification_sha256") == clarification_sha
+    ]
+    if len(active) != 1:
+        return None, "NO_UNIQUE_ACTIVE_VERIFIED_CONTRACT", None
+    record = active[0]
+    contract = record.get("contract")
+    if not isinstance(contract, dict):
+        return None, "ACTIVE_CONTRACT_MISSING", None
+    claimed = copy.deepcopy(contract)
+    claimed_hash = claimed.pop("contract_sha256", None)
+    if (
+        not isinstance(claimed_hash, str)
+        or claimed_hash != _sha256_text(canonical_json(claimed))
+        or record.get("contract_sha256") != claimed_hash
+        or contract.get("phase") != phase
+        or contract.get("grounding_revision") != runtime.grounding_revision
+    ):
+        return None, "ACTIVE_CONTRACT_IDENTITY_MISMATCH", None
+    invariants = contract.get("verified_invariants")
+    if not isinstance(invariants, list) or not invariants:
+        return None, "ACTIVE_CONTRACT_HAS_NO_INVARIANTS", claimed_hash
+    scoped = [
+        item
+        for item in invariants
+        if isinstance(item, dict)
+        and item.get("kind")
+        in {"predicate", "predicate_band_set", "formula", "aggregation", "ordering"}
+    ]
+    if phase == 2:
+        # The current V0 builder does not derive facts from follow-up text.
+        # Original-query invariants cannot reject a P2 candidate unless their
+        # provenance explicitly includes the follow-up that defines P2.
+        scoped = [
+            item
+            for item in scoped
+            if any(
+                isinstance(source, dict)
+                and source.get("source_kind") == "follow_up"
+                for source in item.get("provenance", [])
+            )
+        ]
+    if not scoped:
+        return None, (
+            "P2_NO_FOLLOW_UP_PROVENANCE"
+            if phase == 2
+            else "NO_GUARDABLE_INVARIANT"
+        ), claimed_hash
+    selected = copy.deepcopy(contract)
+    selected["verified_invariants"] = scoped
+    return selected, "ACTIVE_VERIFIED", claimed_hash
+
+
+def _semantic_guard_feedback(kind: str, expected: str, observed: str) -> str:
+    return (
+        f"{_ANSWER_CONTRACT_GUARD_STATUS}: Candidate rejected by the bounded "
+        f"semantic guard. The verified {kind} requires `{expected}`, but this "
+        f"candidate uses `{observed}`. The generic submit failure does not "
+        "authorize changing this invariant. Restore the frozen invariant and "
+        "revise only other implementation details."
+    )
+
+
+def _evaluate_answer_contract_guard_v0(
+    state: Any,
+    *,
+    tool_name: str,
+    args: Any,
+) -> dict[str, str] | None:
+    """Return a synthetic rejection only for one proven contradiction."""
+
+    episode = _current_answer_contract_guard_episode(state)
+    if episode is None:
+        return None
+    candidate_sha: str | None = None
+    if not isinstance(args, dict) or set(args) != {"sql"}:
+        evaluation_status = "UNKNOWN_PASS_THROUGH"
+        reason = "INVALID_OR_UNBOUNDED_SQL_ARGUMENTS"
+        contract_sha = None
+        evaluation = None
+    else:
+        sql = args.get("sql")
+        if not isinstance(sql, str):
+            evaluation_status = "UNKNOWN_PASS_THROUGH"
+            reason = "INVALID_OR_UNBOUNDED_SQL_ARGUMENTS"
+            contract_sha = None
+            evaluation = None
+        else:
+            candidate_sha = _sha256_text(sql)
+            contract, reason, contract_sha = _active_verified_answer_contract_for_guard(
+                state
+            )
+            evaluation = (
+                evaluate_candidate_sql(contract, sql)
+                if contract is not None
+                else None
+            )
+            evaluation_status = (
+                f"{evaluation.status}_PASS_THROUGH"
+                if evaluation is not None
+                else "NO_CONTRACT_PASS_THROUGH"
+            )
+    base_audit: dict[str, Any] = {
+        "status": evaluation_status,
+        "reason": reason,
+        "episode_id": episode["episode_id"],
+        "phase": episode["phase"],
+        "grounding_revision": episode["grounding_revision"],
+        "tool_name": tool_name,
+        "candidate_sql_sha256": candidate_sha,
+        "contract_sha256": contract_sha,
+    }
+    if evaluation is None or evaluation.status != "CONTRADICTION" or evaluation.conflict is None:
+        _append_answer_contract_guard_audit_best_effort(state, base_audit)
+        return None
+    conflict = evaluation.conflict
+    if episode["rejection_count"] >= 1:
+        base_audit.update(
+            {
+                "status": "REPEATED_VIOLATION_PASS_THROUGH",
+                "invariant_id": conflict.invariant_id,
+                "invariant_kind": conflict.kind,
+                "expected": conflict.expected[:512],
+                "observed": conflict.observed[:512],
+            }
+        )
+        _append_answer_contract_guard_audit_best_effort(state, base_audit)
+        return None
+    episodes = _answer_contract_guard_episodes(state)
+    updated_episode = dict(episode)
+    updated_episode["rejection_count"] = 1
+    episodes[str(episode["phase"])] = updated_episode
+    _store_answer_contract_guard_episodes(state, episodes)
+    base_audit.update(
+        {
+            "status": "CONTRADICTION_REJECTED_NO_CHARGE",
+            "invariant_id": conflict.invariant_id,
+            "invariant_kind": conflict.kind,
+            "expected": conflict.expected[:512],
+            "observed": conflict.observed[:512],
+            "provider_attempted": False,
+            "official_tool_executed": False,
+            "bird_coin_charged": False,
+        }
+    )
+    _append_answer_contract_guard_audit_best_effort(state, base_audit)
+    return {
+        "response": _semantic_guard_feedback(
+            conflict.kind,
+            conflict.expected,
+            conflict.observed,
+        ),
+        "episode_id": str(episode["episode_id"]),
+        "contract_sha256": str(contract_sha),
+        "invariant_id": conflict.invariant_id,
+        "invariant_kind": conflict.kind,
+    }
 
 
 def _project_official_evidence(
@@ -4121,16 +8556,132 @@ def _project_column_meanings(
     return json.loads(canonical_json(result))
 
 
+def _canonical_metadata_column_index(
+    canonical_columns: frozenset[str] | set[str],
+    *,
+    tables: tuple[str, ...] | None = None,
+) -> dict[tuple[str, str], str]:
+    """Resolve normalized metadata lookup parts to unique DDL identifiers.
+
+    Official column-meaning keys are lookup identifiers and may be normalized.
+    Mapping targets and ValidationContext identifiers must instead come from the
+    original ``get_schema`` projection.  Case-folding is used only to join the
+    two evidence sources; ambiguous joins are deliberately omitted.
+    """
+
+    allowed_tables: set[str] | None = None
+    if tables is not None:
+        allowed_tables = {
+            candidate.casefold()
+            for table in tables
+            for candidate in (table, table.rsplit(".", 1)[-1])
+        }
+    candidates: dict[tuple[str, str], set[str]] = {}
+    for canonical in canonical_columns:
+        if "." not in canonical:
+            continue
+        table, column = canonical.rsplit(".", 1)
+        short_table = table.rsplit(".", 1)[-1]
+        if allowed_tables is not None and not {
+            table.casefold(),
+            short_table.casefold(),
+        }.intersection(allowed_tables):
+            continue
+        candidates.setdefault(
+            (short_table.casefold(), column.casefold()), set()
+        ).add(canonical)
+    return {
+        key: next(iter(values))
+        for key, values in candidates.items()
+        if len(values) == 1
+    }
+
+
+def _canonical_metadata_column(
+    *,
+    table: str,
+    column: str,
+    index: Mapping[tuple[str, str], str],
+) -> str | None:
+    """Return one DDL-backed identifier or fail closed on absence/ambiguity."""
+
+    return index.get((table.rsplit(".", 1)[-1].casefold(), column.casefold()))
+
+
+def _project_mapping_column_meanings(
+    content: Any,
+    *,
+    tables: tuple[str, ...],
+    canonical_columns: frozenset[str] | set[str],
+) -> dict[str, Any]:
+    """Expose Mapping metadata under DDL-canonical ``table.column`` keys.
+
+    The raw Official payload remains untouched in trajectory/cache.  Only this
+    transient Mapping-facing projection replaces normalized lookup keys with a
+    unique identifier derived from the same schema evidence used by the State
+    validator.  Missing or ambiguous joins are omitted rather than guessed.
+    """
+
+    meanings = _exact_all_column_meanings(content)
+    index = _canonical_metadata_column_index(
+        canonical_columns,
+        tables=tables,
+    )
+    result: dict[str, Any] = {}
+
+    def add(canonical: str | None, meaning: Any) -> None:
+        if canonical is None:
+            return
+        if canonical in result and result[canonical] != meaning:
+            raise ValueError("conflicting metadata for one canonical column")
+        result[canonical] = meaning
+
+    for raw_key, value in meanings.items():
+        if not isinstance(raw_key, str):
+            continue
+        parts = raw_key.split("|")
+        if len(parts) >= 3:
+            add(
+                _canonical_metadata_column(
+                    table=parts[-2],
+                    column=parts[-1],
+                    index=index,
+                ),
+                value,
+            )
+            continue
+        if not isinstance(value, dict):
+            continue
+        for raw_column, meaning in value.items():
+            if not isinstance(raw_column, str):
+                continue
+            add(
+                _canonical_metadata_column(
+                    table=raw_key,
+                    column=raw_column,
+                    index=index,
+                ),
+                meaning,
+            )
+    return json.loads(canonical_json(result))
+
+
 def _relevant_mapping_column_meanings(
     content: Any,
     runtime: GroundingRuntime,
+    *,
+    canonical_columns: frozenset[str] | set[str],
 ) -> dict[str, Any]:
-    """Expose all Official meanings inside the candidate-table boundary."""
+    """Expose candidate-table meanings under validator-canonical identifiers."""
 
     tables = runtime.grounding_state.tables
     if tables is None:
         raise ValueError("relevant metadata requires evaluated tables")
-    return _project_column_meanings(content, tables=tables)
+    return _project_mapping_column_meanings(
+        content,
+        tables=tables,
+        canonical_columns=canonical_columns,
+    )
 
 
 def _relevant_clarification_column_meanings(
@@ -4193,12 +8744,19 @@ def _column_meaning_json_paths(
 
     value = _exact_all_column_meanings(content)
     result: set[tuple[str, tuple[str, ...]]] = set()
+    index = _canonical_metadata_column_index(known_columns)
     for raw_column, meaning in value.items():
         if not isinstance(raw_column, str):
             continue
         parts = raw_column.split("|")
         if len(parts) >= 3:
-            column = ".".join(parts[-2:])
+            column = _canonical_metadata_column(
+                table=parts[-2],
+                column=parts[-1],
+                index=index,
+            )
+            if column is None:
+                continue
             _collect_fields_meaning_paths(
                 column,
                 meaning,
@@ -4206,13 +8764,18 @@ def _column_meaning_json_paths(
                 result=result,
             )
             continue
-        if raw_column in {item.rsplit(".", 1)[0] for item in known_columns} and isinstance(
-            meaning, dict
-        ):
+        if isinstance(meaning, dict):
             for column_name, column_meaning in meaning.items():
                 if isinstance(column_name, str):
+                    column = _canonical_metadata_column(
+                        table=raw_column,
+                        column=column_name,
+                        index=index,
+                    )
+                    if column is None:
+                        continue
                     _collect_fields_meaning_paths(
-                        f"{raw_column}.{column_name}",
+                        column,
                         column_meaning,
                         known_columns=known_columns,
                         result=result,
@@ -4320,6 +8883,38 @@ def _observation_audit(result: _ObservationResult) -> dict[str, Any]:
                 "provider_may_bill_after_cancel": llm.provider_may_bill_after_cancel,
                 "service_error_type": update.error_type,
             }
+        )
+        repair = result.service_result.mapping_validation_repair
+        if repair is not None:
+            audit["mapping_validation_repair"] = {
+                "trigger": repair.trigger,
+                "outcome": repair.outcome,
+                "invalid_phrases": list(repair.invalid_phrases),
+                "initial_request_sha256": (
+                    repair.initial_llm_telemetry.request_sha256
+                ),
+                "repair_request_sha256": (
+                    repair.repair_llm_telemetry.request_sha256
+                    if repair.repair_llm_telemetry is not None
+                    else None
+                ),
+                "logical_call_count": sum(
+                    int(item is not None and item.attempted)
+                    for item in (
+                        repair.initial_llm_telemetry,
+                        repair.repair_llm_telemetry,
+                    )
+                ),
+            }
+        audit["knowledge_preserved_by_default_refs"] = list(
+            result.service_result.knowledge_preserved_by_default_refs
+        )
+        audit["knowledge_retirement_audit_sidecar"] = (
+            None
+            if result.service_result.knowledge_retirement_audit_sidecar is None
+            else result.service_result.knowledge_retirement_audit_sidecar.model_dump(
+                mode="json"
+            )
         )
     return audit
 
@@ -4901,6 +9496,9 @@ def _load_tool_callback_audits(state: Any) -> dict[str, dict[str, Any]]:
             raise ValueError("invalid exact tool callback audit key")
         if not isinstance(value, dict) or value.get("function_call_id") != key:
             raise ValueError("invalid exact tool callback audit record")
+        _require_bounded_tool_audit(value.get(SHADOW_AUDIT_KEY))
+        if GROUNDING_CONTROL_AUDIT_KEY in value:
+            _require_bounded_audit(value[GROUNDING_CONTROL_AUDIT_KEY])
         encoded = canonical_json(value).encode("utf-8")
         if len(encoded) > _MAX_TOOL_AUDIT_RECORD_BYTES:
             raise ValueError("exact tool callback audit record exceeds bound")
@@ -4919,7 +9517,7 @@ def _upsert_tool_callback_audit(
 
     if not _IDENTIFIER_RE.fullmatch(function_call_id):
         raise ValueError("exact tool callback audit requires function_call_id")
-    _require_bounded_audit(shadow_audit)
+    _require_bounded_tool_audit(shadow_audit)
     if control_audit is not None:
         _require_bounded_audit(control_audit)
     records = _load_tool_callback_audits(state)
@@ -5350,6 +9948,106 @@ def _filter_writer_contents(llm_request: Any) -> None:
     llm_request.contents = retained_contents
 
 
+def _function_response_result(part: Any) -> Any:
+    function_response = getattr(part, "function_response", None)
+    if getattr(function_response, "name", None) != "submit_sql":
+        return None
+    response = getattr(function_response, "response", None)
+    if isinstance(response, Mapping):
+        return response.get("result")
+    return None
+
+
+def _history_generic_submit_failure_phase(value: Any) -> Literal[1, 2] | None:
+    """Recover the exact Official payload before ADK's deterministic note."""
+
+    direct = _exact_generic_submit_failure_phase(value)
+    if direct is not None or not isinstance(value, str):
+        return direct
+    marker = "\n\n[SYSTEM NOTE: Remaining budget:"
+    if marker not in value:
+        return None
+    official, note = value.split(marker, 1)
+    if not note.endswith("]"):
+        return None
+    return _exact_generic_submit_failure_phase(official)
+
+
+def _filter_fresh_recompile_contents(
+    llm_request: Any,
+    *,
+    phase: Literal[1, 2],
+) -> None:
+    """Hide every pre-failure Main turn while retaining the fresh episode only."""
+
+    contents = getattr(llm_request, "contents", None)
+    if not isinstance(contents, list):
+        raise TypeError("LlmRequest.contents is required")
+    marker_index: int | None = None
+    for index, content in enumerate(contents):
+        parts = getattr(content, "parts", None)
+        if not isinstance(parts, list):
+            continue
+        if any(
+            _history_generic_submit_failure_phase(_function_response_result(part))
+            == phase
+            for part in parts
+        ):
+            marker_index = index
+    if marker_index is None:
+        raise ValueError("fresh recompile requires exact generic submit response")
+
+    original_user: Any | None = None
+    for content in contents[:marker_index]:
+        if getattr(content, "role", None) != "user":
+            continue
+        parts = getattr(content, "parts", None)
+        if not isinstance(parts, list):
+            continue
+        plain_parts = [
+            copy.deepcopy(part)
+            for part in parts
+            if getattr(part, "function_call", None) is None
+            and getattr(part, "function_response", None) is None
+            and isinstance(getattr(part, "text", None), str)
+            and bool(getattr(part, "text", None))
+        ]
+        if plain_parts:
+            original_user = copy.deepcopy(content)
+            original_user.parts = plain_parts
+            break
+
+    retained = [copy.deepcopy(item) for item in contents[marker_index + 1 :]]
+    llm_request.contents = (
+        ([original_user] if original_user is not None else []) + retained
+    )
+    if not llm_request.contents:
+        raise ValueError("fresh recompile requires the original user Query")
+
+
+def _mark_main_fresh_recompile_request_injected(state: Any) -> None:
+    episode = _current_main_fresh_recompile_episode(state)
+    if episode is None:
+        return
+    phase = _phase(state.get("current_phase", 1))
+    episodes = _main_fresh_recompile_episodes(state)
+    updated = dict(episode)
+    updated["request_injection_count"] = int(
+        updated.get("request_injection_count", 0)
+    ) + 1
+    episodes[str(phase)] = updated
+    _store_main_fresh_recompile_episodes(state, episodes)
+    _append_main_fresh_recompile_audit_best_effort(
+        state,
+        {
+            "status": "FRESH_REQUEST_CONTEXT_INJECTED",
+            "episode_id": episode["episode_id"],
+            "phase": phase,
+            "request_injection_count": updated["request_injection_count"],
+        },
+    )
+
+
 def _inject_sql_writer_context(
     llm_request: Any,
     *,
@@ -5358,6 +10056,9 @@ def _inject_sql_writer_context(
     follow_up: str | None,
     view_text: str,
     budget_remaining: Any,
+    execution_envelope_text: str | None = None,
+    sql_safe_identifiers_text: str | None = None,
+    fresh_recompile: bool = False,
 ) -> dict[str, str]:
     """Atomically replace exploratory instructions with the SQL Writer view."""
 
@@ -5368,33 +10069,60 @@ def _inject_sql_writer_context(
         raise ValueError("SQL Writer requires finite Bird-Coin")
     if phase == 2 and (not isinstance(follow_up, str) or not follow_up):
         raise ValueError("Phase 2 SQL Writer requires follow-up")
-    context = "\n".join(
+    context_parts = [
+        SQL_WRITER_CONTEXT_BEGIN,
+        f"Phase: {phase}",
+        f"Original Query: {original_query}",
+        f"Follow-up: {follow_up if follow_up is not None else 'none'}",
+        "Final Grounding State and answered Clarifications:",
+        view_text,
+    ]
+    if execution_envelope_text is not None:
+        context_parts.append(execution_envelope_text)
+    if sql_safe_identifiers_text is not None:
+        context_parts.append(sql_safe_identifiers_text)
+    context_parts.extend(
         [
-            SQL_WRITER_CONTEXT_BEGIN,
-            f"Phase: {phase}",
-            f"Original Query: {original_query}",
-            f"Follow-up: {follow_up if follow_up is not None else 'none'}",
-            "Final Grounding State and answered Clarifications:",
-            view_text,
             f"Remaining Bird-Coin: {budget:g}",
             SQL_WRITER_CONTEXT_END,
         ]
     )
+    context = "\n".join(context_parts)
     original = copy.deepcopy(llm_request)
     original_tools_dict = copy.deepcopy(getattr(llm_request, "tools_dict", None))
     try:
         config = getattr(llm_request, "config", None)
         if config is None:
             raise TypeError("LlmRequest.config is required")
-        config.system_instruction = f"{_SQL_WRITER_PROMPT}\n\n{context}"
+        writer_prompt = _SQL_WRITER_PROMPT
+        if fresh_recompile:
+            writer_prompt = f"{writer_prompt}\n\n{_MAIN_FRESH_RECOMPILE_PROMPT}"
+        config.system_instruction = f"{writer_prompt}\n\n{context}"
         _filter_writer_tools(llm_request)
         _filter_writer_contents(llm_request)
+        if fresh_recompile:
+            _filter_fresh_recompile_contents(llm_request, phase=phase)
         final_names = tuple(getattr(llm_request, "tools_dict", {}).keys())
         if final_names != _SQL_WRITER_TOOL_NAMES:
             raise RuntimeError("SQL Writer exposed an unexpected tool")
         return {
             "grounding_view_block_sha256": _sha256_text(context),
             "writer_prompt_sha256": _sha256_text(_SQL_WRITER_PROMPT),
+            "fresh_recompile_prompt_sha256": (
+                _sha256_text(_MAIN_FRESH_RECOMPILE_PROMPT)
+                if fresh_recompile
+                else None
+            ),
+            "main_execution_envelope_sha256": (
+                _sha256_text(execution_envelope_text)
+                if execution_envelope_text is not None
+                else None
+            ),
+            "sql_safe_identifier_overlay_sha256": (
+                _sha256_text(sql_safe_identifiers_text)
+                if sql_safe_identifiers_text is not None
+                else None
+            ),
         }
     except BaseException:
         _restore_llm_request(llm_request, original)
@@ -5504,7 +10232,10 @@ def _attach_tool_audit(
     trajectory = state.get("tool_trajectory", [])
     if not isinstance(trajectory, list) or not 0 <= index < len(trajectory):
         return
-    _require_bounded_audit(metadata)
+    if key == SHADOW_AUDIT_KEY:
+        _require_bounded_tool_audit(metadata)
+    else:
+        _require_bounded_audit(metadata)
     event = trajectory[index]
     if not isinstance(event, dict):
         return
@@ -5540,6 +10271,41 @@ def _bounded_error_audit(
         "function_call_id": function_call_id,
         "error_type": type(exception).__name__[:128],
     }
+
+
+def _require_bounded_tool_audit(metadata: dict[str, Any]) -> None:
+    """Bound a P2 audit by stage, without dropping or rewriting its contents.
+
+    A submit callback contains up to four stage observations. Applying the
+    single-observation limit to their concatenation discarded healthy P2 audit
+    records. The header and every child still have the original byte limit;
+    nested composites and additional stages do not get a larger allowance.
+    This validator is used only at audit persistence/attachment boundaries.
+    """
+
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid tool callback audit")
+    if "p2_follow_up" not in metadata:
+        _require_bounded_audit(metadata)
+        return
+    follow_up = metadata["p2_follow_up"]
+    if not isinstance(follow_up, dict) or set(follow_up) != {"staged_grounding"}:
+        raise ValueError("invalid P2 tool audit envelope")
+    stages = follow_up["staged_grounding"]
+    if not isinstance(stages, list) or not 1 <= len(stages) <= _MAX_P2_AUDIT_STAGES:
+        raise ValueError("invalid P2 tool audit stage count")
+    expected = ("structure", "mapping", "knowledge", "check")
+    for index, stage in enumerate(stages):
+        if (
+            not isinstance(stage, dict)
+            or stage.get("staged_grounding_kind") != expected[index]
+            or "p2_follow_up" in stage
+        ):
+            raise ValueError("invalid P2 tool audit stage")
+        _require_bounded_audit(stage)
+    # Preserve the envelope overhead in the header limit. No input is mutated.
+    header = {**metadata, "p2_follow_up": {"staged_grounding": []}}
+    _require_bounded_audit(header)
 
 
 def _require_bounded_audit(metadata: dict[str, Any]) -> None:

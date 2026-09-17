@@ -1,8 +1,16 @@
-# BIRD-Interact-ADK
+# Valibra
+
+Valibra is a research fork of BIRD-Interact-ADK. It adds four-dimensional SQL grounding, completeness checks, bounded re-grounding and an official-agent fallback.
+
+The [September 2026 release notes](docs/releases/2026-09-16/README.md) document the frozen configuration, core results, limitations and release checks. On the paired Full600 evaluation, P1 increased from 144 to 150, Full decreased from 79 to 75, and Reward increased from 124.5 to 127.5. Reported total tokens increased by 25.51%; these results do not establish an overall improvement over the baseline.
+
+The release includes a subsequent audit-storage fix, validated offline. The 600-task evaluation was not rerun after that fix. Private trajectories, credentials and full evaluation artifacts are not distributed here.
+
+## Upstream BIRD-Interact-ADK
 
 **Google ADK-based implementation of the [BIRD-Interact](https://bird-interact.github.io/) benchmark** — an interactive text-to-SQL evaluation framework with dynamic agent-environment interactions.
 
-This is the official ADK agent implementation for running BIRD-Interact evaluations. It provides a modular, service-based architecture with parallel experiment execution, supporting both **Conversational Interaction (c-Interact)** and **Agentic Interaction (a-Interact)** modes.
+The upstream project provides the official ADK agent implementation for running BIRD-Interact evaluations. Its original setup documentation follows below; it is not, by itself, a reproduction recipe for the Valibra release configuration. The service-based architecture supports both **Conversational Interaction (c-Interact)** and **Agentic Interaction (a-Interact)** modes.
 
 > For the original BIRD-Interact benchmark, paper, leaderboard, and dataset details, see the [main repository](https://github.com/bird-bench/BIRD-Interact).
 

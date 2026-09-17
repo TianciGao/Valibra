@@ -162,6 +162,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         state = self._risky_state()
         response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="Which compliance values mean risky?",
             next_tool=GroundingCheckToolRequest(
                 tool_name="ask_user",
@@ -186,6 +187,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
                 "query": query,
                 "current_state": state.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [],
                 "check_context": {"kind": "initial"},
             },
@@ -218,6 +220,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         state = self._risky_state()
         response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="none",
             missing_information="Which compliance values mean risky?",
             next_tool=GroundingCheckToolRequest(
                 tool_name="ask_user",
@@ -242,6 +245,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
                 "query": query,
                 "current_state": state.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [],
                 "check_context": {"kind": "initial"},
             },
@@ -271,6 +275,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="complete",
+            clarification_route="stay_check",
             column_mapping=state.column_mapping or (),
             domain_knowledge=(),
         )
@@ -285,6 +290,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
                 "query": query,
                 "current_state": state.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [
                     {"question": "Which level is bad?", "answer": answer}
                 ],
@@ -303,28 +309,22 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_answer_expansion_contract_requires_incomplete(self) -> None:
-        self.assertIn("Clarification Scope Gate（最高优先级）", CHECK_GROUNDING_PROMPT)
-        self.assertIn("A. 窄澄清", CHECK_GROUNDING_PROMPT)
-        self.assertIn("B. 语义扩展", CHECK_GROUNDING_PROMPT)
-        self.assertIn("C. 未解决", CHECK_GROUNDING_PROMPT)
-        self.assertIn("字段概念、predicate、业务规则、公式", CHECK_GROUNDING_PROMPT)
-        self.assertIn("AND / OR 组合条件", CHECK_GROUNDING_PROMPT)
+        self.assertIn("ask_user 是高成本 Grounding-cycle boundary", CHECK_GROUNDING_PROMPT)
         self.assertIn(
-            "当前这个包含 latest_user_answer 的 Check turn 绝对禁止 complete",
+            "必须 status=incomplete、next_tool=null",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
-            "Clarification overlay 只是为已有 Grounding 补充参数的通道",
+            "runtime 会把它交给 Final Gate 并创建全新的 Draft",
             CHECK_GROUNDING_PROMPT,
         )
-        self.assertIn("不是替代新 Grounding 语义的通道", CHECK_GROUNDING_PROMPT)
-        self.assertLess(
-            CHECK_GROUNDING_PROMPT.index("0. Clarification Scope Gate"),
-            CHECK_GROUNDING_PROMPT.index("1. 业务规则完整性"),
+        self.assertIn(
+            "本轮 Check 不得一点点修旧 State",
+            CHECK_GROUNDING_PROMPT,
         )
-        self.assertLess(
-            CHECK_GROUNDING_PROMPT.index("B. 语义扩展"),
-            CHECK_GROUNDING_PROMPT.index("5. 窄澄清是否直接解决上一轮缺口"),
+        self.assertIn(
+            "clarification 不是 schema、metadata 或 Official business",
+            CHECK_GROUNDING_PROMPT,
         )
 
         state = SQLGroundingState(
@@ -344,6 +344,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="incomplete",
+            clarification_route="restart_grounding",
             missing_information=(
                 "The added busbar-corrosion condition has no grounded field mapping."
             ),
@@ -361,6 +362,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
                 "query": "Show plants aging terribly.",
                 "current_state": state.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [
                     {"question": "What does aging terribly mean?", "answer": answer}
                 ],
@@ -372,6 +374,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.state_update.status, "noop")
         self.assertEqual(result.response.status, "incomplete")
+        self.assertEqual(result.response.clarification_route, "restart_grounding")
         self.assertIsNone(result.response.next_tool)
         self.assertEqual(result.response.column_mapping, state.column_mapping)
         self.assertEqual(result.runtime, runtime)
@@ -383,11 +386,11 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.assertIn(
-            "不得把历史上的 B 类语义扩展当作永久禁止 complete 的理由",
+            "user_clarifications 当前要求的每个 SQL-relevant concept",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
-            "全部已充分 Ground 且其他检查均通过时允许 complete",
+            "全部通过才 complete",
             CHECK_GROUNDING_PROMPT,
         )
         state = SQLGroundingState(
@@ -412,6 +415,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
         )
         response = GroundingCheckResponse(
             status="complete",
+            clarification_route="none",
             column_mapping=state.column_mapping or (),
             domain_knowledge=(),
         )
@@ -425,6 +429,7 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
                 "query": "Show plants aging terribly.",
                 "current_state": state.model_dump(mode="json"),
                 "previous_official_calls": [],
+                "unresolved_mappings": [],
                 "answered_clarifications": [
                     {"question": "What does aging terribly mean?", "answer": answer}
                 ],
@@ -448,23 +453,23 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_scope_gate_limits_user_literals_to_existing_mapped_concepts(self) -> None:
         self.assertIn(
-            "用户回答只能直接补充 current_state 中已有 mapped concept 的 literal / threshold",
+            "user_clarifications 只定义用户真实意图",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
-            "literal 属于回答新引入的概念或 predicate",
+            "clarification 不是 schema、metadata 或 Official business",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
-            "该回答本身不能使 State complete",
+            "新 Grounding cycle 尚未覆盖它",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
-            "只有 Gate 0 判定为 A（窄澄清）后",
+            "不要在 Check 中一点点重做 Structure / Mapping / Knowledge",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn(
-            "回答解决缺口且第 1–4 项全部通过时，才可返回 complete",
+            "全部通过才 complete",
             CHECK_GROUNDING_PROMPT,
         )
         self.assertNotIn(
@@ -478,6 +483,25 @@ class CheckClarificationContractTests(unittest.IsolatedAsyncioTestCase):
             CHECK_GROUNDING_PROMPT,
         )
         self.assertIn("优先直接复用该 mapping.phrase", CHECK_GROUNDING_PROMPT)
+
+    def test_ask_user_question_collects_only_foreseeable_user_owned_slots(
+        self,
+    ) -> None:
+        required = (
+            "已经能够明确预见、必须由用户决定且会实质改变 SQL 的未定项",
+            "threshold、上下界、比较方向",
+            "AND / OR / optional 关系",
+            "一次仍然只询问一个 clarification phrase",
+            "同一个问题中收齐这个 phrase 下已经能够预见的",
+            "必要用户参数",
+            "high、low、severe、major、multiple、significant、typical",
+            "类别、cutoff、boundary 或业务判定标准",
+            "不得为了“问完整”而猜测 Query",
+            "不得要求用户提供可由 Official metadata / knowledge 确定的信息",
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, CHECK_GROUNDING_PROMPT)
 
 
 class KnowledgeMappingContractTests(unittest.IsolatedAsyncioTestCase):
@@ -528,6 +552,7 @@ class KnowledgeMappingContractTests(unittest.IsolatedAsyncioTestCase):
                 "query": query,
                 "current_state": old.model_dump(mode="json"),
                 "knowledge_definitions": definitions,
+                "unresolved_mappings": [],
                 "relevant_column_meanings": meanings,
             },
         )
@@ -651,32 +676,32 @@ class KnowledgeMappingContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_knowledge_prompt_freezes_unsupported_mapping_changes(self) -> None:
         self.assertIn(
-            "selected_knowledge_ids 返回 []，column_mapping 必须与输入 current_state.column_mapping",
+            "selected=[] 时，mapping 必须",
             KNOWLEDGE_GROUNDING_PROMPT,
         )
-        self.assertIn("逐项、逐字、顺序完全一致", KNOWLEDGE_GROUNDING_PROMPT)
+        self.assertIn("逐项、逐字、顺序完全不变", KNOWLEDGE_GROUNDING_PROMPT)
         self.assertIn(
-            "只能修改被选中的 Official knowledge 明确、直接支持修正的",
+            "只能修改该 knowledge 明确、直接证明错误的 phrase",
             KNOWLEDGE_GROUNDING_PROMPT,
         )
-        self.assertIn("其他 phrase 的 mapping 必须", KNOWLEDGE_GROUNDING_PROMPT)
+        self.assertIn("其他 phrase 必须原样保持", KNOWLEDGE_GROUNDING_PROMPT)
 
 
 class FrozenContractTests(unittest.TestCase):
     def test_form_schema_hash_is_unchanged(self) -> None:
         self.assertEqual(
             SQL_GROUNDING_FORM_SCHEMA_SHA256,
-            "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81",
+            "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd",
         )
 
     def test_prompt_and_configuration_hashes_match_current_contract(self) -> None:
         self.assertEqual(
             SQL_GROUNDING_PROMPT_SHA256,
-            "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7",
+            "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd",
         )
         self.assertEqual(
             SQL_GROUNDING_CONFIGURATION_SHA256,
-            "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437",
+            "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110",
         )
 
 

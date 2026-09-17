@@ -13,6 +13,7 @@ from valibra_agent import grounding_callbacks
 from valibra_agent.sql_grounding.models import (
     GroundingLLMResponse,
     GroundingRuntime,
+    MappingGroundingResponse,
     SQLGroundingState,
     UserClarificationRecord,
     UserClarificationRequest,
@@ -37,9 +38,9 @@ from tests.valibra.test_stage3_submit_driven_repair import (
 
 
 FOLLOW_UP = "Now include the current power reading."
-PROMPT_SHA = "2bae9e26ee736d2662f3eafdcddc71786b21b6f668e440870e8c94b991ff38a7"
-FORM_SHA = "728fc43c6ed85e72e60c9ebf85b00487059a2871020a28764b9641c69b84ed81"
-CONFIG_SHA = "fefd442eb0c13de4499dbd10299fe8229844165cd4ddd8fd9909fd5270510437"
+PROMPT_SHA = "abcd64292037ba6fa5f6672c04383d47f9742da0ae63763afd66cc4ee8affccd"
+FORM_SHA = "3033213479034eb0b8879ae67145e9c34a1438b8f6391e956365bdec3c795afd"
+CONFIG_SHA = "f286cc3b0cf2361437d7503f6ec1eec24f2a2638e285bc23de59038eb5ee0110"
 P2_SUBMIT_RESPONSE = (
     f"passed\nFollow-up question: {FOLLOW_UP}\nBudget remaining: 4"
 )
@@ -86,7 +87,12 @@ class QueueUpdater:
             focus = "none"
             clarifications = ()
         return GroundingUpdaterResult(
-            response=GroundingLLMResponse(
+            response=MappingGroundingResponse(
+                tables=candidate.tables or (),
+                join_keys=candidate.join_keys or (),
+                column_mapping=candidate.column_mapping or (),
+                unresolved_mappings=(),
+            ) if "column_meanings" in fields else GroundingLLMResponse(
                 sql_grounding_state=candidate,
                 user_clarification_requests=clarifications,
                 next_focus_dimension=focus,
@@ -203,12 +209,12 @@ class Stage4AP2GroundingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {
                     "query", "follow_up", "column_meanings", "current_state",
-                    "user_clarifications",
+                    "user_clarifications", "unresolved_mappings",
                 },
                 {
                     "query", "follow_up", "knowledge_definitions",
                     "relevant_column_meanings", "current_state",
-                    "user_clarifications",
+                    "user_clarifications", "unresolved_mappings",
                 },
             ],
         )
