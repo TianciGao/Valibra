@@ -1,263 +1,118 @@
 # Valibra
 
-Valibra is a research fork of BIRD-Interact-ADK. It adds four-dimensional SQL grounding, completeness checks, bounded re-grounding and an official-agent fallback.
+基于 BIRD-Interact-ADK 的交互式 Text-to-SQL 研究框架。
 
-The [September 2026 release notes](docs/releases/2026-09-16/README.md) document the frozen configuration, core results, limitations and release checks. On the paired Full600 evaluation, P1 increased from 144 to 150, Full decreased from 79 to 75, and Reward increased from 124.5 to 127.5. Reported total tokens increased by 25.51%; these results do not establish an overall improvement over the baseline.
+Valibra 在编写 SQL 前，先整理任务涉及的表、连接关系、字段含义和业务知识，再检查信息是否足够。信息不足时补查或澄清；主流程无法完成时，在剩余预算内交给官方 Agent 补救。
 
-The release includes a subsequent audit-storage fix, validated offline. The 600-task evaluation was not rerun after that fix. Private trajectories, credentials and full evaluation artifacts are not distributed here.
+[框架说明](docs/architecture.md) · [安装与运行](docs/getting-started.md) · [600 题结果](docs/releases/2026-09-16/README.md) · [文档导航](docs/README.md)
 
-## Upstream BIRD-Interact-ADK
+当前正式代码位于 **`research/sql-grounding-v1`** 分支。已发布代码快照为 [`74c4588`](https://github.com/TianciGao/Valibra/commit/74c45884f0bc0084cefff156ef01840c1f2cd07f)；本 README 后续整理不改变该版本的运行逻辑。
 
-**Google ADK-based implementation of the [BIRD-Interact](https://bird-interact.github.io/) benchmark** — an interactive text-to-SQL evaluation framework with dynamic agent-environment interactions.
+## 方法
 
-The upstream project provides the official ADK agent implementation for running BIRD-Interact evaluations. Its original setup documentation follows below; it is not, by itself, a reproduction recipe for the Valibra release configuration. The service-based architecture supports both **Conversational Interaction (c-Interact)** and **Agentic Interaction (a-Interact)** modes.
+四个维度是一份逐步更新的信息表，而不是四个独立 Agent：
 
-> For the original BIRD-Interact benchmark, paper, leaderboard, and dataset details, see the [main repository](https://github.com/bird-bench/BIRD-Interact).
+| 维度 | 内容 | 作用 |
+| --- | --- | --- |
+| `tables` | 任务涉及的表 | 确定数据范围 |
+| `join_keys` | 表之间的连接条件 | 确定数据如何关联 |
+| `column_mapping` | 用户概念与数据库字段的对应关系 | 确定问题中的词指向哪些字段 |
+| `domain_knowledge` | 有来源的公式、规则等知识 | 补足仅凭表结构无法确定的业务含义 |
 
-## Architecture
+Structure 整理前两个维度，Mapping 整理字段对应关系，Knowledge 整理业务知识。Check 判断能否继续，Gate 决定是否需要重做部分 Grounding。
 
+```mermaid
+flowchart TD
+    Q["用户请求 / 后续问题"] --> G["Grounding：整理四维信息"]
+    G --> C["Check：检查缺口并有限补查"]
+    C --> R["Gate：决定是否重做"]
+    R -->|"重做"| D["草稿中重新整理与检查"]
+    D -->|"通过后提交"| M["Main：编写、执行、提交 SQL"]
+    R -->|"不重做，且 Check 已完成"| M
+    R -->|"无法完成"| F["判断是否满足补救条件"]
+    D -->|"回滚并终止主流程"| F
+    M -->|"主流程失败"| F
+    F -->|"开关开启且预算足够"| B["官方 Agent：独立补救"]
+    F -->|"条件不满足"| E["结束并记录结果"]
 ```
-orchestrator/runner.py          Parallel evaluation runner (--mode, --concurrency)
-        |
-        ├── system_agent (6000)     Google ADK agent with tools + callbacks
-        ├── user_simulator (6001)   Two-stage function-driven user simulator
-        └── db_environment (6002)   SQL execution + evaluation + per-task DB isolation
-                |
-                └── PostgreSQL      BIRD-Interact databases (Docker)
-```
 
-<p align="center">
-  <img src="docs/architecture.png" alt="BIRD-Interact-ADK Architecture" width="80%">
-</p>
+图中省略了澄清暂停与恢复等分支，完整说明见[框架与数据流](docs/architecture.md)。
 
-**Key features:**
+当前 Main 是受约束的 SQL 编写阶段：接收原请求、后续问题、四维信息和已回答的澄清，只使用 `execute_sql` 与 `submit_sql`。它不是可以重新自由调查语义的官方 Agent；后者用于 fallback。
 
-- **Modular microservices** — three independent services communicating via HTTP. Deploy on different machines, swap any component (bring your own agent, user simulator, or DB backend), or scale services independently.
-- **Extensible & research-friendly** — each service can be developed, tested, and replaced independently. Easy to plug in a new agent scaffold, experiment with different user simulation strategies, or adapt the evaluation environment for new tasks.
-- **Unified ADK agent** — both c-interact and a-interact use the same `LlmAgent` with different tools and callbacks
-- **Parallel execution** — `asyncio.Semaphore` + per-task DB copies for lock-free concurrency
-- **Multi-provider LLM** — supports any [LiteLlm-compatible provider](https://docs.litellm.ai/docs/providers) (Anthropic, OpenAI, Ollama, etc.)
-- **Per-task DB isolation** — each task gets its own database copy; SELECT-only enforcement for execute; Phase 1 snapshots for Phase 2
-- **Budget system** — bird-coin tool costs (a-interact) and clarification turn limits (c-interact), both calculated per task from ambiguity count + patience
-- **Phase control (c-interact)** — two-phase evaluation (P1 + follow-up P2), with one debug retry per phase
+## 同题 600 题结果
 
-## Quick Start
+评测模式为 **a-interact**，主模型为 **GLM-5.2**，运行配置为 **leaderboard**。P1 表示第一阶段通过，Full 表示两个阶段均通过。
 
-### 1. Prerequisites
+| 指标 | 基线 | Valibra | 变化 |
+| --- | ---: | ---: | ---: |
+| P1 通过 | 144 / 600 | 150 / 600 | +6 |
+| Full 通过 | 79 / 600 | 75 / 600 | −4 |
+| Reward | 124.5 | 127.5 | +3.0 |
+| 输入 token | 74,548,984 | 79,026,960 | +6.01% |
+| 输出 token | 7,723,158 | 24,231,520 | +213.75% |
+| 总 token | 82,272,142 | 103,258,480 | +25.51% |
 
-- Python 3.10+
-- Docker (for PostgreSQL databases)
+Reward = `0.7 × P1 通过数 + 0.3 × Full 通过数`。
 
-### 2. Set up PostgreSQL
+这是一项有限改善：P1 和 Reward 上升，Full 下降，token 消耗增加。不能据此认为整体能力或成本效率已经超过基线。
 
-If you already have the BIRD-Interact PostgreSQL container running (from the [original setup](https://github.com/bird-bench/BIRD-Interact)), you can reuse it directly — just ensure it's accessible on the configured port.
+- 逐题对比：47 题提高，47 题下降，506 题不变。
+- 主流程取得 P1 通过 84 题、Full 通过 42 题；fallback 触发 377 题，新增 P1 通过 66 题、Full 通过 33 题。
+- token 包含 Grounding、Main/fallback 和用户模拟器；旧汇总遗漏 Grounding 用量，“总 token 降低”的旧结论不再采用。
+- 统计只覆盖最终计分轨迹的已报告用量；18 题采用经授权的替代运行，另有 20 次 Grounding 尝试未报告用量。
 
-Otherwise, start the database:
+[完整口径与限制](docs/releases/2026-09-16/README.md) · [机器可读汇总](docs/releases/2026-09-16/core_results.json) · [源码与配置指纹](docs/releases/2026-09-16/candidate_manifest.json)
+
+发布前另修复了审计日志的大小限制，没有重跑 600 题；成绩仍对应修复前的冻结源码。
+
+## 开始使用
+
+先克隆正式分支，再按[安装与运行说明](docs/getting-started.md)准备 Python 环境、依赖和配置：
 
 ```bash
-docker compose up -d postgresql          # lite (18 DBs, 300 tasks)
-docker compose up -d --profile full       # full (26 DBs, 600 tasks)
+git clone --branch research/sql-grounding-v1 https://github.com/TianciGao/Valibra.git
+cd Valibra
 ```
 
-Wait for initialization to complete:
+安装依赖后，可先运行不调用模型和数据库的离线测试：
 
 ```bash
-docker compose logs -f postgresql
-# Look for: "database system is ready to accept connections"
+python -m pytest -q -p no:cacheprovider tests
 ```
 
-### 3. Install dependencies
+发布时，本地完整测试为 **513 通过、5 跳过**；不含数据集的发布副本为 **511 通过、7 跳过**。跳过项及原因见[测试说明](tests/README.md)。
 
-```bash
-conda create -p ./.venv python=3.10 -y
-source activate ./.venv
-pip install -r requirements.txt
+真实评测需要另行准备数据集、PostgreSQL、主模型和用户模拟器的访问凭据。Grounding 与 Main 的模型配置相互独立；默认配置、上游脚本和历史批跑脚本不等同于本次 600 题配置。
+
+## 仓库结构
+
+```text
+Valibra/
+├── valibra_agent/       当前方法：Grounding、Check/Gate、Main 交接、fallback
+├── system_agent/        官方 Agent、Prompt、工具及回调
+├── user_simulator/      用户模拟与两阶段交互
+├── db_environment/      数据库执行与评测服务
+├── orchestrator/        任务调度与评测流程
+├── shared/              配置、模型适配、数据库与公共类型
+├── configs/             模型预设及历史基线配置
+├── tests/               离线测试；historical/ 为已退役实验断言
+├── scripts/             环境管理、评测辅助及历史运行脚本
+├── docs/                方法、运行指南、版本说明与核心结果
+├── evidence/            历史阶段验收记录，不是当前成绩入口
+└── baseline/            初始代码快照的来源与校验信息
 ```
 
-### 4. Configure
+当前结果统一从 [`docs/releases/`](docs/releases/2026-09-16/README.md) 进入。不要将 `baseline/` 的旧依赖清单、`evidence/` 的阶段记录或已退役测试当作当前运行配置。
 
-```bash
-cp .env.example .env
-# Edit .env with your settings:
-#   - ANTHROPIC_API_KEY (or OPENAI_API_KEY for OpenAI models)
-#   - SYSTEM_AGENT_MODEL / USER_SIM_MODEL
-#   - DATASET: "lite" or "full"
-```
+## 研究边界
 
-### 5. Start services
+Grounding 信息通过格式与来源检查，并不意味着语义一定正确。复杂字段选择、业务条件遗漏和跨阶段信息保留仍是主要风险。当前版本保留了草稿隔离、有限重试和日志审计，未启用已回滚的 lexical literal 强制约束实验。
 
-```bash
-bash scripts/start_services.sh
-```
+仓库不提供完整逐题评测结果、参考 SQL、Provider 原始输出、数据库或密钥。核心结果以公开汇总形式提供，本地报告与原始轨迹不随代码发布。
 
-### 6. Run evaluation
+## 来源与许可
 
-```bash
-# a-interact (agent mode) — 300 tasks, concurrency 3
-python -m orchestrator.runner --mode a-interact --concurrency 3
+本项目基于 BIRD-Interact-ADK，沿用 BIRD-Interact 的任务、官方工具与评测流程；Valibra 的实验结果不代表上游官方结果。
 
-# c-interact (conversational mode) — 300 tasks, concurrency 5
-python -m orchestrator.runner --mode c-interact --concurrency 5
-
-# Oracle test (ground-truth SQL, validates pipeline)
-python -m orchestrator.runner --mode oracle --concurrency 5
-
-# Specific tasks
-python -m orchestrator.runner --mode a-interact --limit 10
-
-# Full dataset
-DATASET=full python -m orchestrator.runner --mode a-interact --concurrency 3
-```
-
-### 7. View results
-
-```bash
-# Generate HTML report
-python -m orchestrator.report results/eval_a_interact.json
-
-# Run test harness (validates endpoints without LLM calls)
-python -m orchestrator.test_harness --concurrency 5
-```
-
-## LLM Configuration
-
-LLM calls use [LiteLlm](https://docs.litellm.ai/docs/providers), which supports 100+ providers. The system agent and user simulator can use independent endpoints:
-
-```env
-# System agent through an OpenAI-compatible endpoint
-SYSTEM_AGENT_MODEL=openai/glm-5.2
-SYSTEM_AGENT_API_BASE=https://open.bigmodel.cn/api/paas/v4
-SYSTEM_AGENT_API_KEY=...
-
-# User simulator through Anthropic or an Anthropic-compatible endpoint
-USER_SIM_MODEL=anthropic/claude-haiku-4-5-20251001
-USER_SIM_API_BASE=https://api.anthropic.com
-USER_SIM_API_KEY=...
-```
-
-Instead of storing a key in `.env`, set `SYSTEM_AGENT_API_KEY_FILE` or
-`USER_SIM_API_KEY_FILE`. The file may contain a raw key or a saved curl example
-with an `Authorization: Bearer ...` header. For third-party Anthropic-compatible
-services that require Bearer authentication, also set
-`USER_SIM_USE_BEARER_FOR_CUSTOM_BASE=true`.
-
-See [LiteLlm providers](https://docs.litellm.ai/docs/providers) for the full list.
-
-## Dataset
-
-
-| Version  | Tasks | Databases | PostgreSQL Image                                | HuggingFace                                                                      |
-| -------- | ----- | --------- | ----------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Lite** | 300   | 18        | `shawnxxh/bird-interact-postgresql:latest`      | [bird-interact-lite](https://huggingface.co/datasets/birdsql/bird-interact-lite) |
-| **Full** | 600   | 26        | `shawnxxh/bird-interact-postgresql-full:latest` | [bird-interact-full](https://huggingface.co/datasets/birdsql/bird-interact-full) |
-
-
-### Download & Setup
-
-1. Download the dataset from HuggingFace and place it in the repo root:
-  ```bash
-   # Lite
-   git clone https://huggingface.co/datasets/birdsql/bird-interact-lite bird-interact-lite
-   # Full
-   git clone https://huggingface.co/datasets/birdsql/bird-interact-full bird-interact-full
-  ```
-2. **Ground Truth & Test Cases**: The public dataset does not include `sol_sql` and `test_cases` fields. To obtain them, email [bird.bench25@gmail.com](mailto:bird.bench25@gmail.com) with the tag `[bird-interact-lite GT&Test Cases]` or `[bird-interact-full GT&Test Cases]` in the subject. You will receive the GT file automatically.
-3. Combine public data with GT:
-  ```bash
-   python scripts/combine_public_with_gt.py \
-     bird-interact-lite/bird_interact_data.jsonl \
-     /path/to/bird_interact_gt_kg_testcases.jsonl \
-     bird-interact-lite/bird_interact_data.jsonl
-  ```
-
-Each dataset directory contains:
-
-- `bird_interact_data.jsonl` — task definitions
-- `{db_name}/` — per-database schema, column meanings, external knowledge
-
-Set `DATASET=lite` or `DATASET=full` in `.env`.
-
-## Project Structure
-
-```
-.
-├── system_agent/           # ADK agent service (port 6000)
-│   ├── agent.py            # Agent builder (c-interact / a-interact)
-│   ├── server.py           # FastAPI endpoints
-│   ├── adk_runtime.py      # ADK session management
-│   ├── callbacks.py        # a-interact: budget, turn limits
-│   ├── callbacks_cinteract.py  # c-interact: phase enforcement
-│   └── tools.py            # 9 ADK tools
-├── db_environment/         # DB service (port 6002)
-│   └── server.py           # SQL execution, evaluation, per-task DB
-├── user_simulator/         # User sim service (port 6001)
-│   ├── server.py           # Two-stage simulator (action parser + response generator)
-│   ├── prompts.py          # Prompt templates
-│   └── sql_parser.py       # SQL segmentation
-├── shared/                 # Shared utilities
-│   ├── config.py           # Centralized settings
-│   ├── llm.py              # LLM provider (LiteLlm)
-│   ├── db_utils.py         # PostgreSQL pooling & evaluation
-│   └── models.py           # Pydantic models
-├── orchestrator/           # Evaluation runners
-│   ├── runner.py           # Parallel runner (--mode, --concurrency, --oracle)
-│   ├── cinteract.py        # c-interact pipeline
-│   ├── ainteract.py        # a-interact pipeline
-│   ├── report.py           # HTML report generator
-│   └── test_harness.py     # Endpoint validation (no LLM)
-├── bird-interact-lite/     # Lite dataset (300 tasks)
-├── bird-interact-full/     # Full dataset (600 tasks)
-├── docker-compose.yml      # PostgreSQL containers
-├── scripts/                # Service startup scripts
-├── .env.example            # Configuration template
-└── requirements.txt
-```
-
-## Evaluation Modes
-
-### a-interact (Agentic Interaction)
-
-The agent autonomously decides which tools to use within a budget. Tools: `execute_sql`, `get_schema`, `get_column_meaning`, `get_knowledge_definition`, `ask_user`, `submit_sql`, etc.
-
-Budget formula: `6 + 2 * num_ambiguities + 2 * patience`
-
-### c-interact (Conversational Interaction)
-
-Fixed workflow driven by the orchestrator:
-
-1. **Phase 1**: Clarify (ask_user × N) → Submit SQL (once) → Debug if wrong (once)
-2. **Phase 2**: Follow-up question → Submit SQL (once) → Debug if wrong (once)
-
-## Results
-
-Evaluated on BIRD-Interact-Lite (300 tasks), Claude Sonnet 4.5, patience=3, v1 user simulator prompt (claude-haiku-4-5):
-
-
-| Mode                       | P1 (%) | P2 (%) | Avg Reward |
-| -------------------------- | ------ | ------ | ---------- |
-| **c-interact (ADK)**       | 44.67  | 30.67  | 0.395      |
-| **c-interact (reference)** | 40.47  | 27.09  | —          |
-| **a-interact (ADK)**       | 36.67  | 23.67  | 0.328      |
-| **a-interact (reference)** | 37.67  | 22.00  | —          |
-
-
-## License
-
-MIT License. See [LICENSE](LICENSE).
-
-## Citation
-
-```bibtex
-@inproceedings{
-huo2026birdinteract,
-title={{BIRD}-{INTERACT}: Re-imagining Text-to-{SQL} Evaluation via Lens of Dynamic Interactions},
-author={Nan Huo and Xiaohan Xu and Jinyang Li and Per Jacobsson and Shipei Lin and Bowen Qin and Binyuan Hui and Xiaolong Li and Ge Qu and Shuzheng Si and Linheng Han and Edward Alexander and Xintong Zhu and Rui Qin and Ruihan Yu and Yiyao Jin and Feige Zhou and Weihao Zhong and Yun Chen and Hongyu Liu and Chenhao Ma and Fatma Ozcan and Yannis Papakonstantinou and Reynold Cheng},
-booktitle={The Fourteenth International Conference on Learning Representations},
-year={2026},
-url={https://openreview.net/forum?id=nHrYBGujps}
-}
-```
-
-## Acknowledgement
-
-BIRD Team & Google Cloud. Built with [Google ADK](https://google.github.io/adk-docs/).
+[上游项目及引用](docs/upstream/README.md#citation) · [BIRD-Interact](https://github.com/bird-bench/BIRD-Interact) · [MIT License](LICENSE)
