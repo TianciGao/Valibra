@@ -1,64 +1,73 @@
-# Valibra
+<h1 align="center">Valibra</h1>
 
-A research framework for grounded, interactive Text-to-SQL, built on BIRD-Interact-ADK.
+<p align="center">
+  <strong>Structured Grounding for Interactive Text-to-SQL</strong><br>
+  A research framework built on BIRD-Interact-ADK.
+</p>
 
-[Report — Chinese](https://tiancigao.github.io/Valibra-site/) · [Report — Russian](https://tiancigao.github.io/Valibra-site/ru/) · [Documentation](docs/README.md) · [Getting Started](docs/getting-started.md)
+<p align="center">
+  <a href="https://tiancigao.github.io/Valibra-site/">Chinese Report</a> &nbsp;·&nbsp;
+  <a href="https://tiancigao.github.io/Valibra-site/ru/">Russian Report</a> &nbsp;·&nbsp;
+  <a href="docs/architecture.md">Architecture</a> &nbsp;·&nbsp;
+  <a href="docs/getting-started.md">Getting Started</a>
+</p>
 
-## Overview
+## Approach
 
-Valibra separates evidence gathering from SQL generation. It maintains a structured grounding state covering **tables, join keys, column mappings, and domain knowledge**, with user clarification and budget-constrained evidence retrieval.
+Valibra separates evidence gathering from SQL generation. A shared grounding state records **tables, join keys, column mappings, and domain knowledge**.
 
-Structure, Mapping, and Knowledge build this state. Check assesses whether it supports SQL generation; Gate routes evidence-driven revisions through an isolated draft that is committed only after validation. The SQL-writing agent then executes and submits queries using the checked state. If the primary workflow cannot complete the task, an independent BIRD-Interact agent may attempt recovery within the remaining budget.
+1. **Ground.** Structure, Mapping, and Knowledge organize database evidence and user clarifications.
+2. **Check and revise.** Check assesses information sufficiency; Gate routes evidence-driven revisions through isolated drafts, committed only after validation.
+3. **Generate and recover.** The SQL-writing agent uses the checked state to execute and submit queries. If the primary workflow fails, an independent BIRD-Interact agent may attempt recovery within the remaining budget.
 
-See the [architecture guide](docs/architecture.md) for stage responsibilities, state transitions, and recovery conditions.
+The [architecture guide](docs/architecture.md) details tool permissions, state transitions, and recovery conditions.
 
-## Evaluation
+## Results
 
-Archived comparison on the same **600 BIRD-Interact Full tasks**, using **a-interact** with **GLM-5.2** and a **Claude Haiku 4.5** user simulator.
+Archived evaluation on **600 BIRD-Interact Full tasks**, comparing Valibra with the BIRD-Interact agent baseline.
 
-| Metric | BIRD-Interact agent baseline | Valibra |
-| --- | ---: | ---: |
-| Phase 1 passed | 144 / 600 (24.00%) | 150 / 600 (25.00%) |
-| Both phases passed | 79 / 600 (13.17%) | 75 / 600 (12.50%) |
-| Total reward | 124.5 | 127.5 |
-| Reported total tokens | 82,272,142 | 103,258,480 |
+**Protocol:** a-interact &nbsp;·&nbsp; **Model:** GLM-5.2 &nbsp;·&nbsp; **User simulator:** Claude Haiku 4.5
 
-Reward is `0.7 × Phase 1 passes + 0.3 × both-phase passes`. Token totals include grounding, SQL generation, recovery, and user simulation.
+| Metric | Baseline | Valibra | Change |
+| :--- | ---: | ---: | ---: |
+| Phase 1 passed | 144 / 600 | 150 / 600 | +6 |
+| Both phases passed | 79 / 600 | 75 / 600 | −4 |
+| Total reward | 124.5 | 127.5 | +3.0 |
+| Reported tokens | 82,272,142 | 103,258,480 | +25.51% |
 
-The reward gain is modest: full-task completion declined and reported token use increased by 25.5%. These results do not establish an overall performance or cost advantage. They describe the archived evaluation, not a new benchmark run of subsequent code changes.
+Reward = `0.7 × Phase 1 passes + 0.3 × both-phase passes`. Token totals include grounding, SQL generation, recovery, and user simulation.
 
-[Evaluation protocol and limitations](docs/releases/2026-09-16/README.md) · [Results JSON](docs/releases/2026-09-16/core_results.json) · [Configuration manifest](docs/releases/2026-09-16/candidate_manifest.json)
+> Reward improved modestly, while full-task completion declined and token use increased. These results apply to the archived evaluation snapshot and do not establish an overall performance or cost advantage.
 
-## Installation
+[Protocol and limitations](docs/releases/2026-09-16/README.md) · [Results JSON](docs/releases/2026-09-16/core_results.json) · [Configuration manifest](docs/releases/2026-09-16/candidate_manifest.json)
 
-The commands below use Python 3.12 and a Linux / WSL shell.
+## Getting Started
+
+Use Python 3.12 with a Linux / WSL shell. Live evaluation also requires benchmark data, PostgreSQL databases, and model credentials; see the [setup guide](docs/getting-started.md).
+
+<details>
+<summary><strong>Install and run offline tests</strong></summary>
 
 ```bash
 git clone --branch research/sql-grounding-v1 https://github.com/TianciGao/Valibra.git
 cd Valibra
+
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pip install pytest pytest-subtests
-```
 
-Run the offline test suite:
-
-```bash
 python -m pytest -q -p no:cacheprovider tests
 ```
 
-Live evaluation additionally requires the benchmark data, PostgreSQL databases, and model credentials. Follow the [setup guide](docs/getting-started.md) before starting services or running paid model calls. See [test documentation](tests/README.md) for optional dependencies and skipped checks.
+These tests do not require model calls or a running database. Optional dependencies and skipped checks are documented in [tests/README.md](tests/README.md).
 
-## Code Organization
+</details>
 
-- [`valibra_agent/`](valibra_agent/): grounding, state validation, SQL generation, and recovery.
-- [`system_agent/`](system_agent/): upstream agent implementation.
-- [`db_environment/`](db_environment/), [`user_simulator/`](user_simulator/), [`orchestrator/`](orchestrator/): execution environment, interaction, and evaluation.
-- [`tests/`](tests/), [`docs/`](docs/README.md): tests, technical documentation, and release results.
+Core implementation: [`valibra_agent/`](valibra_agent/) · Upstream agent: [`system_agent/`](system_agent/) · [Documentation index](docs/README.md)
 
 ## License and Acknowledgments
 
-Released under the [MIT License](LICENSE). Built on BIRD-Interact-ADK and the [BIRD-Interact](https://github.com/bird-bench/BIRD-Interact) benchmark. Valibra's experimental results are separate from the upstream benchmark results.
+[MIT License](LICENSE). Built on BIRD-Interact-ADK and the [BIRD-Interact](https://github.com/bird-bench/BIRD-Interact) benchmark. Valibra's results are independent research findings, not upstream benchmark results.
 
-See the [upstream attribution and citation](docs/upstream/README.md#citation).
+[Upstream attribution and citation](docs/upstream/README.md#citation)
