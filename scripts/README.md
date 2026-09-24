@@ -9,12 +9,25 @@
 | 工作 | 入口 |
 | --- | --- |
 | 离线测试 | `python -m pytest -q -p no:cacheprovider tests` |
+| 历史 Main 交接审计 | [audit_main_handoff.py](audit_main_handoff.py)，只读本地归档，不调用模型或数据库 |
 | 启动隔离 PostgreSQL | [start_research_db.sh](start_research_db.sh)，先核对容器与端口 |
 | 启动当前 HTTP 服务 | 按[运行指南](../docs/getting-started.md)显式启动三个 Python 模块 |
 | 调度评测 | `python -m orchestrator.runner`，连接已核验的 Valibra 端口 |
 | 检查模型预设 | [dry_run_model_preset.py](dry_run_model_preset.py)，先查看帮助与输入参数 |
 
-## 环境管理
+## 离线交接审计
+
+提供本地最终计分尝试索引（每行包含 `task`、`candidate_source`、`baseline`、`candidate`、`primary_p1`、`primary_full`、`fallback`、`replaced`），从仓库根目录运行：
+
+```bash
+python scripts/audit_main_handoff.py --root . --index /path/to/task_comparison.json --summary-only
+```
+
+脚本读取索引指向的 `official_result.json` 和 `provider_audits/`，按每题每阶段的首次真实 SQL Writer 请求检查摘要省略标记，并比对在此之前同题已取得的、带 enum 标记的字段说明。只打印统计、任务标识和哈希；不输出原始 Prompt、SQL 或参考答案。不加 `--summary-only` 可输出逐题诊断计数。
+
+枚举字符串未出现只是字面覆盖诊断，不等于语义遗漏或失败原因；不同结果组不是因果对照。该工具不恢复旧 Session、不更改正式流程，也不构成新的模型或端到端评测。原始归档和逐题诊断应保留本地，不提交到仓库。
+
+## 环境管理脚本
 
 - `research_env.sh`：早期研究环境隔离设置。会清理或覆盖部分 Provider 变量并将 Main/模拟器指向离线端点；不应在配置好真实评测后再次加载，也不能代替 Grounding 配置审查。
 - `start_valibra_services.sh / stop_valibra_services.sh`：早期 Valibra 服务管理，固定端口和本地虚拟环境；启动会加载上述环境脚本。
