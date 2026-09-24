@@ -2,6 +2,10 @@
 
 基于 BIRD-Interact-ADK 的交互式 Text-to-SQL 研究框架。
 
+在线报告：[中文版](https://tiancigao.github.io/Valibra-site/) · [Русская версия](https://tiancigao.github.io/Valibra-site/ru/)
+
+包含框架设计、实际案例、600 题评测分析与结果表下载。
+
 Valibra 在编写 SQL 前，先整理任务涉及的表、连接关系、字段含义和业务知识，再检查信息是否足够。信息不足时补查或澄清；主流程无法完成时，在剩余预算内交给官方 Agent 补救。
 
 [框架说明](docs/architecture.md) · [安装与运行](docs/getting-started.md) · [600 题结果](docs/releases/2026-09-16/README.md) · [文档导航](docs/README.md)
