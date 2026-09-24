@@ -27,6 +27,19 @@ python scripts/audit_main_handoff.py --root . --index /path/to/task_comparison.j
 
 枚举字符串未出现只是字面覆盖诊断，不等于语义遗漏或失败原因；不同结果组不是因果对照。该工具不恢复旧 Session、不更改正式流程，也不构成新的模型或端到端评测。原始归档和逐题诊断应保留本地，不提交到仓库。
 
+## 有界单轮交接实验
+
+`probe_main_handoff.py` 是独立诊断工具，不是正式 Agent 或端到端评测。它固定比较 4 个归档字面缺口案例与 2 个历史成功控制：A 为首次 P1 Main 原始输入，B 仅追加在此之前同题已取得的全部可解析映射字段说明。每组一次、合计最多 12 次模型请求，无自动重试、不执行返回的工具调用或 SQL、不恢复历史 Runtime。
+
+先离线准备，再在取得付费授权后显式执行：
+
+```bash
+python scripts/probe_main_handoff.py --output research-runtime/NEW_EXPERIMENT --prepare-index /path/to/task_comparison.json
+python scripts/probe_main_handoff.py --output research-runtime/NEW_EXPERIMENT --run-paid
+```
+
+沿用归档 GLM-5.2 参数（每次输出上限 32,768 token），使用当前匹配模型的 HTTPS 连接配置。原始输入、证据来源哈希与响应仅写入忽略目录；启动后不支持重跑同一目录，避免重复计费。单轮候选的变化不等于数据库通过、端到端收益或统计显著改善。
+
 ## 环境管理脚本
 
 - `research_env.sh`：早期研究环境隔离设置。会清理或覆盖部分 Provider 变量并将 Main/模拟器指向离线端点；不应在配置好真实评测后再次加载，也不能代替 Grounding 配置审查。
